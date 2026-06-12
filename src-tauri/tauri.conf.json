@@ -14,8 +14,13 @@
     "windows": [
       {
         "title": "CodeCliManager",
-        "width": 800,
-        "height": 600
+        "width": 896,
+        "height": 560,
+        "minWidth": 576,
+        "minHeight": 360,
+        "center": false,
+        "visible": false,
+        "resizable": true
       }
     ],
     "security": {

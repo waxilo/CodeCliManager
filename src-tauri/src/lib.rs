@@ -1,10 +1,19 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tauri::{AppHandle, Emitter};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, RecvTimeoutError},
+    Arc, Mutex,
+};
+use std::thread;
+use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewWindow};
+
+mod model_fetch;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Message {
@@ -24,6 +33,8 @@ struct Conversation {
     platform: String,
     #[serde(default)]
     project_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_path: Option<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -57,22 +68,723 @@ fn get_claude_history_path() -> PathBuf {
     path
 }
 
+fn get_claude_settings_path() -> PathBuf {
+    let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push(".claude");
+    let settings = path.join("settings.json");
+    if settings.exists() {
+        return settings;
+    }
+    let legacy = path.join("claude.json");
+    if legacy.exists() {
+        return legacy;
+    }
+    settings
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCodeApiConfig {
+    base_url: String,
+    #[serde(default)]
+    has_api_key: bool,
+    default_model: String,
+    haiku_model: String,
+    sonnet_model: String,
+    opus_model: String,
+    config_path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveClaudeCodeApiConfig {
+    base_url: String,
+    api_key: Option<String>,
+    default_model: String,
+    haiku_model: String,
+    sonnet_model: String,
+    opus_model: String,
+}
+
+fn read_claude_settings_json() -> serde_json::Value {
+    let path = get_claude_settings_path();
+    if !path.exists() {
+        return serde_json::json!({ "env": {} });
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_else(|| serde_json::json!({ "env": {} }))
+}
+
+fn write_claude_settings_json(settings: &serde_json::Value) -> Result<(), String> {
+    let path = get_claude_settings_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    }
+    let content =
+        serde_json::to_string_pretty(settings).map_err(|e| format!("Failed to encode config: {e}"))?;
+    fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+}
+
+fn env_string(env: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
+    env.get(key)
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+fn set_env_string(env: &mut serde_json::Map<String, serde_json::Value>, key: &str, value: &str) {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        env.remove(key);
+    } else {
+        env.insert(key.to_string(), serde_json::Value::String(trimmed.to_string()));
+    }
+}
+
+fn claude_api_key_from_env(env: &serde_json::Map<String, serde_json::Value>) -> String {
+    let auth_token = env_string(env, "ANTHROPIC_AUTH_TOKEN");
+    if !auth_token.is_empty() {
+        return auth_token;
+    }
+    env_string(env, "ANTHROPIC_API_KEY")
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ApiProfile {
+    id: String,
+    name: String,
+    base_url: String,
+    api_key: String,
+    default_model: String,
+    haiku_model: String,
+    sonnet_model: String,
+    opus_model: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct ApiProfilesStore {
+    #[serde(default)]
+    active_profile_id: Option<String>,
+    #[serde(default)]
+    profiles: Vec<ApiProfile>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ApiProfileItem {
+    id: String,
+    name: String,
+    base_url: String,
+    default_model: String,
+    has_api_key: bool,
+    is_active: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ApiProfilesState {
+    active_profile_id: Option<String>,
+    profiles: Vec<ApiProfileItem>,
+    current: ClaudeCodeApiConfig,
+}
+
+fn get_api_profiles_path() -> PathBuf {
+    get_data_path().join("api-profiles.json")
+}
+
+fn load_api_profiles_store() -> ApiProfilesStore {
+    let path = get_api_profiles_path();
+    if !path.exists() {
+        return ApiProfilesStore::default();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_api_profiles_store(store: &ApiProfilesStore) -> Result<(), String> {
+    let data_path = get_data_path();
+    if !data_path.exists() {
+        fs::create_dir_all(&data_path).map_err(|e| format!("Failed to create data dir: {e}"))?;
+    }
+    let content = serde_json::to_string_pretty(store)
+        .map_err(|e| format!("Failed to encode api profiles: {e}"))?;
+    fs::write(get_api_profiles_path(), content)
+        .map_err(|e| format!("Failed to write api profiles: {e}"))
+}
+
+fn config_from_env(env: &serde_json::Map<String, serde_json::Value>) -> ClaudeCodeApiConfig {
+    let api_key = claude_api_key_from_env(env);
+    ClaudeCodeApiConfig {
+        base_url: env_string(env, "ANTHROPIC_BASE_URL"),
+        has_api_key: !api_key.is_empty(),
+        default_model: env_string(env, "ANTHROPIC_MODEL"),
+        haiku_model: env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        sonnet_model: env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        opus_model: env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        config_path: get_claude_settings_path().to_string_lossy().to_string(),
+    }
+}
+
+fn config_from_profile(profile: &ApiProfile) -> ClaudeCodeApiConfig {
+    ClaudeCodeApiConfig {
+        base_url: profile.base_url.clone(),
+        has_api_key: !profile.api_key.trim().is_empty(),
+        default_model: profile.default_model.clone(),
+        haiku_model: profile.haiku_model.clone(),
+        sonnet_model: profile.sonnet_model.clone(),
+        opus_model: profile.opus_model.clone(),
+        config_path: get_claude_settings_path().to_string_lossy().to_string(),
+    }
+}
+
+fn profile_to_save_config(profile: &ApiProfile) -> SaveClaudeCodeApiConfig {
+    SaveClaudeCodeApiConfig {
+        base_url: profile.base_url.clone(),
+        api_key: Some(profile.api_key.clone()),
+        default_model: profile.default_model.clone(),
+        haiku_model: profile.haiku_model.clone(),
+        sonnet_model: profile.sonnet_model.clone(),
+        opus_model: profile.opus_model.clone(),
+    }
+}
+
+fn apply_save_config_to_settings(config: &SaveClaudeCodeApiConfig) -> Result<(), String> {
+    let mut settings = read_claude_settings_json();
+    let env_value = settings
+        .as_object_mut()
+        .map(|obj| {
+            if !obj.contains_key("env") {
+                obj.insert("env".to_string(), serde_json::json!({}));
+            }
+            obj.get_mut("env").unwrap()
+        })
+        .ok_or_else(|| "Invalid settings.json structure".to_string())?;
+
+    let env = env_value
+        .as_object_mut()
+        .ok_or_else(|| "Invalid env section in settings.json".to_string())?;
+
+    set_env_string(env, "ANTHROPIC_BASE_URL", &config.base_url);
+    set_env_string(env, "ANTHROPIC_MODEL", &config.default_model);
+    set_env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", &config.haiku_model);
+    set_env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", &config.sonnet_model);
+    set_env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", &config.opus_model);
+
+    if let Some(api_key) = config.api_key.as_ref().filter(|key| !key.trim().is_empty()) {
+        let trimmed = api_key.trim();
+        env.insert(
+            "ANTHROPIC_AUTH_TOKEN".to_string(),
+            serde_json::Value::String(trimmed.to_string()),
+        );
+        if env.contains_key("ANTHROPIC_API_KEY") {
+            env.insert(
+                "ANTHROPIC_API_KEY".to_string(),
+                serde_json::Value::String(trimmed.to_string()),
+            );
+        }
+    }
+
+    write_claude_settings_json(&settings)
+}
+
+fn build_api_profiles_state(store: &ApiProfilesStore) -> ApiProfilesState {
+    ApiProfilesState {
+        active_profile_id: store.active_profile_id.clone(),
+        profiles: store
+            .profiles
+            .iter()
+            .map(|profile| ApiProfileItem {
+                id: profile.id.clone(),
+                name: profile.name.clone(),
+                base_url: profile.base_url.clone(),
+                default_model: profile.default_model.clone(),
+                has_api_key: !profile.api_key.trim().is_empty(),
+                is_active: store.active_profile_id.as_deref() == Some(profile.id.as_str()),
+            })
+            .collect(),
+        current: get_claude_api_config(),
+    }
+}
+
+fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) {
+    if !store.profiles.is_empty() {
+        return;
+    }
+
+    let settings = read_claude_settings_json();
+    let env = settings
+        .get("env")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let config = config_from_env(&env);
+    if config.base_url.is_empty() && !config.has_api_key && config.default_model.is_empty() {
+        return;
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let profile = ApiProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: "默认配置".to_string(),
+        base_url: config.base_url,
+        api_key: claude_api_key_from_env(&env),
+        default_model: config.default_model,
+        haiku_model: config.haiku_model,
+        sonnet_model: config.sonnet_model,
+        opus_model: config.opus_model,
+        created_at: now,
+        updated_at: now,
+    };
+    store.active_profile_id = Some(profile.id.clone());
+    store.profiles.push(profile);
+    let _ = save_api_profiles_store(store);
+}
+
+fn load_api_profiles_state() -> ApiProfilesState {
+    let mut store = load_api_profiles_store();
+    ensure_default_profile_from_live(&mut store);
+    build_api_profiles_state(&store)
+}
+
+#[tauri::command]
+fn get_api_profiles_state() -> ApiProfilesState {
+    load_api_profiles_state()
+}
+
+#[tauri::command]
+fn switch_api_profile(profile_id: String) -> Result<ApiProfilesState, String> {
+    let mut store = load_api_profiles_store();
+    let profile = store
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .cloned()
+        .ok_or_else(|| "API profile not found".to_string())?;
+
+    apply_save_config_to_settings(&profile_to_save_config(&profile))?;
+    store.active_profile_id = Some(profile_id);
+    save_api_profiles_store(&store)?;
+    Ok(build_api_profiles_state(&store))
+}
+
+#[tauri::command]
+fn upsert_api_profile(
+    profile_id: Option<String>,
+    name: String,
+    config: SaveClaudeCodeApiConfig,
+    apply: bool,
+) -> Result<ApiProfilesState, String> {
+    let trimmed_name = name.trim();
+    if trimmed_name.is_empty() {
+        return Err("Profile name cannot be empty".to_string());
+    }
+
+    let mut store = load_api_profiles_store();
+    let now = chrono::Utc::now().timestamp();
+
+    let resolved_id = if let Some(id) = profile_id.filter(|value| !value.trim().is_empty()) {
+        let profile = store
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.id == id)
+            .ok_or_else(|| "API profile not found".to_string())?;
+
+        profile.name = trimmed_name.to_string();
+        profile.base_url = config.base_url.trim().to_string();
+        profile.default_model = config.default_model.trim().to_string();
+        profile.haiku_model = config.haiku_model.trim().to_string();
+        profile.sonnet_model = config.sonnet_model.trim().to_string();
+        profile.opus_model = config.opus_model.trim().to_string();
+        profile.updated_at = now;
+
+        if let Some(api_key) = config.api_key.filter(|key| !key.trim().is_empty()) {
+            profile.api_key = api_key.trim().to_string();
+        }
+
+        profile.id.clone()
+    } else {
+        let api_key = config
+            .api_key
+            .filter(|key| !key.trim().is_empty())
+            .unwrap_or_default();
+        let profile = ApiProfile {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: trimmed_name.to_string(),
+            base_url: config.base_url.trim().to_string(),
+            api_key: api_key.trim().to_string(),
+            default_model: config.default_model.trim().to_string(),
+            haiku_model: config.haiku_model.trim().to_string(),
+            sonnet_model: config.sonnet_model.trim().to_string(),
+            opus_model: config.opus_model.trim().to_string(),
+            created_at: now,
+            updated_at: now,
+        };
+        let id = profile.id.clone();
+        store.profiles.push(profile);
+        id
+    };
+
+    if apply {
+        let profile = store
+            .profiles
+            .iter()
+            .find(|profile| profile.id == resolved_id)
+            .cloned()
+            .ok_or_else(|| "API profile not found".to_string())?;
+        apply_save_config_to_settings(&profile_to_save_config(&profile))?;
+        store.active_profile_id = Some(resolved_id);
+    }
+
+    save_api_profiles_store(&store)?;
+    Ok(build_api_profiles_state(&store))
+}
+
+#[tauri::command]
+fn delete_api_profile(profile_id: String) -> Result<ApiProfilesState, String> {
+    let mut store = load_api_profiles_store();
+
+    if store.active_profile_id.as_deref() == Some(profile_id.as_str()) {
+        return Err("Cannot delete the active API profile".to_string());
+    }
+
+    let before = store.profiles.len();
+    store.profiles.retain(|profile| profile.id != profile_id);
+    if store.profiles.len() == before {
+        return Err("API profile not found".to_string());
+    }
+
+    save_api_profiles_store(&store)?;
+    Ok(build_api_profiles_state(&store))
+}
+
+fn get_cc_switch_config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CC_SWITCH_CONFIG_DIR") {
+        let path = PathBuf::from(dir.trim());
+        if path.is_dir() {
+            return path;
+        }
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".cc-switch")
+}
+
+fn get_cc_switch_db_path() -> PathBuf {
+    get_cc_switch_config_dir().join("cc-switch.db")
+}
+
+struct CcSwitchProviderRow {
+    name: String,
+    settings_config: String,
+}
+
+fn read_cc_switch_claude_providers() -> Result<Vec<CcSwitchProviderRow>, String> {
+    let db_path = get_cc_switch_db_path();
+    if !db_path.exists() {
+        return Err(format!(
+            "未找到 CC Switch 数据库：{}",
+            db_path.display()
+        ));
+    }
+
+    let conn = rusqlite::Connection::open(&db_path)
+        .map_err(|e| format!("无法打开 CC Switch 数据库: {e}"))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT name, settings_config
+             FROM providers
+             WHERE app_type = 'claude'
+             ORDER BY sort_index ASC, created_at ASC",
+        )
+        .map_err(|e| format!("读取 CC Switch 配置失败: {e}"))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(CcSwitchProviderRow {
+                name: row.get(0)?,
+                settings_config: row.get(1)?,
+            })
+        })
+        .map_err(|e| format!("读取 CC Switch 配置失败: {e}"))?;
+
+    let mut providers = Vec::new();
+    for row in rows {
+        providers.push(row.map_err(|e| format!("读取 CC Switch 配置失败: {e}"))?);
+    }
+    Ok(providers)
+}
+
+fn profile_from_cc_switch_row(name: &str, settings_config: &str, now: i64) -> Option<ApiProfile> {
+    let config: serde_json::Value = serde_json::from_str(settings_config).ok()?;
+    let env = config.get("env").and_then(|value| value.as_object())?;
+    let api_config = config_from_env(env);
+    if api_config.base_url.is_empty()
+        && !api_config.has_api_key
+        && api_config.default_model.is_empty()
+    {
+        return None;
+    }
+
+    Some(ApiProfile {
+        id: uuid::Uuid::new_v4().to_string(),
+        name: name.trim().to_string(),
+        base_url: api_config.base_url,
+        api_key: claude_api_key_from_env(env),
+        default_model: api_config.default_model,
+        haiku_model: api_config.haiku_model,
+        sonnet_model: api_config.sonnet_model,
+        opus_model: api_config.opus_model,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+fn is_duplicate_api_profile(store: &ApiProfilesStore, profile: &ApiProfile) -> bool {
+    store.profiles.iter().any(|existing| {
+        existing.name == profile.name
+            || (existing.base_url == profile.base_url
+                && !profile.api_key.is_empty()
+                && existing.api_key == profile.api_key)
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CcSwitchImportResult {
+    imported_count: usize,
+    skipped_count: usize,
+    skipped_names: Vec<String>,
+    cc_switch_path: String,
+    state: ApiProfilesState,
+}
+
+#[tauri::command]
+fn import_cc_switch_profiles() -> Result<CcSwitchImportResult, String> {
+    let cc_switch_path = get_cc_switch_db_path();
+    let providers = read_cc_switch_claude_providers()?;
+    if providers.is_empty() {
+        return Err("CC Switch 中没有 Claude 配置可导入".to_string());
+    }
+
+    let mut store = load_api_profiles_store();
+    ensure_default_profile_from_live(&mut store);
+
+    let now = chrono::Utc::now().timestamp();
+    let mut imported_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut skipped_names = Vec::new();
+
+    for provider in providers {
+        let Some(profile) = profile_from_cc_switch_row(&provider.name, &provider.settings_config, now)
+        else {
+            skipped_count += 1;
+            skipped_names.push(format!("{}（配置为空）", provider.name));
+            continue;
+        };
+
+        if is_duplicate_api_profile(&store, &profile) {
+            skipped_count += 1;
+            skipped_names.push(profile.name);
+            continue;
+        }
+
+        store.profiles.push(profile);
+        imported_count += 1;
+    }
+
+    if imported_count == 0 {
+        return Err(if skipped_count > 0 {
+            "所有 CC Switch 配置均已存在，无需重复导入".to_string()
+        } else {
+            "没有可导入的有效 CC Switch 配置".to_string()
+        });
+    }
+
+    save_api_profiles_store(&store)?;
+    Ok(CcSwitchImportResult {
+        imported_count,
+        skipped_count,
+        skipped_names,
+        cc_switch_path: cc_switch_path.to_string_lossy().to_string(),
+        state: build_api_profiles_state(&store),
+    })
+}
+
+#[tauri::command]
+fn get_api_profile_config(profile_id: String) -> Result<ClaudeCodeApiConfig, String> {
+    let store = load_api_profiles_store();
+    let profile = store
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "API profile not found".to_string())?;
+    Ok(config_from_profile(profile))
+}
+
+fn resolve_api_key_for_fetch(api_key: Option<String>, profile_id: Option<String>) -> Result<String, String> {
+    if let Some(key) = api_key.filter(|value| !value.trim().is_empty()) {
+        return Ok(key.trim().to_string());
+    }
+
+    if let Some(profile_id) = profile_id.filter(|value| !value.trim().is_empty()) {
+        let store = load_api_profiles_store();
+        let profile = store
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id)
+            .ok_or_else(|| "API profile not found".to_string())?;
+        if !profile.api_key.trim().is_empty() {
+            return Ok(profile.api_key.trim().to_string());
+        }
+    }
+
+    let settings = read_claude_settings_json();
+    let env = settings
+        .get("env")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let key = claude_api_key_from_env(&env);
+    if key.trim().is_empty() {
+        return Err("拉取模型需要填写 API Key".to_string());
+    }
+    Ok(key)
+}
+
+#[tauri::command]
+async fn fetch_api_models(
+    base_url: String,
+    api_key: Option<String>,
+    profile_id: Option<String>,
+) -> Result<Vec<model_fetch::FetchedModel>, String> {
+    let trimmed_base_url = base_url.trim();
+    if trimmed_base_url.is_empty() {
+        return Err("Base URL 不能为空".to_string());
+    }
+
+    let resolved_key = resolve_api_key_for_fetch(api_key, profile_id)?;
+    model_fetch::fetch_models(trimmed_base_url, &resolved_key).await
+}
+
+#[tauri::command]
+fn get_claude_api_config() -> ClaudeCodeApiConfig {
+    let settings = read_claude_settings_json();
+    let env = settings
+        .get("env")
+        .and_then(|value| value.as_object())
+        .cloned()
+        .unwrap_or_default();
+    config_from_env(&env)
+}
+
+#[tauri::command]
+fn save_claude_api_config(config: SaveClaudeCodeApiConfig) -> Result<ClaudeCodeApiConfig, String> {
+    apply_save_config_to_settings(&config)?;
+    Ok(get_claude_api_config())
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct AppOverlay {
+    deleted_session_ids: Vec<String>,
+    #[serde(default)]
+    title_overrides: HashMap<String, String>,
+}
+
+fn get_overlay_path() -> PathBuf {
+    get_data_path().join("overlay.json")
+}
+
+fn load_overlay() -> AppOverlay {
+    let path = get_overlay_path();
+    if !path.exists() {
+        return AppOverlay::default();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn save_overlay(overlay: &AppOverlay) {
+    let data_path = get_data_path();
+    if !data_path.exists() {
+        let _ = fs::create_dir_all(&data_path);
+    }
+    if let Ok(content) = serde_json::to_string_pretty(overlay) {
+        let _ = fs::write(get_overlay_path(), content);
+    }
+}
+
+fn mark_session_deleted(session_id: &str) {
+    let mut overlay = load_overlay();
+    if !overlay.deleted_session_ids.iter().any(|id| id == session_id) {
+        overlay.deleted_session_ids.push(session_id.to_string());
+        save_overlay(&overlay);
+    }
+}
+
+fn is_deleted_session(session_id: &str) -> bool {
+    load_overlay()
+        .deleted_session_ids
+        .iter()
+        .any(|id| id == session_id)
+}
+
+fn get_title_override(session_id: &str) -> Option<String> {
+    load_overlay().title_overrides.get(session_id).cloned()
+}
+
+fn set_title_override(session_id: &str, title: &str) {
+    let mut overlay = load_overlay();
+    overlay
+        .title_overrides
+        .insert(session_id.to_string(), title.to_string());
+    save_overlay(&overlay);
+}
+
+fn apply_title_override(conv: &mut Conversation) {
+    if let Some(title) = get_title_override(&conv.id) {
+        conv.title = title;
+    }
+}
+
+fn is_agent_session(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.starts_with("agent-"))
+        .unwrap_or(false)
+}
+
 fn load_claude_history() -> Vec<Conversation> {
     let root = get_claude_history_path();
     if !root.exists() {
         return Vec::new();
     }
-    
+
     let mut files = Vec::new();
     collect_jsonl_files(&root, &mut files);
-    
+
     let mut conversations = Vec::new();
     for path in files {
-        if let Some(conv) = parse_claude_session(&path) {
-            conversations.push(conv);
+        if is_agent_session(&path) {
+            continue;
+        }
+        if let Some(mut conv) = parse_claude_session(&path) {
+            if !is_deleted_session(&conv.id) {
+                apply_title_override(&mut conv);
+                conversations.push(conv);
+            }
         }
     }
-    
+
     conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     conversations
 }
@@ -214,6 +926,8 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             }
         })
     }).unwrap_or_else(|| "Untitled".to_string());
+
+    let project_dir = project_dir.or_else(|| decode_project_dir_from_jsonl_path(path));
     
     Some(Conversation {
         id: session_id,
@@ -221,9 +935,18 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
         messages,
         platform: "claude".to_string(),
         project_dir,
+        source_path: Some(path.to_string_lossy().to_string()),
         created_at: created_at.unwrap_or_default(),
         updated_at: updated_at.unwrap_or_default(),
     })
+}
+
+/// 从 JSONL 文件所在目录名反推工作目录（Claude 编码规则：非字母数字替换为 `-`）
+fn decode_project_dir_from_jsonl_path(path: &PathBuf) -> Option<String> {
+    path.parent()
+        .and_then(|p| p.file_name())
+        .and_then(|name| name.to_str())
+        .map(|encoded| encoded.replace('-', "/"))
 }
 
 // 从 content 中提取文本和思考内容
@@ -289,10 +1012,27 @@ fn detect_os() -> String {
     std::env::consts::OS.to_string()
 }
 
+fn load_persisted_state() -> AppState {
+    let path = get_data_path().join("state.json");
+    if path.exists() {
+        match fs::read_to_string(&path) {
+            Ok(content) => {
+                let mut state: AppState =
+                    serde_json::from_str(&content).unwrap_or_else(|_| get_default_state());
+                state.current_platform = detect_os();
+                state
+            }
+            Err(_) => get_default_state(),
+        }
+    } else {
+        get_default_state()
+    }
+}
+
 fn load_app_state() -> AppState {
     let claude_history = load_claude_history();
     let os = detect_os();
-    
+
     if !claude_history.is_empty() {
         AppState {
             conversations: claude_history,
@@ -301,19 +1041,7 @@ fn load_app_state() -> AppState {
             current_platform: os,
         }
     } else {
-        let path = get_data_path().join("state.json");
-        if path.exists() {
-            match fs::read_to_string(&path) {
-                Ok(content) => {
-                    let mut state: AppState = serde_json::from_str(&content).unwrap_or_else(|_| get_default_state());
-                    state.current_platform = os;
-                    state
-                },
-                Err(_) => get_default_state(),
-            }
-        } else {
-            get_default_state()
-        }
+        load_persisted_state()
     }
 }
 
@@ -345,6 +1073,7 @@ fn get_default_state() -> AppState {
         ],
         platform: "claude".to_string(),
         project_dir: None,
+        source_path: None,
         created_at: two_hours_ago,
         updated_at: two_hours_ago + 1,
     });
@@ -370,6 +1099,7 @@ fn get_default_state() -> AppState {
         ],
         platform: "claude".to_string(),
         project_dir: None,
+        source_path: None,
         created_at: hour_ago,
         updated_at: hour_ago + 1,
     });
@@ -395,6 +1125,7 @@ fn get_default_state() -> AppState {
         ],
         platform: "claude".to_string(),
         project_dir: None,
+        source_path: None,
         created_at: now - 300,
         updated_at: now - 299,
     });
@@ -439,7 +1170,516 @@ struct SessionEventPayload {
     conversation_id: String,
     title: String,
     messages: Vec<Message>,
+    project_dir: Option<String>,
     updated_at: i64,
+}
+
+/// 流式消息块，参考 claudecodeui 的 NormalizedMessage.kind
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct MessageChunkPayload {
+    conversation_id: String,
+    kind: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct SessionErrorPayload {
+    conversation_id: Option<String>,
+    error: String,
+}
+
+enum StreamOutcome {
+    Success(Option<String>),
+    Failed {
+        session_id: Option<String>,
+        error: String,
+    },
+}
+
+fn emit_message_chunk(app: &AppHandle, conversation_id: &str, kind: &str, content: &str) {
+    let payload = MessageChunkPayload {
+        conversation_id: conversation_id.to_string(),
+        kind: kind.to_string(),
+        content: content.to_string(),
+    };
+    let _ = app.emit("message-chunk", &payload);
+}
+
+fn emit_session_error(app: &AppHandle, conversation_id: Option<&str>, error: &str) {
+    let trimmed = error.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let payload = SessionErrorPayload {
+        conversation_id: conversation_id.map(|id| id.to_string()),
+        error: trimmed.to_string(),
+    };
+    let _ = app.emit("session-error", &payload);
+}
+
+fn is_api_error_text(text: &str) -> bool {
+    let trimmed = text.trim();
+    trimmed.starts_with("API Error:")
+        || trimmed.starts_with("Error:")
+        || trimmed.contains("authentication_error")
+        || trimmed.contains("rate_limit_error")
+        || trimmed.contains("overloaded_error")
+}
+
+fn extract_result_error(value: &serde_json::Value) -> String {
+    if let Some(result) = value.get("result").and_then(|v| v.as_str()) {
+        if !result.trim().is_empty() {
+            return result.trim().to_string();
+        }
+    }
+    if let Some(errors) = value.get("errors").and_then(|v| v.as_array()) {
+        let joined = errors
+            .iter()
+            .filter_map(|item| item.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !joined.is_empty() {
+            return joined;
+        }
+    }
+    value
+        .get("error")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "模型调用失败".to_string())
+}
+
+fn extract_top_level_error(value: &serde_json::Value) -> Option<String> {
+    let error_value = value.get("error")?;
+    if let Some(message) = error_value.as_str() {
+        return Some(message.trim().to_string());
+    }
+    if let Some(message) = error_value
+        .get("message")
+        .and_then(|v| v.as_str())
+    {
+        return Some(message.trim().to_string());
+    }
+    None
+}
+
+fn extract_assistant_text(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_array())
+        .and_then(|blocks| {
+            blocks.iter().find_map(|block| {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    block.get("text").and_then(|t| t.as_str()).map(str::trim).filter(|t| !t.is_empty())
+                } else {
+                    None
+                }
+            })
+        })
+        .map(|text| text.to_string())
+}
+
+fn record_stream_error(
+    stream_error: &mut Option<String>,
+    app: &AppHandle,
+    session_id: Option<&str>,
+    error: String,
+) {
+    if error.trim().is_empty() {
+        return;
+    }
+    if let Some(sid) = session_id.filter(|id| !id.is_empty()) {
+        emit_message_chunk(app, sid, "error", &error);
+    }
+    emit_session_error(app, session_id, &error);
+    *stream_error = Some(error);
+}
+
+fn resolve_stream_session_id(
+    captured: &Option<String>,
+    value: &serde_json::Value,
+) -> Option<String> {
+    captured.clone().or_else(|| {
+        value
+            .get("session_id")
+            .and_then(|s| s.as_str())
+            .map(|s| s.to_string())
+    })
+}
+
+/// 解析 claude --output-format stream-json 的 NDJSON 行
+fn process_claude_stream_line(
+    line: &str,
+    app: &AppHandle,
+    captured_session_id: &mut Option<String>,
+    block_types: &mut HashMap<usize, String>,
+    stream_error: &mut Option<String>,
+) {
+    let value: serde_json::Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let typ = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+    match typ {
+        "error" => {
+            if let Some(error) = extract_top_level_error(&value) {
+                let sid = resolve_stream_session_id(captured_session_id, &value);
+                record_stream_error(stream_error, app, sid.as_deref(), error);
+            }
+        }
+        "system" => {
+            match value.get("subtype").and_then(|s| s.as_str()) {
+                Some("init") => {
+                    if let Some(sid) = value.get("session_id").and_then(|s| s.as_str()) {
+                        *captured_session_id = Some(sid.to_string());
+                        let cwd = value
+                            .get("cwd")
+                            .and_then(|c| c.as_str())
+                            .unwrap_or("");
+                        emit_message_chunk(app, sid, "session_created", cwd);
+                    }
+                }
+                Some("api_retry") => {
+                    let sid = resolve_stream_session_id(captured_session_id, &value);
+                    let error_status = value.get("error_status").and_then(|v| v.as_u64());
+                    let error_code = value
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown_error");
+                    let attempt = value.get("attempt").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let max_retries = value.get("max_retries").and_then(|v| v.as_u64()).unwrap_or(10);
+
+                    let retry_msg = format!(
+                        "API 请求失败（HTTP {} / {}），正在重试 {}/{}...",
+                        error_status
+                            .map(|status| status.to_string())
+                            .unwrap_or_else(|| "?".to_string()),
+                        error_code,
+                        attempt,
+                        max_retries
+                    );
+                    if let Some(sid) = sid.as_ref() {
+                        emit_message_chunk(app, sid, "api_retry", &retry_msg);
+                    }
+
+                    if matches!(error_status, Some(401 | 403))
+                        || error_code == "authentication_failed"
+                    {
+                        let error_msg = format!(
+                            "API 认证失败（HTTP {}）：{}，请检查 API Key 和 Base URL 是否正确",
+                            error_status.unwrap_or(401),
+                            error_code
+                        );
+                        record_stream_error(stream_error, app, sid.as_deref(), error_msg);
+                    }
+                }
+                _ => {}
+            }
+        }
+        "stream_event" => {
+            let sid = match resolve_stream_session_id(captured_session_id, &value) {
+                Some(s) => s,
+                None => return,
+            };
+
+            let event = match value.get("event") {
+                Some(e) => e,
+                None => return,
+            };
+            let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            match event_type {
+                "content_block_start" => {
+                    if let Some(block_type) = event
+                        .get("content_block")
+                        .and_then(|b| b.get("type"))
+                        .and_then(|t| t.as_str())
+                    {
+                        let index = event.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                        block_types.insert(index, block_type.to_string());
+                        let kind = if block_type == "thinking" {
+                            "thinking_start"
+                        } else if block_type == "text" {
+                            "text_start"
+                        } else {
+                            return;
+                        };
+                        emit_message_chunk(app, &sid, kind, "");
+                    }
+                }
+                "content_block_delta" => {
+                    let delta = match event.get("delta") {
+                        Some(d) => d,
+                        None => return,
+                    };
+                    match delta.get("type").and_then(|t| t.as_str()) {
+                        Some("thinking_delta") => {
+                            if let Some(text) = delta.get("thinking").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    emit_message_chunk(app, &sid, "thinking_delta", text);
+                                }
+                            }
+                        }
+                        Some("text_delta") => {
+                            if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                if !text.is_empty() {
+                                    if is_api_error_text(text) {
+                                        let sid = resolve_stream_session_id(captured_session_id, &value);
+                                        record_stream_error(
+                                            stream_error,
+                                            app,
+                                            sid.as_deref(),
+                                            text.trim().to_string(),
+                                        );
+                                    } else {
+                                        emit_message_chunk(app, &sid, "text_delta", text);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                "content_block_stop" => {
+                    let index = event.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                    let kind = match block_types.get(&index).map(|s| s.as_str()) {
+                        Some("thinking") => "thinking_end",
+                        Some("text") => "text_end",
+                        _ => return,
+                    };
+                    emit_message_chunk(app, &sid, kind, "");
+                    block_types.remove(&index);
+                }
+                "message_stop" => {
+                    emit_message_chunk(app, &sid, "stream_end", "");
+                }
+                _ => {}
+            }
+        }
+        "assistant" => {
+            if let Some(text) = extract_assistant_text(&value) {
+                if is_api_error_text(&text) {
+                    let sid = resolve_stream_session_id(captured_session_id, &value);
+                    record_stream_error(stream_error, app, sid.as_deref(), text);
+                }
+            }
+        }
+        "result" => {
+            let sid = resolve_stream_session_id(captured_session_id, &value);
+            if value.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+                let error = extract_result_error(&value);
+                record_stream_error(stream_error, app, sid.as_deref(), error);
+                return;
+            }
+            if let Some(sid) = sid {
+                emit_message_chunk(app, &sid, "complete", "");
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 使用 stream-json 模式启动 claude，实时推送 thinking / answer 增量
+fn spawn_claude_stream(
+    app: AppHandle,
+    prompt: &str,
+    conversation_id: Option<&String>,
+    project_dir: Option<&String>,
+) -> std::io::Result<StreamOutcome> {
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+    #[cfg(target_os = "windows")]
+    use std::os::windows::process::CommandExt;
+
+    let mut args = vec![
+        "-p".to_string(),
+        "--verbose".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--include-partial-messages".to_string(),
+    ];
+
+    if let Some(cid) = conversation_id.filter(|c| !c.is_empty()) {
+        args.push("--resume".to_string());
+        args.push(cid.clone());
+    }
+    args.push(prompt.to_string());
+
+    let effective_cwd = project_dir.and_then(|cwd| resolve_or_create_dir(cwd));
+
+    let mut cmd = Command::new("claude");
+    cmd.args(&args);
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(0x08000000);
+    }
+    if let Some(ref cwd) = effective_cwd {
+        cmd.current_dir(cwd);
+    }
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    eprintln!("[spawn_stream] claude {}", args.join(" "));
+    eprintln!("[spawn_stream] cwd: {:?}", effective_cwd);
+
+    let mut child = cmd.spawn()?;
+    let stdout = child.stdout.take().expect("stdout should be piped");
+    let stderr = child.stderr.take();
+
+    let mut captured_session_id = conversation_id.filter(|c| !c.is_empty()).cloned();
+    let mut block_types: HashMap<usize, String> = HashMap::new();
+    let mut stream_error: Option<String> = None;
+
+    let stderr_buffer = Arc::new(Mutex::new(String::new()));
+    if let Some(stderr) = stderr {
+        let stderr_buffer = Arc::clone(&stderr_buffer);
+        thread::spawn(move || {
+            let content = BufReader::new(stderr)
+                .lines()
+                .filter_map(|line| line.ok())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if let Ok(mut guard) = stderr_buffer.lock() {
+                *guard = content;
+            }
+        });
+    }
+
+    let (line_tx, line_rx) = mpsc::channel();
+    thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            match line {
+                Ok(value) => {
+                    if line_tx.send(Ok(value)).is_err() {
+                        break;
+                    }
+                }
+                Err(err) => {
+                    let _ = line_tx.send(Err(err));
+                    break;
+                }
+            }
+        }
+    });
+
+    let started = Instant::now();
+    let mut last_activity = Instant::now();
+    let mut stdout_finished = false;
+
+    while !stdout_finished {
+        match line_rx.recv_timeout(Duration::from_secs(1)) {
+            Ok(Ok(line)) => {
+                last_activity = Instant::now();
+                if line.trim().is_empty() {
+                    continue;
+                }
+                process_claude_stream_line(
+                    &line,
+                    &app,
+                    &mut captured_session_id,
+                    &mut block_types,
+                    &mut stream_error,
+                );
+                if stream_error.is_some() {
+                    let _ = child.kill();
+                    break;
+                }
+            }
+            Ok(Err(err)) => return Err(err),
+            Err(RecvTimeoutError::Timeout) => {
+                if child.try_wait()?.is_some() {
+                    stdout_finished = true;
+                    continue;
+                }
+
+                let elapsed = started.elapsed();
+                let idle = last_activity.elapsed();
+                if elapsed >= REQUEST_TIMEOUT || idle >= IDLE_TIMEOUT {
+                    let _ = child.kill();
+                    let timeout_msg = if elapsed >= REQUEST_TIMEOUT {
+                        format!(
+                            "请求超时：模型在 {} 秒内未完成响应",
+                            REQUEST_TIMEOUT.as_secs()
+                        )
+                    } else {
+                        format!(
+                            "请求超时：{} 秒内未收到任何响应，请检查 API 地址、密钥和网络连接",
+                            IDLE_TIMEOUT.as_secs()
+                        )
+                    };
+                    emit_session_error(
+                        &app,
+                        captured_session_id.as_deref(),
+                        &timeout_msg,
+                    );
+                    let _ = child.wait();
+                    return Ok(StreamOutcome::Failed {
+                        session_id: captured_session_id,
+                        error: timeout_msg,
+                    });
+                }
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                stdout_finished = true;
+            }
+        }
+    }
+
+    while let Ok(Ok(line)) = line_rx.try_recv() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        process_claude_stream_line(
+            &line,
+            &app,
+            &mut captured_session_id,
+            &mut block_types,
+            &mut stream_error,
+        );
+    }
+
+    let stderr_content = stderr_buffer
+        .lock()
+        .map(|guard| guard.clone())
+        .unwrap_or_default();
+    if !stderr_content.trim().is_empty() {
+        eprintln!("[claude stderr]\n{}", stderr_content);
+    }
+
+    let status = child.wait()?;
+    eprintln!("[claude] 退出码: {}", status);
+
+    if let Some(error) = stream_error {
+        return Ok(StreamOutcome::Failed {
+            session_id: captured_session_id,
+            error,
+        });
+    }
+
+    if !status.success() {
+        let error_msg = if !stderr_content.trim().is_empty() {
+            stderr_content.trim().to_string()
+        } else {
+            format!("Claude 进程异常退出（状态码 {}）", status)
+        };
+        emit_session_error(
+            &app,
+            captured_session_id.as_deref(),
+            &error_msg,
+        );
+        return Ok(StreamOutcome::Failed {
+            session_id: captured_session_id,
+            error: error_msg,
+        });
+    }
+
+    Ok(StreamOutcome::Success(captured_session_id))
 }
 
 #[tauri::command]
@@ -491,10 +1731,180 @@ fn add_platform(id: String, name: String, command: String, args: Vec<String>) {
 }
 
 #[tauri::command]
-fn delete_conversation(conversation_id: String) {
-    let mut state = load_app_state();
+fn delete_conversation(conversation_id: String, source_path: Option<String>) -> Result<bool, String> {
+    let mut delete_error: Option<String> = None;
+
+    let resolved_path = if let Some(path) = source_path.filter(|p| !p.trim().is_empty()) {
+        match validate_claude_source_path(Path::new(&path)) {
+            Ok(path) => Some(path),
+            Err(err) => {
+                delete_error = Some(err);
+                find_claude_session_file(&conversation_id)
+            }
+        }
+    } else {
+        find_claude_session_file(&conversation_id)
+    };
+
+    if let Some(path) = resolved_path {
+        if let Err(err) = delete_claude_session_file(&path, &conversation_id) {
+            delete_error = Some(err);
+        }
+    }
+
+    mark_session_deleted(&conversation_id);
+
+    let mut state = load_persisted_state();
+    let before = state.conversations.len();
     state.conversations.retain(|c| c.id != conversation_id);
-    save_app_state(&state);
+    if state.conversations.len() != before {
+        save_app_state(&state);
+    }
+
+    if let Some(err) = delete_error {
+        eprintln!("[delete] session hidden but file delete failed: {err}");
+    }
+
+    Ok(true)
+}
+
+fn read_claude_session_id_from_file(path: &Path) -> Option<String> {
+    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+        if !stem.is_empty() {
+            return Some(stem.to_string());
+        }
+    }
+
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    for line in reader.lines().take(20) {
+        let line = line.ok()?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = serde_json::from_str(&line).ok()?;
+        if let Some(session_id) = value.get("sessionId").and_then(|s| s.as_str()) {
+            return Some(session_id.to_string());
+        }
+    }
+    None
+}
+
+fn session_id_matches_path(session_id: &str, path: &Path) -> bool {
+    if path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem == session_id)
+    {
+        return true;
+    }
+
+    read_claude_session_id_from_file(path)
+        .is_some_and(|id| id == session_id)
+}
+
+fn delete_claude_session_file(path: &Path, session_id: &str) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+
+    if !session_id_matches_path(session_id, path) {
+        return Err(format!(
+            "Session ID mismatch for file {}",
+            path.display()
+        ));
+    }
+
+    if let Some(stem) = path.file_stem() {
+        let sibling = path.parent().unwrap_or_else(|| Path::new("")).join(stem);
+        remove_path_if_exists(&sibling).map_err(|e| {
+            format!(
+                "Failed to delete Claude session sidecar {}: {e}",
+                sibling.display()
+            )
+        })?;
+    }
+
+    fs::remove_file(path).map_err(|e| {
+        format!(
+            "Failed to delete Claude session file {}: {e}",
+            path.display()
+        )
+    })?;
+
+    Ok(())
+}
+
+fn validate_claude_source_path(source_path: &Path) -> Result<PathBuf, String> {
+    let root = get_claude_history_path();
+    if !root.exists() {
+        return Err("Claude history directory not found".to_string());
+    }
+
+    let canonical_root = fs::canonicalize(&root)
+        .map_err(|e| format!("Failed to resolve Claude history root: {e}"))?;
+    let canonical_source = fs::canonicalize(source_path)
+        .map_err(|e| format!("Session file not found: {e}"))?;
+
+    if !canonical_source.starts_with(&canonical_root) {
+        return Err("Session path is outside Claude history directory".to_string());
+    }
+
+    if canonical_source.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
+        return Err("Session source must be a .jsonl file".to_string());
+    }
+
+    Ok(canonical_source)
+}
+
+fn find_claude_session_file(session_id: &str) -> Option<PathBuf> {
+    let root = get_claude_history_path();
+    if !root.exists() {
+        return None;
+    }
+
+    let mut files = Vec::new();
+    collect_jsonl_files(&root, &mut files);
+
+    for path in &files {
+        if is_agent_session(path) {
+            continue;
+        }
+        if path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem == session_id)
+        {
+            return Some(path.clone());
+        }
+    }
+
+    for path in files {
+        if is_agent_session(&path) {
+            continue;
+        }
+        if let Some(conv) = parse_claude_session(&path) {
+            if conv.id == session_id {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
+    match fs::metadata(path) {
+        Ok(meta) => {
+            if meta.is_dir() {
+                fs::remove_dir_all(path)
+            } else {
+                fs::remove_file(path)
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(err) => Err(err),
+    }
 }
 
 #[tauri::command]
@@ -504,18 +1914,95 @@ fn get_conversation(conversation_id: String) -> Option<Conversation> {
 }
 
 #[tauri::command]
-fn update_conversation_title(conversation_id: String, title: String) -> Result<Conversation, String> {
-    let mut state = load_app_state();
-    
+fn update_conversation_title(
+    conversation_id: String,
+    title: String,
+    source_path: Option<String>,
+) -> Result<Conversation, String> {
+    let trimmed = title.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Title cannot be empty".to_string());
+    }
+
+    let resolved_path = if let Some(path) = source_path.filter(|p| !p.trim().is_empty()) {
+        match validate_claude_source_path(Path::new(&path)) {
+            Ok(path) => Some(path),
+            Err(_) => find_claude_session_file(&conversation_id),
+        }
+    } else {
+        find_claude_session_file(&conversation_id)
+    };
+
+    let session_path = resolved_path.or_else(|| find_claude_session_file(&conversation_id));
+
+    if let Some(path) = &session_path {
+        if let Err(err) = write_claude_custom_title(path, &conversation_id, &trimmed) {
+            eprintln!("[title] failed to write custom-title to {}: {err}", path.display());
+        }
+    }
+
+    set_title_override(&conversation_id, &trimmed);
+
+    if let Some(path) = session_path.clone() {
+        if let Some(mut conv) = parse_claude_session(&path) {
+            conv.title = trimmed.clone();
+            return Ok(conv);
+        }
+    }
+
+    let mut state = load_persisted_state();
     if let Some(c) = state.conversations.iter_mut().find(|c| c.id == conversation_id) {
-        c.title = title;
+        c.title = trimmed.clone();
         c.updated_at = chrono::Utc::now().timestamp();
         let result = c.clone();
         save_app_state(&state);
-        Ok(result)
-    } else {
-        Err("Conversation not found".to_string())
+        return Ok(result);
     }
+
+    Ok(Conversation {
+        id: conversation_id,
+        title: trimmed.clone(),
+        messages: Vec::new(),
+        platform: "claude".to_string(),
+        project_dir: None,
+        source_path: session_path.map(|p| p.to_string_lossy().to_string()),
+        created_at: chrono::Utc::now().timestamp(),
+        updated_at: chrono::Utc::now().timestamp(),
+    })
+}
+
+fn write_claude_custom_title(path: &Path, session_id: &str, title: &str) -> Result<(), String> {
+    if !path.exists() {
+        return Err(format!("Session file not found: {}", path.display()));
+    }
+
+    if !session_id_matches_path(session_id, path) {
+        return Err(format!(
+            "Session ID mismatch for file {}",
+            path.display()
+        ));
+    }
+
+    let entry = serde_json::json!({
+        "type": "custom-title",
+        "customTitle": title,
+        "sessionId": session_id,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(path)
+        .map_err(|e| format!("Failed to open session file {}: {e}", path.display()))?;
+
+    writeln!(file, "{entry}").map_err(|e| {
+        format!(
+            "Failed to append custom title to {}: {e}",
+            path.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -538,6 +2025,7 @@ async fn send_message(conversation_id: String, content: String) -> Result<Conver
             messages: vec![user_message],
             platform: state.active_platform.clone(),
             project_dir: None,
+            source_path: None,
             created_at: now,
             updated_at: now,
         };
@@ -585,18 +2073,6 @@ async fn send_message(conversation_id: String, content: String) -> Result<Conver
         .ok_or_else(|| "Conversation not found".to_string())
 }
 
-// 转义 Windows PowerShell 单引号字符串（' → ''）
-#[cfg(target_os = "windows")]
-fn escape_ps_single_quoted(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
-// 转义 Unix shell 单引号字符串（' → '\''）
-#[cfg(not(target_os = "windows"))]
-fn escape_sh_single_quoted(s: &str) -> String {
-    s.replace('\'', "'\\''")
-}
-
 // 确保目录存在：先验证，不存在则尝试创建
 fn resolve_or_create_dir(cwd: &str) -> Option<String> {
     let path = std::path::Path::new(cwd);
@@ -615,136 +2091,96 @@ fn resolve_or_create_dir(cwd: &str) -> Option<String> {
     }
 }
 
-// 构建平台相关的 shell 命令
-fn build_shell_command(input: &str, claude_part: &str, cwd: Option<&str>) -> (&'static str, Vec<String>, String) {
-    #[cfg(target_os = "windows")]
-    {
-        let escaped = escape_ps_single_quoted(input);
-        let cmd = if let Some(cwd) = cwd {
-            format!("Set-Location '{}'; '{}' | {}", cwd, escaped, claude_part)
-        } else {
-            format!("'{}' | {}", escaped, claude_part)
-        };
-        ("powershell", vec!["-NoProfile".into(), "-Command".into()], cmd)
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let escaped = escape_sh_single_quoted(input);
-        let cmd = if let Some(cwd) = cwd {
-            format!("cd '{}' && echo '{}' | {}", cwd, escaped, claude_part)
-        } else {
-            format!("echo '{}' | {}", escaped, claude_part)
-        };
-        ("sh", vec!["-c".into()], cmd)
-    }
-}
-
-// 启动 shell 执行 claude 命令
-// Win: PowerShell 'prompt' | claude --resume
-// Mac: sh echo 'prompt' | claude --resume
-// project_dir: 从 JSONL 会话文件中提取的 cwd，用于设置正确的工作目录
-fn spawn_claude_shell(input: &str, conversation_id: Option<&String>, project_dir: Option<&String>) -> std::io::Result<std::process::Output> {
-    #[cfg(target_os = "windows")]
-    use std::os::windows::process::CommandExt;
-
-    let cid_opt = conversation_id.filter(|c| !c.is_empty());
-
-    let claude_part = if let Some(cid) = cid_opt {
-        format!("claude --resume {}", cid)
-    } else {
-        "claude".to_string()
-    };
-
-    let effective_cwd = project_dir.and_then(|cwd| resolve_or_create_dir(cwd));
-    let (shell, shell_args, shell_cmd) = build_shell_command(input, &claude_part, effective_cwd.as_deref());
-
-    eprintln!("============================================================");
-    eprintln!("[spawn] 平台     : {}", if cfg!(target_os = "windows") { "Windows" } else { "Unix" });
-    eprintln!("[spawn] 工作目录 : {:?}", effective_cwd);
-    eprintln!("[spawn] 执行命令 : {}", shell_cmd);
-    eprintln!("[spawn] 原始提示词: {}", input);
-    eprintln!("============================================================");
-
-    let mut cmd = Command::new(shell);
-    #[cfg(target_os = "windows")]
-    {
-        cmd.creation_flags(0x08000000);
-    }
-    if let Some(ref cwd) = effective_cwd {
-        cmd.current_dir(cwd);
-    }
-    for arg in &shell_args {
-        cmd.arg(arg);
-    }
-    cmd.arg(&shell_cmd);
-
-    let output = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .stdin(Stdio::null())
-        .output()?;
-
-    let stdout_s = String::from_utf8_lossy(&output.stdout);
-    let stderr_s = String::from_utf8_lossy(&output.stderr);
-    eprintln!("[claude] 退出码: {}", output.status);
-    if !stdout_s.trim().is_empty() {
-        eprintln!("[claude stdout]\n{}", stdout_s);
-    }
-    if !stderr_s.trim().is_empty() {
-        eprintln!("[claude stderr]\n{}", stderr_s);
-    }
-
-    Ok(output)
-}
-
 #[tauri::command]
 async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<String>) -> Result<(), String> {
     let active_cid = conversation_id.clone();
     eprintln!("[execute_prompt] received: prompt='{}', conversation_id={:?}", prompt, active_cid);
 
     tauri::async_runtime::spawn(async move {
-        // 记录发送前的会话状态
         let before_conversations = load_claude_history();
         let before_ids: std::collections::HashSet<String> =
             before_conversations.iter().map(|c| c.id.clone()).collect();
 
-        // 查找目标会话的 project_dir（从 JSONL 中提取的 cwd）
         let project_dir = active_cid.as_ref().and_then(|cid| {
-            before_conversations.iter()
+            before_conversations
+                .iter()
                 .find(|c| c.id == *cid)
                 .and_then(|c| c.project_dir.as_ref())
+                .cloned()
         });
 
-        // 阻塞执行 claude，等待完成
-        if let Err(e) = spawn_claude_shell(&prompt, active_cid.as_ref(), project_dir) {
-            eprintln!("[execute_prompt] claude 执行失败: {}", e);
-            let _ = app.emit("session-ended", active_cid.clone());
-            return;
-        }
+        let app_handle = app.clone();
+        let prompt_clone = prompt.clone();
+        let cid_clone = active_cid.clone();
 
-        // Claude 执行完毕，重新加载会话列表
-        let after_conversations = load_claude_history();
+        let stream_result = tauri::async_runtime::spawn_blocking(move || {
+            spawn_claude_stream(
+                app_handle,
+                &prompt_clone,
+                cid_clone.as_ref(),
+                project_dir.as_ref(),
+            )
+        })
+        .await;
 
-        // 查找发生变化的会话：优先查找目标会话，其次查找最新会话
-        let updated_conv = active_cid.as_ref()
-            .and_then(|cid| after_conversations.iter().find(|c| c.id == *cid))
-            .or_else(|| after_conversations.iter().max_by_key(|c| c.updated_at));
+        match stream_result {
+            Ok(Ok(outcome)) => match outcome {
+                StreamOutcome::Success(final_session_id) => {
+                    let after_conversations = load_claude_history();
+                    let resolved_id = final_session_id
+                        .or(active_cid.clone())
+                        .or_else(|| {
+                            after_conversations
+                                .iter()
+                                .max_by_key(|c| c.updated_at)
+                                .map(|c| c.id.clone())
+                        });
 
-        if let Some(conv) = updated_conv {
-            let is_existing = before_ids.contains(&conv.id);
-            let event_name = if is_existing { "messages-updated" } else { "session-created" };
+                    if let Some(sid) = resolved_id {
+                        if let Some(conv) = after_conversations.iter().find(|c| c.id == sid) {
+                            let is_existing = before_ids.contains(&conv.id);
+                            let event_name = if is_existing {
+                                "messages-updated"
+                            } else {
+                                "session-created"
+                            };
 
-            let payload = SessionEventPayload {
-                conversation_id: conv.id.clone(),
-                title: conv.title.clone(),
-                messages: conv.messages.clone(),
-                updated_at: conv.updated_at,
-            };
-            eprintln!("[execute_prompt] emit {} for session {}", event_name, conv.id);
-            let _ = app.emit(event_name, &payload);
-        } else {
-            eprintln!("[execute_prompt] 未找到更新的会话");
-            let _ = app.emit("session-ended", active_cid.clone());
+                            let payload = SessionEventPayload {
+                                conversation_id: conv.id.clone(),
+                                title: conv.title.clone(),
+                                messages: conv.messages.clone(),
+                                project_dir: conv.project_dir.clone(),
+                                updated_at: conv.updated_at,
+                            };
+                            eprintln!("[execute_prompt] emit {} for session {}", event_name, conv.id);
+                            let _ = app.emit(event_name, &payload);
+                            return;
+                        }
+                    }
+
+                    eprintln!("[execute_prompt] 未找到更新的会话");
+                    let _ = app.emit("session-ended", active_cid.clone());
+                }
+                StreamOutcome::Failed { session_id, error } => {
+                    eprintln!(
+                        "[execute_prompt] claude 执行失败 (session={:?}): {}",
+                        session_id, error
+                    );
+                    let _ = app.emit("session-ended", active_cid.clone());
+                }
+            },
+            Ok(Err(e)) => {
+                let error = format!("Claude 执行失败: {e}");
+                eprintln!("[execute_prompt] {error}");
+                emit_session_error(&app, active_cid.as_deref(), &error);
+                let _ = app.emit("session-ended", active_cid.clone());
+            }
+            Err(e) => {
+                let error = format!("启动 Claude 进程失败: {e}");
+                eprintln!("[execute_prompt] {error}");
+                emit_session_error(&app, active_cid.as_deref(), &error);
+                let _ = app.emit("session-ended", active_cid.clone());
+            }
         }
     });
 
@@ -889,10 +2325,191 @@ async fn run_command_with_input(mut cmd: Command, input: &str) -> CommandResult 
     }
 }
 
+const WINDOW_ASPECT_WIDTH: f64 = 16.0;
+const WINDOW_ASPECT_HEIGHT: f64 = 10.0;
+const WINDOW_MAX_SCREEN_RATIO: f64 = 0.85;
+const WINDOW_MIN_WIDTH: f64 = 576.0;
+const WINDOW_MIN_HEIGHT: f64 = 360.0;
+
+/// 将物理像素转换为逻辑像素
+fn physical_to_logical(value: u32, scale_factor: f64) -> f64 {
+    value as f64 / scale_factor
+}
+
+/// 在屏幕工作区内计算 16:10 比例的最佳窗口尺寸
+fn compute_optimal_window_size(screen_width: f64, screen_height: f64) -> (f64, f64) {
+    let max_width = screen_width * WINDOW_MAX_SCREEN_RATIO;
+    let max_height = screen_height * WINDOW_MAX_SCREEN_RATIO;
+
+    let width_by_width = max_width;
+    let height_by_width = width_by_width * WINDOW_ASPECT_HEIGHT / WINDOW_ASPECT_WIDTH;
+
+    let (mut width, mut height) = if height_by_width <= max_height {
+        (width_by_width, height_by_width)
+    } else {
+        let height = max_height;
+        let width = height * WINDOW_ASPECT_WIDTH / WINDOW_ASPECT_HEIGHT;
+        (width, height)
+    };
+
+    if width < WINDOW_MIN_WIDTH {
+        width = WINDOW_MIN_WIDTH;
+        height = width * WINDOW_ASPECT_HEIGHT / WINDOW_ASPECT_WIDTH;
+    }
+    if height < WINDOW_MIN_HEIGHT {
+        height = WINDOW_MIN_HEIGHT;
+        width = height * WINDOW_ASPECT_WIDTH / WINDOW_ASPECT_HEIGHT;
+    }
+
+    if width > max_width {
+        width = max_width;
+        height = width * WINDOW_ASPECT_HEIGHT / WINDOW_ASPECT_WIDTH;
+    }
+    if height > max_height {
+        height = max_height;
+        width = height * WINDOW_ASPECT_WIDTH / WINDOW_ASPECT_HEIGHT;
+    }
+
+    (width.round(), height.round())
+}
+
+/// 根据工作区与窗口外框尺寸，计算居中位置（物理坐标）
+fn compute_centered_physical_position(
+    work_x: i32,
+    work_y: i32,
+    work_width: u32,
+    work_height: u32,
+    window_width: u32,
+    window_height: u32,
+) -> (i32, i32) {
+    let x = work_x + ((work_width as i32 - window_width as i32) / 2);
+    let y = work_y + ((work_height as i32 - window_height as i32) / 2);
+    (x, y)
+}
+
+fn resolve_target_monitor(window: &WebviewWindow, app: &AppHandle) -> Option<tauri::Monitor> {
+    window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| app.primary_monitor().ok().flatten())
+}
+
+/// 计算尺寸并将主窗口居中到目标显示器工作区
+fn layout_main_window(window: &WebviewWindow, app: &AppHandle) -> bool {
+    let Some(monitor) = resolve_target_monitor(window, app) else {
+        eprintln!("[window] monitor not found");
+        return false;
+    };
+
+    let scale_factor = monitor.scale_factor();
+    let work_area = monitor.work_area();
+    let work_width = physical_to_logical(work_area.size.width, scale_factor);
+    let work_height = physical_to_logical(work_area.size.height, scale_factor);
+    let (width, height) = compute_optimal_window_size(work_width, work_height);
+
+    eprintln!(
+        "[window] work_area={}x{}@({},{}), target={:.0}x{:.0} (16:10)",
+        work_area.size.width,
+        work_area.size.height,
+        work_area.position.x,
+        work_area.position.y,
+        width,
+        height
+    );
+
+    if let Err(e) = window.set_size(Size::Logical(LogicalSize::new(width, height))) {
+        eprintln!("[window] failed to set size: {e}");
+        return false;
+    }
+
+    let Ok(outer) = window.outer_size() else {
+        eprintln!("[window] failed to read outer size");
+        return false;
+    };
+
+    let (pos_x, pos_y) = compute_centered_physical_position(
+        work_area.position.x,
+        work_area.position.y,
+        work_area.size.width,
+        work_area.size.height,
+        outer.width,
+        outer.height,
+    );
+
+    eprintln!(
+        "[window] outer={}x{}, centered at physical ({}, {})",
+        outer.width, outer.height, pos_x, pos_y
+    );
+
+    if let Err(e) = window.set_position(Position::Physical(PhysicalPosition::new(pos_x, pos_y))) {
+        eprintln!("[window] failed to set position: {e}, fallback to center()");
+        let _ = window.center();
+        return false;
+    }
+
+    true
+}
+
+fn schedule_main_window_layout(window: WebviewWindow, app: AppHandle) {
+    let applied = Arc::new(AtomicBool::new(false));
+
+    let apply_once = |window: &WebviewWindow, app: &AppHandle, show: bool| {
+        if layout_main_window(window, app) && show {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    };
+
+    apply_once(&window, &app, true);
+
+    let window_for_main = window.clone();
+    let app_for_main = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        apply_once(&window_for_main, &app_for_main, true);
+    });
+
+    let window_for_event = window.clone();
+    let app_for_event = app.clone();
+    let applied_for_event = Arc::clone(&applied);
+    window.on_window_event(move |event| {
+        if !matches!(event, tauri::WindowEvent::Focused(true)) {
+            return;
+        }
+        if applied_for_event.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        layout_main_window(&window_for_event, &app_for_event);
+    });
+
+    let window_for_delay = window.clone();
+    let app_for_delay = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_millis(120));
+        let app_handle = app_for_delay.clone();
+        let _ = app_for_delay.run_on_main_thread(move || {
+            layout_main_window(&window_for_delay, &app_handle);
+        });
+    });
+}
+
+fn apply_responsive_window_size(app: &tauri::App) {
+    let Some(window) = app.get_webview_window("main") else {
+        eprintln!("[window] main window not found");
+        return;
+    };
+
+    schedule_main_window_layout(window, app.handle().clone());
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            apply_responsive_window_size(app);
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             get_conversations,
             get_platforms,
@@ -908,6 +2525,15 @@ pub fn run() {
             execute_prompt,
             get_conversation_list,
             get_conversation_messages,
+            get_claude_api_config,
+            save_claude_api_config,
+            get_api_profiles_state,
+            get_api_profile_config,
+            upsert_api_profile,
+            switch_api_profile,
+            delete_api_profile,
+            import_cc_switch_profiles,
+            fetch_api_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")
