@@ -575,6 +575,7 @@ fn spawn_claude_shell(input: &str, conversation_id: Option<&String>) -> std::io:
 
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input.as_bytes());
+        let _ = stdin.write_all(b"\n");
     }
 
     Ok(())
@@ -618,13 +619,14 @@ async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<
             let latest_conversations = load_claude_history();
 
             if !latest_conversations.is_empty() {
-                let newest_conv = latest_conversations.iter().max_by_key(|c| c.updated_at);
+                // 如果有目标会话ID，优先检查该会话的变化
+                let target_conv = active_cid.as_ref()
+                    .and_then(|cid| latest_conversations.iter().find(|c| c.id == *cid));
 
-                if let Some(conv) = newest_conv {
-                    let is_new =
-                        !before_ids.contains(&conv.id) || conv.updated_at > before_latest;
+                if let Some(conv) = target_conv {
+                    let updated = conv.updated_at > before_latest;
 
-                    if current_session_id.is_none() && is_new {
+                    if current_session_id.is_none() && updated {
                         current_session_id = Some(conv.id.clone());
 
                         let payload = SessionEventPayload {
@@ -639,25 +641,69 @@ async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<
                         last_message_count = conv.messages.len();
                         last_updated_at = conv.updated_at;
                     } else if let Some(cid) = &current_session_id {
-                        if let Some(current_conv) =
-                            latest_conversations.iter().find(|c| c.id == *cid)
-                        {
+                        if cid == &conv.id {
                             let message_count_changed =
-                                current_conv.messages.len() != last_message_count;
-                            let updated_changed = current_conv.updated_at != last_updated_at;
+                                conv.messages.len() != last_message_count;
+                            let updated_changed = conv.updated_at != last_updated_at;
 
                             if message_count_changed || updated_changed {
                                 let payload = SessionEventPayload {
-                                    conversation_id: current_conv.id.clone(),
-                                    title: current_conv.title.clone(),
-                                    messages: current_conv.messages.clone(),
-                                    updated_at: current_conv.updated_at,
+                                    conversation_id: conv.id.clone(),
+                                    title: conv.title.clone(),
+                                    messages: conv.messages.clone(),
+                                    updated_at: conv.updated_at,
                                 };
 
                                 let _ = app.emit("messages-updated", &payload);
 
-                                last_message_count = current_conv.messages.len();
-                                last_updated_at = current_conv.updated_at;
+                                last_message_count = conv.messages.len();
+                                last_updated_at = conv.updated_at;
+                            }
+                        }
+                    }
+                } else {
+                    // 没有目标会话或目标会话不存在，检查最新会话
+                    let newest_conv = latest_conversations.iter().max_by_key(|c| c.updated_at);
+
+                    if let Some(conv) = newest_conv {
+                        let is_new =
+                            !before_ids.contains(&conv.id) || conv.updated_at > before_latest;
+
+                        if current_session_id.is_none() && is_new {
+                            current_session_id = Some(conv.id.clone());
+
+                            let payload = SessionEventPayload {
+                                conversation_id: conv.id.clone(),
+                                title: conv.title.clone(),
+                                messages: conv.messages.clone(),
+                                updated_at: conv.updated_at,
+                            };
+
+                            let _ = app.emit("session-created", &payload);
+
+                            last_message_count = conv.messages.len();
+                            last_updated_at = conv.updated_at;
+                        } else if let Some(cid) = &current_session_id {
+                            if let Some(current_conv) =
+                                latest_conversations.iter().find(|c| c.id == *cid)
+                            {
+                                let message_count_changed =
+                                    current_conv.messages.len() != last_message_count;
+                                let updated_changed = current_conv.updated_at != last_updated_at;
+
+                                if message_count_changed || updated_changed {
+                                    let payload = SessionEventPayload {
+                                        conversation_id: current_conv.id.clone(),
+                                        title: current_conv.title.clone(),
+                                        messages: current_conv.messages.clone(),
+                                        updated_at: current_conv.updated_at,
+                                    };
+
+                                    let _ = app.emit("messages-updated", &payload);
+
+                                    last_message_count = current_conv.messages.len();
+                                    last_updated_at = current_conv.updated_at;
+                                }
                             }
                         }
                     }

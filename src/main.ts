@@ -33,7 +33,6 @@ interface PlatformConfig {
 
 let conversations: Conversation[] = [];
 let platforms: Record<string, PlatformConfig> = {};
-let activePlatform = 'claude';
 let currentPlatform = '';
 let activeConversationId = '';
 let editingConversationId: string | null = null;
@@ -128,7 +127,6 @@ async function loadData() {
   try {
     conversations = await invoke<Conversation[]>('get_conversations');
     platforms = await invoke<Record<string, PlatformConfig>>('get_platforms');
-    activePlatform = await invoke<string>('get_active_platform');
     currentPlatform = await invoke<string>('get_current_platform');
     console.log('Current platform:', currentPlatform);
   } catch (e) {
@@ -205,13 +203,6 @@ function render() {
           <h1>AI CLI Manager</h1>
           <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
         </div>
-        <div class="platform-selector">
-          <select id="platform-select">
-            ${Object.entries(platforms).map(([id, config]) => 
-              `<option value="${id}" ${id === activePlatform ? 'selected' : ''}>${config.name}</option>`
-            ).join('')}
-          </select>
-        </div>
         <div class="conversation-list" id="conversation-list">
           ${renderConversationList()}
         </div>
@@ -231,7 +222,6 @@ function render() {
 
 function attachEventListeners() {
   document.querySelector('#new-chat-btn')?.addEventListener('click', newChat);
-  document.querySelector('#platform-select')?.addEventListener('change', changePlatform);
   
   const textarea = document.querySelector('#message-input') as HTMLTextAreaElement;
   if (textarea) {
@@ -293,14 +283,6 @@ function newChat() {
     const input = document.querySelector<HTMLTextAreaElement>('#message-input');
     if (input) input.focus();
   }, 100);
-}
-
-async function changePlatform(e: Event) {
-  const select = e.target as HTMLSelectElement;
-  if (select && select.value !== activePlatform) {
-    activePlatform = select.value;
-    await invoke('set_active_platform', { platform_id: activePlatform });
-  }
 }
 
 // 发送消息：通过 invoke 到后端，后端启动 shell 并通过事件推送更新
