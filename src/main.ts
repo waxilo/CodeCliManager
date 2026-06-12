@@ -103,7 +103,6 @@ let activeConversationId = '';
 let editingConversationId: string | null = null;
 let currentTime = new Date();
 let pendingUserMessage: string | null = null;
-let activeApiProfileName = '';
 let transientSessionError: string | null = null;
 
 const streamingBySession = new Map<string, StreamingState>();
@@ -166,7 +165,6 @@ async function init() {
   initPlatformClass();
   initTheme();
   await loadData();
-  await refreshActiveApiProfileLabel();
   render();
   setupEventListeners();
   setInterval(() => {
@@ -590,16 +588,18 @@ function renderConversationList(): string {
           <div class="conversation-main">
             <div class="conversation-header">
               <div class="conversation-title">${escapeHtml(c.title)}</div>
-              ${compactTime ? `<span class="compact-time">${compactTime}</span>` : ''}
             </div>
             <div class="conversation-meta">
               <span class="platform-tag">${platformName}</span>
               ${messageCount > 0 ? `<span class="message-count">${messageCount}</span>` : ''}
             </div>
           </div>
-          <div class="action-buttons">
-            <button type="button" class="action-btn edit" data-action="edit" data-id="${c.id}" title="Edit">✎</button>
-            <button type="button" class="action-btn delete" data-action="delete" data-id="${c.id}" title="Delete">🗑</button>
+          <div class="conversation-aside">
+            ${compactTime ? `<span class="compact-time">${compactTime}</span>` : ''}
+            <div class="action-buttons">
+              <button type="button" class="action-btn edit" data-action="edit" data-id="${c.id}" title="重命名">✎</button>
+              <button type="button" class="action-btn delete" data-action="delete" data-id="${c.id}" title="删除">🗑</button>
+            </div>
           </div>
         `}
       </div>
@@ -616,12 +616,19 @@ function initPlatformClass() {
   }
 }
 
+function renderApiConfigIcon(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 4h16a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zm0 8h16a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1zm2 2.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm0-8a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>
+    </svg>
+  `;
+}
+
 function renderTitlebarActions(): string {
   return `
-    <button type="button" class="toolbar-icon-btn settings-btn" id="settings-btn" title="API 配置" aria-label="API 配置">
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8.94 4.43a8.06 8.06 0 0 0 .06-.93 8.06 8.06 0 0 0-.06-.93l2.01-1.57a.5.5 0 0 0 .12-.64l-1.9-3.29a.5.5 0 0 0-.6-.22l-2.37.96a7.28 7.28 0 0 0-1.61-.93l-.36-2.52A.5.5 0 0 0 14.06 2h-3.12a.5.5 0 0 0-.49.42l-.36 2.52c-.58.22-1.12.52-1.61.93l-2.37-.96a.5.5 0 0 0-.6.22l-1.9 3.29a.5.5 0 0 0 .12.64l2.01 1.57c-.04.31-.06.62-.06.93s.02.62.06.93l-2.01 1.57a.5.5 0 0 0-.12.64l1.9 3.29a.5.5 0 0 0 .6.22l2.37-.96c.49.41 1.03.71 1.61.93l.36 2.52a.5.5 0 0 0 .49.42h3.12a.5.5 0 0 0 .49-.42l.36-2.52c.58-.22 1.12-.52 1.61-.93l2.37.96a.5.5 0 0 0 .6-.22l1.9-3.29a.5.5 0 0 0-.12-.64l-2.01-1.57Z"/>
-      </svg>
+    <button type="button" class="toolbar-settings-btn settings-btn" id="settings-btn" title="管理 Claude Code API 配置" aria-label="API 配置">
+      <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderApiConfigIcon()}</span>
+      <span class="toolbar-settings-btn-label">API 配置</span>
     </button>
     <button type="button" class="toolbar-icon-btn theme-toggle-btn" id="theme-toggle-btn" title="${escapeHtml(getThemeToggleTitle())}" aria-label="${escapeHtml(getThemeToggleTitle())}">
       ${getThemeToggleIcon()}
@@ -646,9 +653,6 @@ function render() {
         </div>
         <div class="conversation-list" id="conversation-list">
           ${renderConversationList()}
-        </div>
-        <div class="sidebar-footer">
-          <div class="active-api-profile-label" id="active-api-profile-label">${escapeHtml(formatActiveApiProfileLabel(activeApiProfileName))}</div>
         </div>
       </div>
       <div class="main-content">
@@ -791,24 +795,6 @@ function showDeleteConfirm(title: string): Promise<boolean> {
     sub: '此操作将永久删除本地会话记录，且不可恢复。',
     confirmLabel: '删除',
   });
-}
-
-function formatActiveApiProfileLabel(profileName: string): string {
-  return profileName ? `当前 API 配置: ${profileName}` : '当前 API 配置';
-}
-
-async function refreshActiveApiProfileLabel() {
-  try {
-    const state = await invoke<ApiProfilesState>('get_api_profiles_state');
-    const active = state.profiles.find((profile) => profile.isActive);
-    activeApiProfileName = active?.name || '';
-    const label = document.querySelector('#active-api-profile-label');
-    if (label) {
-      label.textContent = formatActiveApiProfileLabel(activeApiProfileName);
-    }
-  } catch (e) {
-    console.error('Failed to load active API profile:', e);
-  }
 }
 
 function renderSettingsProfileList(profiles: ApiProfileItem[], selectedProfileId: string | null): string {
@@ -1275,7 +1261,6 @@ async function openSettingsModal() {
         const state = await invoke<ApiProfilesState>('get_api_profiles_state');
         livePathEl.textContent = `配置文件：${state.current.configPath}`;
       }
-      await refreshActiveApiProfileLabel();
     } catch (e) {
       alert('应用 API 配置失败: ' + String(e));
     }
@@ -1303,7 +1288,6 @@ async function openSettingsModal() {
       if (livePathEl) {
         livePathEl.textContent = `配置文件：${refreshed.state.current.configPath}`;
       }
-      await refreshActiveApiProfileLabel();
     } catch (e) {
       alert('删除配置失败: ' + String(e));
     }
@@ -1364,7 +1348,6 @@ async function openSettingsModal() {
         null;
 
       await refreshSettingsModal(overlay, savedProfileId);
-      await refreshActiveApiProfileLabel();
 
       if (saveBtn) {
         saveBtn.textContent = '已保存';
