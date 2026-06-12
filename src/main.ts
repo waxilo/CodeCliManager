@@ -5,6 +5,7 @@ interface Message {
   id: string;
   role: string;
   content: string;
+  thinking?: string;
   timestamp: number;
 }
 
@@ -253,25 +254,48 @@ function attachEventListeners() {
   }
 }
 
+function renderMessageHtml(msg: Message): string {
+  const isThinking = msg.role === 'thinking';
+  const avatarLabel = msg.role === 'user' ? 'You' : isThinking ? '🧠' : 'AI';
+  const roleClass = isThinking ? 'assistant thinking-msg' : msg.role;
+
+  let thinkingHtml = '';
+  if (msg.thinking && msg.thinking.trim()) {
+    thinkingHtml = `
+      <details class="thinking-block" open>
+        <summary class="thinking-summary">思考过程</summary>
+        <div class="thinking-content"><pre>${escapeHtml(msg.thinking)}</pre></div>
+      </details>
+    `;
+  }
+
+  const contentHtml = msg.content.trim()
+    ? `<pre>${escapeHtml(msg.content)}</pre>`
+    : '';
+
+  return `
+    <div class="message ${roleClass}">
+      <div class="message-avatar">${avatarLabel}</div>
+      <div class="message-content">
+        ${thinkingHtml}
+        ${contentHtml}
+        <div class="message-time">${formatTime(msg.timestamp)}</div>
+      </div>
+    </div>
+  `;
+}
+
 function renderChatContent(): string {
   const conversation = conversations.find(c => c.id === activeConversationId);
   if (!conversation) return '';
-  
+
   return `
     <div class="chat-header">
       <h2>${escapeHtml(conversation.title)}</h2>
       <span class="platform-badge">${platforms[conversation.platform]?.name || conversation.platform}</span>
     </div>
     <div class="message-list" id="message-list">
-      ${conversation.messages.map(msg => `
-        <div class="message ${msg.role}">
-          <div class="message-avatar">${msg.role === 'user' ? 'You' : 'AI'}</div>
-          <div class="message-content">
-            <pre>${escapeHtml(msg.content)}</pre>
-            <div class="message-time">${formatTime(msg.timestamp)}</div>
-          </div>
-        </div>
-      `).join('')}
+      ${conversation.messages.map(renderMessageHtml).join('')}
     </div>
   `;
 }
@@ -387,16 +411,7 @@ function refreshChatContent() {
   }
   
   if (messageList) {
-    messageList.innerHTML = conversation.messages.map((msg: Message) => `
-      <div class="message ${msg.role}">
-        <div class="message-avatar">${msg.role === 'user' ? 'You' : 'AI'}</div>
-        <div class="message-content">
-          <pre>${escapeHtml(msg.content)}</pre>
-          <div class="message-time">${formatTime(msg.timestamp)}</div>
-        </div>
-      </div>
-    `).join('');
-    
+    messageList.innerHTML = conversation.messages.map(renderMessageHtml).join('');
     messageList.scrollTop = messageList.scrollHeight;
   }
 }

@@ -11,6 +11,8 @@ struct Message {
     id: String,
     role: String,
     content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thinking: Option<String>,
     timestamp: i64,
 }
 
@@ -141,29 +143,58 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             updated_at = ts;
         }
         
+        // 处理 standalone thinking 类型消息
+        if value.get("type").and_then(|t| t.as_str()) == Some("thinking") {
+            if let Some(msg) = value.get("message") {
+                let th_content = msg.get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !th_content.trim().is_empty() {
+                    messages.push(Message {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        role: "thinking".to_string(),
+                        content: th_content,
+                        thinking: None,
+                        timestamp: ts.unwrap_or_default(),
+                    });
+                }
+            }
+            continue;
+        }
+
         let message = value.get("message");
         if message.is_none() {
             continue;
         }
-        
+
         let message = message.unwrap();
         let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
-        let content = extract_text(message.get("content"));
-        
-        if content.trim().is_empty() {
+        let (content, thinking) = extract_text_and_thinking(message.get("content"));
+
+        // 空消息跳过（但保留纯 thinking 的消息）
+        if content.trim().is_empty() && thinking.is_none() {
             continue;
         }
-        
+
+        // 如果只有 thinking 没有文本，归类为 thinking 角色
+        let effective_role = if content.trim().is_empty() && thinking.is_some() {
+            "thinking".to_string()
+        } else {
+            role.clone()
+        };
+
         if first_user_message.is_none() && role == "user" {
             if !content.contains("<local-command-caveat>") && !content.starts_with("<command-name>") {
                 first_user_message = Some(content.clone());
             }
         }
-        
+
         messages.push(Message {
             id: uuid::Uuid::new_v4().to_string(),
-            role,
+            role: effective_role,
             content,
+            thinking,
             timestamp: ts.unwrap_or_default(),
         });
     }
@@ -195,31 +226,55 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     })
 }
 
-fn extract_text(content: Option<&serde_json::Value>) -> String {
+// 从 content 中提取文本和思考内容
+// 返回 (纯文本, 思考内容)
+fn extract_text_and_thinking(content: Option<&serde_json::Value>) -> (String, Option<String>) {
     match content {
-        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::String(s)) => (s.clone(), None),
         Some(serde_json::Value::Array(items)) => {
-            items.iter()
-                .filter_map(|item| {
-                    if let Some(t) = item.get("type").and_then(|t| t.as_str()) {
-                        match t {
-                            "text" => item.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()),
-                            "tool_result" => item.get("content").and_then(|c| c.as_str()).map(|s| s.to_string()),
-                            "tool_use" => {
-                                let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                                Some(format!("[Tool: {}]", name))
-                            }
-                            _ => None,
+            let mut texts = Vec::new();
+            let mut thinking_parts = Vec::new();
+            for item in items {
+                let t = item.get("type").and_then(|t| t.as_str());
+                match t {
+                    Some("text") => {
+                        if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                            texts.push(text.to_string());
                         }
-                    } else {
-                        None
                     }
-                })
-                .collect::<Vec<String>>()
-                .join("\n")
+                    Some("thinking") => {
+                        if let Some(th) = item.get("thinking").and_then(|t| t.as_str()) {
+                            thinking_parts.push(th.to_string());
+                        }
+                    }
+                    Some("tool_result") => {
+                        if let Some(c) = item.get("content").and_then(|c| c.as_str()) {
+                            texts.push(c.to_string());
+                        }
+                    }
+                    Some("tool_use") => {
+                        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                        texts.push(format!("[Tool: {}]", name));
+                    }
+                    _ => {}
+                }
+            }
+            let text = texts.join("\n");
+            let thinking = if thinking_parts.is_empty() {
+                None
+            } else {
+                Some(thinking_parts.join("\n"))
+            };
+            (text, thinking)
         }
-        _ => String::new(),
+        _ => (String::new(), None),
     }
+}
+
+// 兼容旧代码：只提取纯文本
+#[allow(dead_code)]
+fn extract_text(content: Option<&serde_json::Value>) -> String {
+    extract_text_and_thinking(content).0
 }
 
 fn parse_timestamp(iso_string: &str) -> Option<i64> {
@@ -277,12 +332,14 @@ fn get_default_state() -> AppState {
                 id: "msg-1".to_string(),
                 role: "user".to_string(),
                 content: "告诉我如何学习 Rust 编程语言".to_string(),
+                thinking: None,
                 timestamp: two_hours_ago,
             },
             Message {
                 id: "msg-2".to_string(),
                 role: "assistant".to_string(),
                 content: "学习 Rust 的最佳方式：\n1. 阅读官方文档 \"The Rust Programming Language\"\n2. 完成 Rustlings 练习\n3. 构建小项目\n4. 参与开源项目".to_string(),
+                thinking: None,
                 timestamp: two_hours_ago + 1,
             },
         ],
@@ -300,12 +357,14 @@ fn get_default_state() -> AppState {
                 id: "msg-3".to_string(),
                 role: "user".to_string(),
                 content: "前端性能优化有哪些方法？".to_string(),
+                thinking: None,
                 timestamp: hour_ago,
             },
             Message {
                 id: "msg-4".to_string(),
                 role: "assistant".to_string(),
                 content: "前端性能优化技巧：\n- 代码分割和懒加载\n- 图片优化（WebP/AVIF）\n- 缓存策略\n- CDN 加速\n- 减少重绘重排".to_string(),
+                thinking: None,
                 timestamp: hour_ago + 1,
             },
         ],
@@ -323,12 +382,14 @@ fn get_default_state() -> AppState {
                 id: "msg-5".to_string(),
                 role: "user".to_string(),
                 content: "什么是 Tauri 框架？".to_string(),
+                thinking: None,
                 timestamp: now - 300,
             },
             Message {
                 id: "msg-6".to_string(),
                 role: "assistant".to_string(),
                 content: "Tauri 是一个用于构建跨平台桌面应用的框架，使用 Rust 作为后端，前端可以使用任何 Web 技术。相比 Electron，Tauri 应用体积更小、性能更好。".to_string(),
+                thinking: None,
                 timestamp: now - 299,
             },
         ],
@@ -466,6 +527,7 @@ async fn send_message(conversation_id: String, content: String) -> Result<Conver
         id: uuid::Uuid::new_v4().to_string(),
         role: "user".to_string(),
         content: content.clone(),
+        thinking: None,
         timestamp: now,
     };
     
@@ -510,6 +572,7 @@ async fn send_message(conversation_id: String, content: String) -> Result<Conver
             id: uuid::Uuid::new_v4().to_string(),
             role: "assistant".to_string(),
             content: response_content,
+            thinking: None,
             timestamp: chrono::Utc::now().timestamp(),
         };
         c.messages.push(assistant_message);
