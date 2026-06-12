@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -1483,6 +1483,85 @@ fn process_claude_stream_line(
     }
 }
 
+/// macOS GUI 应用从 Finder 启动时 PATH 很窄，通常找不到 /usr/local/bin/claude。
+fn extended_path_for_cli() -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut segments: Vec<PathBuf> = vec![
+        PathBuf::from("/usr/local/bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        home.join(".local/bin"),
+        home.join(".npm-global/bin"),
+        home.join("bin"),
+    ];
+
+    if let Ok(existing) = std::env::var("PATH") {
+        for part in existing.split(':').filter(|s| !s.is_empty()) {
+            segments.push(PathBuf::from(part));
+        }
+    }
+
+    segments.extend([
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/bin"),
+        PathBuf::from("/usr/sbin"),
+        PathBuf::from("/sbin"),
+    ]);
+
+    let mut seen = HashSet::new();
+    segments
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|p| seen.insert(p.clone()))
+        .collect::<Vec<_>>()
+        .join(":")
+}
+
+fn resolve_claude_executable() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut candidates = vec![
+        PathBuf::from("/usr/local/bin/claude"),
+        PathBuf::from("/opt/homebrew/bin/claude"),
+        home.join(".local/bin/claude"),
+        home.join(".npm-global/bin/claude"),
+        home.join("bin/claude"),
+    ];
+
+    #[cfg(unix)]
+    {
+        if let Ok(output) = Command::new("/bin/zsh")
+            .args(["-l", "-c", "command -v claude"])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    candidates.insert(0, PathBuf::from(path));
+                }
+            }
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+
+    PathBuf::from("claude")
+}
+
+fn apply_cli_runtime_env(cmd: &mut Command) {
+    cmd.env("PATH", extended_path_for_cli());
+    if let Some(home) = dirs::home_dir() {
+        cmd.env("HOME", home);
+    }
+    if let Ok(user) = std::env::var("USER") {
+        cmd.env("USER", user);
+    } else if let Ok(logname) = std::env::var("LOGNAME") {
+        cmd.env("USER", logname);
+    }
+}
+
 /// 使用 stream-json 模式启动 claude，实时推送 thinking / answer 增量
 fn spawn_claude_stream(
     app: AppHandle,
@@ -1512,8 +1591,10 @@ fn spawn_claude_stream(
 
     let effective_cwd = project_dir.and_then(|cwd| resolve_or_create_dir(cwd));
 
-    let mut cmd = Command::new("claude");
+    let claude_bin = resolve_claude_executable();
+    let mut cmd = Command::new(&claude_bin);
     cmd.args(&args);
+    apply_cli_runtime_env(&mut cmd);
     #[cfg(target_os = "windows")]
     {
         cmd.creation_flags(0x08000000);
@@ -1525,7 +1606,7 @@ fn spawn_claude_stream(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    eprintln!("[spawn_stream] claude {}", args.join(" "));
+    eprintln!("[spawn_stream] {:?} {}", claude_bin, args.join(" "));
     eprintln!("[spawn_stream] cwd: {:?}", effective_cwd);
 
     let mut child = cmd.spawn()?;
@@ -2247,9 +2328,10 @@ async fn run_claude_command(input: &str) -> CommandResult {
     
     #[cfg(not(target_os = "windows"))]
     {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "claude"]);
-        
+        let claude_bin = resolve_claude_executable();
+        let mut cmd = Command::new(&claude_bin);
+        apply_cli_runtime_env(&mut cmd);
+
         run_command_with_input(cmd, input).await
     }
 }
@@ -2273,10 +2355,11 @@ async fn run_claude_command_with_resume(input: &str, conversation_id: &str) -> C
     
     #[cfg(not(target_os = "windows"))]
     {
-        let mut cmd = Command::new("sh");
-        let cmd_str = format!("claude --resume {}", conversation_id);
-        cmd.args(["-c", &cmd_str]);
-        
+        let claude_bin = resolve_claude_executable();
+        let mut cmd = Command::new(&claude_bin);
+        cmd.args(["--resume", conversation_id]);
+        apply_cli_runtime_env(&mut cmd);
+
         run_command_with_input(cmd, input).await
     }
 }
