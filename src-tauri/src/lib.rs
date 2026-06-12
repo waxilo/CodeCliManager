@@ -20,6 +20,8 @@ struct Conversation {
     title: String,
     messages: Vec<Message>,
     platform: String,
+    #[serde(default)]
+    project_dir: Option<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -101,28 +103,34 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     let mut created_at: Option<i64> = None;
     let mut updated_at: Option<i64> = None;
     let mut custom_title: Option<String> = None;
-    
+    let mut project_dir: Option<String> = None;
+
     for line in content.lines() {
         if line.trim().is_empty() {
             continue;
         }
-        
+
         let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
-        
+
         if value.get("type").and_then(|t| t.as_str()) == Some("custom-title") {
             custom_title = value.get("customTitle").and_then(|t| t.as_str()).map(|s| s.to_string());
             continue;
         }
-        
+
         if value.get("isMeta").and_then(|m| m.as_bool()) == Some(true) {
             continue;
         }
-        
+
         if session_id.is_none() {
             session_id = value.get("sessionId").and_then(|s| s.as_str()).map(|s| s.to_string());
+        }
+
+        // 从 JSONL 行中提取 cwd（项目工作目录）
+        if project_dir.is_none() {
+            project_dir = value.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string());
         }
         
         let ts = value.get("timestamp").and_then(|t| t.as_str()).and_then(parse_timestamp);
@@ -181,6 +189,7 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
         title,
         messages,
         platform: "claude".to_string(),
+        project_dir,
         created_at: created_at.unwrap_or_default(),
         updated_at: updated_at.unwrap_or_default(),
     })
@@ -278,6 +287,7 @@ fn get_default_state() -> AppState {
             },
         ],
         platform: "claude".to_string(),
+        project_dir: None,
         created_at: two_hours_ago,
         updated_at: two_hours_ago + 1,
     });
@@ -300,6 +310,7 @@ fn get_default_state() -> AppState {
             },
         ],
         platform: "claude".to_string(),
+        project_dir: None,
         created_at: hour_ago,
         updated_at: hour_ago + 1,
     });
@@ -322,6 +333,7 @@ fn get_default_state() -> AppState {
             },
         ],
         platform: "claude".to_string(),
+        project_dir: None,
         created_at: now - 300,
         updated_at: now - 299,
     });
@@ -463,6 +475,7 @@ async fn send_message(conversation_id: String, content: String) -> Result<Conver
             title: content.chars().take(30).collect(),
             messages: vec![user_message],
             platform: state.active_platform.clone(),
+            project_dir: None,
             created_at: now,
             updated_at: now,
         };
@@ -509,213 +522,166 @@ async fn send_message(conversation_id: String, content: String) -> Result<Conver
         .ok_or_else(|| "Conversation not found".to_string())
 }
 
-// 启动 shell 执行 claude 命令（同步启动，不等待结束）
-fn spawn_claude_shell(input: &str, conversation_id: Option<&String>) -> std::io::Result<()> {
+// 转义 Windows PowerShell 单引号字符串（' → ''）
+#[cfg(target_os = "windows")]
+fn escape_ps_single_quoted(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
+// 转义 Unix shell 单引号字符串（' → '\''）
+#[cfg(not(target_os = "windows"))]
+fn escape_sh_single_quoted(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
+// 确保目录存在：先验证，不存在则尝试创建
+fn resolve_or_create_dir(cwd: &str) -> Option<String> {
+    let path = std::path::Path::new(cwd);
+    if path.exists() && path.is_dir() {
+        return Some(cwd.to_string());
+    }
+    match std::fs::create_dir_all(path) {
+        Ok(()) => {
+            eprintln!("[spawn] 已创建目录: {}", cwd);
+            Some(cwd.to_string())
+        }
+        Err(e) => {
+            eprintln!("[spawn] 创建目录失败 '{}': {}", cwd, e);
+            None
+        }
+    }
+}
+
+// 构建平台相关的 shell 命令
+fn build_shell_command(input: &str, claude_part: &str, cwd: Option<&str>) -> (&'static str, Vec<String>, String) {
+    #[cfg(target_os = "windows")]
+    {
+        let escaped = escape_ps_single_quoted(input);
+        let cmd = if let Some(cwd) = cwd {
+            format!("Set-Location '{}'; '{}' | {}", cwd, escaped, claude_part)
+        } else {
+            format!("'{}' | {}", escaped, claude_part)
+        };
+        ("powershell", vec!["-NoProfile".into(), "-Command".into()], cmd)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let escaped = escape_sh_single_quoted(input);
+        let cmd = if let Some(cwd) = cwd {
+            format!("cd '{}' && echo '{}' | {}", cwd, escaped, claude_part)
+        } else {
+            format!("echo '{}' | {}", escaped, claude_part)
+        };
+        ("sh", vec!["-c".into()], cmd)
+    }
+}
+
+// 启动 shell 执行 claude 命令
+// Win: PowerShell 'prompt' | claude --resume
+// Mac: sh echo 'prompt' | claude --resume
+// project_dir: 从 JSONL 会话文件中提取的 cwd，用于设置正确的工作目录
+fn spawn_claude_shell(input: &str, conversation_id: Option<&String>, project_dir: Option<&String>) -> std::io::Result<std::process::Output> {
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
 
-    let mut cmd = if let Some(cid) = conversation_id {
-        if !cid.is_empty() {
-            // 使用 --resume 模式
-            #[cfg(target_os = "windows")]
-            {
-                let mut c = Command::new("cmd");
-                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-                let home_str = home.to_string_lossy().to_string();
-                let full_cmd = format!("cd /d {} && claude --resume {}", home_str, cid);
-                c.args(["/C", &full_cmd]);
-                c.creation_flags(0x08000000);
-                c
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let mut c = Command::new("sh");
-                let cmd_str = format!("claude --resume {}", cid);
-                c.args(["-c", &cmd_str]);
-                c
-            }
-        } else {
-            // 普通模式（有 conversation_id 但为空）
-            #[cfg(target_os = "windows")]
-            {
-                let mut c = Command::new("cmd");
-                c.args(["/C", "claude"]);
-                c.creation_flags(0x08000000);
-                c
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                let mut c = Command::new("sh");
-                c.args(["-c", "claude"]);
-                c
-            }
-        }
+    let cid_opt = conversation_id.filter(|c| !c.is_empty());
+
+    let claude_part = if let Some(cid) = cid_opt {
+        format!("claude --resume {}", cid)
     } else {
-        // 没有 conversation_id，普通模式
-        #[cfg(target_os = "windows")]
-        {
-            let mut c = Command::new("cmd");
-            c.args(["/C", "claude"]);
-            c.creation_flags(0x08000000);
-            c
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let mut c = Command::new("sh");
-            c.args(["-c", "claude"]);
-            c
-        }
+        "claude".to_string()
     };
 
-    let mut child = cmd
-        .stdin(Stdio::piped())
+    let effective_cwd = project_dir.and_then(|cwd| resolve_or_create_dir(cwd));
+    let (shell, shell_args, shell_cmd) = build_shell_command(input, &claude_part, effective_cwd.as_deref());
+
+    eprintln!("============================================================");
+    eprintln!("[spawn] 平台     : {}", if cfg!(target_os = "windows") { "Windows" } else { "Unix" });
+    eprintln!("[spawn] 工作目录 : {:?}", effective_cwd);
+    eprintln!("[spawn] 执行命令 : {}", shell_cmd);
+    eprintln!("[spawn] 原始提示词: {}", input);
+    eprintln!("============================================================");
+
+    let mut cmd = Command::new(shell);
+    #[cfg(target_os = "windows")]
+    {
+        cmd.creation_flags(0x08000000);
+    }
+    if let Some(ref cwd) = effective_cwd {
+        cmd.current_dir(cwd);
+    }
+    for arg in &shell_args {
+        cmd.arg(arg);
+    }
+    cmd.arg(&shell_cmd);
+
+    let output = cmd
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()?;
+        .stdin(Stdio::null())
+        .output()?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes());
-        let _ = stdin.write_all(b"\n");
+    let stdout_s = String::from_utf8_lossy(&output.stdout);
+    let stderr_s = String::from_utf8_lossy(&output.stderr);
+    eprintln!("[claude] 退出码: {}", output.status);
+    if !stdout_s.trim().is_empty() {
+        eprintln!("[claude stdout]\n{}", stdout_s);
+    }
+    if !stderr_s.trim().is_empty() {
+        eprintln!("[claude stderr]\n{}", stderr_s);
     }
 
-    Ok(())
+    Ok(output)
 }
 
 #[tauri::command]
 async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<String>) -> Result<(), String> {
     let active_cid = conversation_id.clone();
+    eprintln!("[execute_prompt] received: prompt='{}', conversation_id={:?}", prompt, active_cid);
 
-    // 启动 shell 进程和监听线程
     tauri::async_runtime::spawn(async move {
         // 记录发送前的会话状态
         let before_conversations = load_claude_history();
         let before_ids: std::collections::HashSet<String> =
             before_conversations.iter().map(|c| c.id.clone()).collect();
-        let before_latest = if before_conversations.is_empty() {
-            0
+
+        // 查找目标会话的 project_dir（从 JSONL 中提取的 cwd）
+        let project_dir = active_cid.as_ref().and_then(|cid| {
+            before_conversations.iter()
+                .find(|c| c.id == *cid)
+                .and_then(|c| c.project_dir.as_ref())
+        });
+
+        // 阻塞执行 claude，等待完成
+        if let Err(e) = spawn_claude_shell(&prompt, active_cid.as_ref(), project_dir) {
+            eprintln!("[execute_prompt] claude 执行失败: {}", e);
+            let _ = app.emit("session-ended", active_cid.clone());
+            return;
+        }
+
+        // Claude 执行完毕，重新加载会话列表
+        let after_conversations = load_claude_history();
+
+        // 查找发生变化的会话：优先查找目标会话，其次查找最新会话
+        let updated_conv = active_cid.as_ref()
+            .and_then(|cid| after_conversations.iter().find(|c| c.id == *cid))
+            .or_else(|| after_conversations.iter().max_by_key(|c| c.updated_at));
+
+        if let Some(conv) = updated_conv {
+            let is_existing = before_ids.contains(&conv.id);
+            let event_name = if is_existing { "messages-updated" } else { "session-created" };
+
+            let payload = SessionEventPayload {
+                conversation_id: conv.id.clone(),
+                title: conv.title.clone(),
+                messages: conv.messages.clone(),
+                updated_at: conv.updated_at,
+            };
+            eprintln!("[execute_prompt] emit {} for session {}", event_name, conv.id);
+            let _ = app.emit(event_name, &payload);
         } else {
-            before_conversations
-                .iter()
-                .map(|c| c.updated_at)
-                .max()
-                .unwrap_or(0)
-        };
-
-        // 启动 shell 执行 claude
-        let _ = spawn_claude_shell(&prompt, active_cid.as_ref());
-
-        // 启动监听循环
-        let mut attempts = 0;
-        let max_attempts = 120; // 最多监听 120 次
-        let interval = std::time::Duration::from_millis(500);
-        let mut current_session_id: Option<String> = None;
-        let mut last_message_count: usize = 0;
-        let mut last_updated_at: i64 = 0;
-
-        loop {
-            attempts += 1;
-
-            // 获取最新会话列表
-            let latest_conversations = load_claude_history();
-
-            if !latest_conversations.is_empty() {
-                // 如果有目标会话ID，优先检查该会话的变化
-                let target_conv = active_cid.as_ref()
-                    .and_then(|cid| latest_conversations.iter().find(|c| c.id == *cid));
-
-                if let Some(conv) = target_conv {
-                    let updated = conv.updated_at > before_latest;
-
-                    if current_session_id.is_none() && updated {
-                        current_session_id = Some(conv.id.clone());
-
-                        let payload = SessionEventPayload {
-                            conversation_id: conv.id.clone(),
-                            title: conv.title.clone(),
-                            messages: conv.messages.clone(),
-                            updated_at: conv.updated_at,
-                        };
-
-                        let _ = app.emit("session-created", &payload);
-
-                        last_message_count = conv.messages.len();
-                        last_updated_at = conv.updated_at;
-                    } else if let Some(cid) = &current_session_id {
-                        if cid == &conv.id {
-                            let message_count_changed =
-                                conv.messages.len() != last_message_count;
-                            let updated_changed = conv.updated_at != last_updated_at;
-
-                            if message_count_changed || updated_changed {
-                                let payload = SessionEventPayload {
-                                    conversation_id: conv.id.clone(),
-                                    title: conv.title.clone(),
-                                    messages: conv.messages.clone(),
-                                    updated_at: conv.updated_at,
-                                };
-
-                                let _ = app.emit("messages-updated", &payload);
-
-                                last_message_count = conv.messages.len();
-                                last_updated_at = conv.updated_at;
-                            }
-                        }
-                    }
-                } else {
-                    // 没有目标会话或目标会话不存在，检查最新会话
-                    let newest_conv = latest_conversations.iter().max_by_key(|c| c.updated_at);
-
-                    if let Some(conv) = newest_conv {
-                        let is_new =
-                            !before_ids.contains(&conv.id) || conv.updated_at > before_latest;
-
-                        if current_session_id.is_none() && is_new {
-                            current_session_id = Some(conv.id.clone());
-
-                            let payload = SessionEventPayload {
-                                conversation_id: conv.id.clone(),
-                                title: conv.title.clone(),
-                                messages: conv.messages.clone(),
-                                updated_at: conv.updated_at,
-                            };
-
-                            let _ = app.emit("session-created", &payload);
-
-                            last_message_count = conv.messages.len();
-                            last_updated_at = conv.updated_at;
-                        } else if let Some(cid) = &current_session_id {
-                            if let Some(current_conv) =
-                                latest_conversations.iter().find(|c| c.id == *cid)
-                            {
-                                let message_count_changed =
-                                    current_conv.messages.len() != last_message_count;
-                                let updated_changed = current_conv.updated_at != last_updated_at;
-
-                                if message_count_changed || updated_changed {
-                                    let payload = SessionEventPayload {
-                                        conversation_id: current_conv.id.clone(),
-                                        title: current_conv.title.clone(),
-                                        messages: current_conv.messages.clone(),
-                                        updated_at: current_conv.updated_at,
-                                    };
-
-                                    let _ = app.emit("messages-updated", &payload);
-
-                                    last_message_count = current_conv.messages.len();
-                                    last_updated_at = current_conv.updated_at;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            if attempts >= max_attempts {
-                let _ = app.emit("session-ended", current_session_id.clone());
-                break;
-            }
-
-            std::thread::sleep(interval);
+            eprintln!("[execute_prompt] 未找到更新的会话");
+            let _ = app.emit("session-ended", active_cid.clone());
         }
     });
 

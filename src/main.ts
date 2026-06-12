@@ -289,20 +289,24 @@ function newChat() {
 async function sendMessage() {
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
-  
+
   if (!input || !input.value.trim()) return;
-  
+
   const content = input.value.trim();
   input.value = '';
-  
+
   if (sendBtn) sendBtn.disabled = true;
-  
+
   try {
     // 发送消息到后端，后端启动 shell 并通过事件系统推送更新
-    await invoke('execute_prompt', { 
-      prompt: content,
-      conversation_id: activeConversationId || undefined
-    });
+    // 注意：Tauri 2 默认将 Rust snake_case 参数转为 JS camelCase
+    // conversation_id (Rust) → conversationId (JS)
+    const args: Record<string, any> = { prompt: content };
+    if (activeConversationId) {
+      args.conversationId = activeConversationId;
+    }
+    console.log('[sendMessage] activeConversationId:', activeConversationId, 'args:', args);
+    await invoke('execute_prompt', args);
   } catch (e) {
     console.error('Failed to send message:', e);
     alert('Failed to send message: ' + String(e));
@@ -376,7 +380,7 @@ function selectConversation(id: string) {
 
 async function deleteConversation(id: string) {
   if (confirm('Are you sure you want to delete this conversation?')) {
-    await invoke('delete_conversation', { conversation_id: id });
+    await invoke('delete_conversation', { conversationId: id });
     await loadData();
     if (activeConversationId === id) {
       activeConversationId = conversations.length > 0 ? conversations[0].id : '';
@@ -408,7 +412,7 @@ async function saveEdit(id: string) {
   
   try {
     await invoke('update_conversation_title', {
-      conversation_id: id,
+      conversationId: id,
       title: newTitle
     });
     await loadData();
