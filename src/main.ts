@@ -166,6 +166,9 @@ async function init() {
   initTheme();
   await loadData();
   render();
+  if (!activeConversationId) {
+    void refreshModelInfo();
+  }
   setupEventListeners();
   setInterval(() => {
     currentTime = new Date();
@@ -649,7 +652,10 @@ function render() {
       <div class="sidebar">
         <div class="sidebar-header">
           <h1>AI CLI Manager</h1>
-          <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
+          <div class="sidebar-header-actions">
+            <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
+            <button class="refresh-btn" id="refresh-btn" title="扫描本地新会话">↻</button>
+          </div>
         </div>
         <div class="conversation-list" id="conversation-list">
           ${renderConversationList()}
@@ -678,6 +684,26 @@ function render() {
 
 function attachEventListeners() {
   document.querySelector('#new-chat-btn')?.addEventListener('click', newChat);
+
+  document.querySelector('#refresh-btn')?.addEventListener('click', async () => {
+    const btn = document.querySelector('#refresh-btn') as HTMLButtonElement | null;
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳';
+    }
+    try {
+      await loadData();
+      const listEl = document.querySelector('#conversation-list');
+      if (listEl) {
+        listEl.innerHTML = renderConversationList();
+      }
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '↻';
+      }
+    }
+  });
 
   const listEl = document.querySelector('#conversation-list');
   if (listEl) {
@@ -964,9 +990,10 @@ async function openSettingsModal() {
           <button type="button" class="settings-import-cc-switch">从 CC Switch 导入</button>
         </div>
         <div class="settings-footer-actions">
-          <button type="button" class="settings-btn-secondary settings-btn-danger delete-profile">删除</button>
+          <button type="button" class="settings-btn-secondary delete-profile">删除</button>
           <button type="button" class="settings-btn-primary save-only">保存</button>
           <button type="button" class="settings-btn-secondary apply-profile">应用</button>
+          <button type="button" class="settings-btn-secondary settings-close-footer">关闭</button>
         </div>
       </div>
     </div>
@@ -975,6 +1002,7 @@ async function openSettingsModal() {
   const close = () => {
     document.removeEventListener('keydown', onEscapeKey);
     overlay.remove();
+    void refreshModelInfo();
   };
 
   const onEscapeKey = (event: KeyboardEvent) => {
@@ -1261,6 +1289,7 @@ async function openSettingsModal() {
         const state = await invoke<ApiProfilesState>('get_api_profiles_state');
         livePathEl.textContent = `配置文件：${state.current.configPath}`;
       }
+      void refreshModelInfo();
     } catch (e) {
       alert('应用 API 配置失败: ' + String(e));
     }
@@ -1294,6 +1323,7 @@ async function openSettingsModal() {
   });
 
   overlay.querySelector('.settings-close-btn')?.addEventListener('click', close);
+  overlay.querySelector('.settings-close-footer')?.addEventListener('click', close);
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay) close();
   });
@@ -1570,8 +1600,44 @@ function renderEmptyState(): string {
       <div class="empty-icon">💬</div>
       <h2>Start a New Conversation</h2>
       <p>Select a platform from the dropdown and start chatting with your AI CLI</p>
+      <div class="empty-chat-model-info" id="empty-chat-model-info"></div>
     </div>
   `;
+}
+
+async function refreshModelInfo() {
+  const container = document.querySelector('#empty-chat-model-info');
+  if (!container) return;
+
+  try {
+    const state = await invoke<ApiProfilesState>('get_api_profiles_state');
+    const activeProfile = state.profiles.find((p) => p.id === state.activeProfileId);
+    const modelName = activeProfile?.defaultModel || state.current?.defaultModel || '';
+    const profileName = activeProfile?.name || '';
+    const baseUrl = activeProfile?.baseUrl || state.current?.baseUrl || '';
+
+    if (modelName || profileName) {
+      container.innerHTML = `
+        <div class="model-info-card">
+          <div class="model-info-header">
+            <svg class="model-info-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+              <path d="M2 17l10 5 10-5"/>
+              <path d="M2 12l10 5 10-5"/>
+            </svg>
+            <span class="model-info-label">当前模型配置</span>
+          </div>
+          <div class="model-info-body">
+            ${profileName ? `<div class="model-info-row"><span class="model-info-key">配置方案</span><span class="model-info-value">${escapeHtml(profileName)}</span></div>` : ''}
+            ${baseUrl ? `<div class="model-info-row"><span class="model-info-key">API 地址</span><span class="model-info-value model-info-url">${escapeHtml(baseUrl)}</span></div>` : ''}
+            ${modelName ? `<div class="model-info-row"><span class="model-info-key">默认模型</span><span class="model-info-value model-info-model">${escapeHtml(modelName)}</span></div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+  } catch {
+    // 静默处理错误，不阻塞页面渲染
+  }
 }
 
 function newChat() {
@@ -1579,6 +1645,7 @@ function newChat() {
   pendingUserMessage = null;
   transientSessionError = null;
   render();
+  void refreshModelInfo();
   
   setTimeout(() => {
     const input = document.querySelector<HTMLTextAreaElement>('#message-input');
