@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键：递增版本 → 提交推送 → 打 tag → 触发 GitHub Actions Release 构建发布
+# 一键：递增版本 → 提交 → 同步远程 → 推送 → 打 tag → 触发 Release
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
@@ -10,6 +10,12 @@ PACKAGE_JSON="package.json"
 CARGO_TOML="src-tauri/Cargo.toml"
 REMOTE="${REMOTE:-origin}"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+
+sync_remote_branch() {
+	echo "同步 ${REMOTE}/${BRANCH}..."
+	git fetch "$REMOTE"
+	git pull --rebase "$REMOTE" "$BRANCH"
+}
 
 read_version() {
 	grep -o '"version": "[^"]*"' "$TAURI_CONF" | head -1 | cut -d'"' -f4
@@ -28,6 +34,9 @@ bump_patch() {
 tag_exists_on_remote() {
 	git ls-remote --tags "$REMOTE" "refs/tags/$1" | grep -q .
 }
+
+# 先 fetch，用于判断远程 tag 是否已占用
+git fetch "$REMOTE"
 
 CURRENT="$(read_version)"
 NEW="$(bump_patch "$CURRENT")"
@@ -50,6 +59,9 @@ if git diff --cached --quiet; then
 fi
 
 git commit -m "$COMMIT_MSG"
+
+# 提交后再 rebase，工作区已干净
+sync_remote_branch
 
 echo "推送到 ${REMOTE}/${BRANCH}..."
 git push "$REMOTE" "$BRANCH"
