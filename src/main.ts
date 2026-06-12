@@ -56,7 +56,7 @@ async function setupEventListeners() {
   await listen<SessionEventPayload>('session-created', (event) => {
     const payload = event.payload;
     activeConversationId = payload.conversation_id;
-    
+
     // 更新会话列表中的这个会话
     updateOrAddConversation({
       id: payload.conversation_id,
@@ -66,10 +66,13 @@ async function setupEventListeners() {
       created_at: payload.updated_at,
       updated_at: payload.updated_at,
     });
-    
+
+    // 清除等待状态
+    hideSendingState();
+
     // 刷新界面并选中新会话
     render();
-    
+
     setTimeout(() => {
       const messageList = document.querySelector<HTMLDivElement>('#message-list');
       if (messageList) {
@@ -81,7 +84,7 @@ async function setupEventListeners() {
   // 监听消息更新事件
   await listen<SessionEventPayload>('messages-updated', (event) => {
     const payload = event.payload;
-    
+
     // 更新会话内容
     updateOrAddConversation({
       id: payload.conversation_id,
@@ -91,22 +94,30 @@ async function setupEventListeners() {
       created_at: payload.updated_at,
       updated_at: payload.updated_at,
     });
-    
-    // 如果是当前活动会话，刷新右侧内容
+
+    // 清除等待状态
+    hideSendingState();
+
+    // 更新左侧列表（历史会话有新消息会排到顶部）
+    const listEl = document.querySelector('#conversation-list');
+    if (listEl) {
+      listEl.innerHTML = renderConversationList();
+    }
+
+    // 如果是当前活动会话，刷新右侧聊天内容
     if (payload.conversation_id === activeConversationId) {
       refreshChatContent();
-    } else {
-      // 更新左侧列表显示
-      renderConversationList();
     }
   });
   
   // 监听会话结束事件
   await listen<string | null>('session-ended', (_event) => {
-    // 会话结束，可以做一些清理工作
-    // 例如：重新加载完整会话列表
+    hideSendingState();
     loadData().then(() => {
-      renderConversationList();
+      const listEl = document.querySelector('#conversation-list');
+      if (listEl) {
+        listEl.innerHTML = renderConversationList();
+      }
     });
   });
 }
@@ -291,16 +302,24 @@ async function sendMessage() {
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
 
   if (!input || !input.value.trim()) return;
+  // 防止重复发送
+  if (sendBtn?.disabled) return;
 
   const content = input.value.trim();
   input.value = '';
 
-  if (sendBtn) sendBtn.disabled = true;
+  // 进入等待状态
+  if (sendBtn) {
+    sendBtn.disabled = true;
+    sendBtn.textContent = 'Waiting...';
+  }
+
+  // 在消息列表底部显示加载动画
+  showLoadingIndicator();
 
   try {
     // 发送消息到后端，后端启动 shell 并通过事件系统推送更新
     // 注意：Tauri 2 默认将 Rust snake_case 参数转为 JS camelCase
-    // conversation_id (Rust) → conversationId (JS)
     const args: Record<string, any> = { prompt: content };
     if (activeConversationId) {
       args.conversationId = activeConversationId;
@@ -310,8 +329,43 @@ async function sendMessage() {
   } catch (e) {
     console.error('Failed to send message:', e);
     alert('Failed to send message: ' + String(e));
-    if (sendBtn) sendBtn.disabled = false;
+    hideSendingState();
   }
+}
+
+// 在消息列表底部显示加载指示器
+function showLoadingIndicator() {
+  const messageList = document.querySelector<HTMLDivElement>('#message-list');
+  if (!messageList) return;
+
+  // 先移除旧的加载指示器
+  const existing = messageList.querySelector('.loading-indicator');
+  if (existing) existing.remove();
+
+  const loader = document.createElement('div');
+  loader.className = 'message assistant loading-indicator';
+  loader.innerHTML = `
+    <div class="message-avatar">AI</div>
+    <div class="message-content">
+      <div class="typing-dots">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+  `;
+  messageList.appendChild(loader);
+  messageList.scrollTop = messageList.scrollHeight;
+}
+
+// 清除等待状态
+function hideSendingState() {
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+  if (sendBtn) {
+    sendBtn.disabled = false;
+    sendBtn.textContent = 'Send';
+  }
+  // 移除加载指示器
+  const loader = document.querySelector('.loading-indicator');
+  if (loader) loader.remove();
 }
 
 // 只刷新右侧聊天内容
