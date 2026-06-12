@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 
 interface Message {
   id: string;
@@ -16,6 +17,13 @@ interface Conversation {
   updated_at: number;
 }
 
+interface SessionEventPayload {
+  conversation_id: string;
+  title: string;
+  messages: Message[];
+  updated_at: number;
+}
+
 interface PlatformConfig {
   name: string;
   command: string;
@@ -26,6 +34,7 @@ interface PlatformConfig {
 let conversations: Conversation[] = [];
 let platforms: Record<string, PlatformConfig> = {};
 let activePlatform = 'claude';
+let currentPlatform = '';
 let activeConversationId = '';
 let editingConversationId: string | null = null;
 let currentTime = new Date();
@@ -35,11 +44,84 @@ const app = document.querySelector<HTMLDivElement>('#app')!;
 async function init() {
   await loadData();
   render();
-  // 更新当前时间用于相对时间显示
+  setupEventListeners();
   setInterval(() => {
     currentTime = new Date();
     renderConversationList();
   }, 60000);
+}
+
+// 设置事件监听器 - 监听后端发送的实时事件
+async function setupEventListeners() {
+  // 监听会话创建事件
+  await listen<SessionEventPayload>('session-created', (event) => {
+    const payload = event.payload;
+    activeConversationId = payload.conversation_id;
+    
+    // 更新会话列表中的这个会话
+    updateOrAddConversation({
+      id: payload.conversation_id,
+      title: payload.title,
+      messages: payload.messages,
+      platform: 'claude',
+      created_at: payload.updated_at,
+      updated_at: payload.updated_at,
+    });
+    
+    // 刷新界面并选中新会话
+    render();
+    
+    setTimeout(() => {
+      const messageList = document.querySelector<HTMLDivElement>('#message-list');
+      if (messageList) {
+        messageList.scrollTop = messageList.scrollHeight;
+      }
+    }, 100);
+  });
+  
+  // 监听消息更新事件
+  await listen<SessionEventPayload>('messages-updated', (event) => {
+    const payload = event.payload;
+    
+    // 更新会话内容
+    updateOrAddConversation({
+      id: payload.conversation_id,
+      title: payload.title,
+      messages: payload.messages,
+      platform: 'claude',
+      created_at: payload.updated_at,
+      updated_at: payload.updated_at,
+    });
+    
+    // 如果是当前活动会话，刷新右侧内容
+    if (payload.conversation_id === activeConversationId) {
+      refreshChatContent();
+    } else {
+      // 更新左侧列表显示
+      renderConversationList();
+    }
+  });
+  
+  // 监听会话结束事件
+  await listen<string | null>('session-ended', (_event) => {
+    // 会话结束，可以做一些清理工作
+    // 例如：重新加载完整会话列表
+    loadData().then(() => {
+      renderConversationList();
+    });
+  });
+}
+
+// 在内存中更新或添加会话
+function updateOrAddConversation(conv: Conversation) {
+  const idx = conversations.findIndex(c => c.id === conv.id);
+  if (idx >= 0) {
+    conversations[idx] = conv;
+  } else {
+    conversations.unshift(conv);
+  }
+  // 按 updated_at 降序排序
+  conversations.sort((a, b) => b.updated_at - a.updated_at);
 }
 
 async function loadData() {
@@ -47,6 +129,8 @@ async function loadData() {
     conversations = await invoke<Conversation[]>('get_conversations');
     platforms = await invoke<Record<string, PlatformConfig>>('get_platforms');
     activePlatform = await invoke<string>('get_active_platform');
+    currentPlatform = await invoke<string>('get_current_platform');
+    console.log('Current platform:', currentPlatform);
   } catch (e) {
     console.error('Failed to load data:', e);
   }
@@ -219,6 +303,7 @@ async function changePlatform(e: Event) {
   }
 }
 
+// 发送消息：通过 invoke 到后端，后端启动 shell 并通过事件推送更新
 async function sendMessage() {
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
@@ -231,35 +316,48 @@ async function sendMessage() {
   if (sendBtn) sendBtn.disabled = true;
   
   try {
-    const response = await invoke<string>('execute_prompt', {
-      prompt: content
+    // 发送消息到后端，后端启动 shell 并通过事件系统推送更新
+    await invoke('execute_prompt', { 
+      prompt: content,
+      conversation_id: activeConversationId || undefined
     });
-    
-    if (!activeConversationId) {
-      activeConversationId = await invoke<string>('create_conversation', {
-        platform: activePlatform
-      });
-    }
-    
-    await invoke('send_message', {
-      conversation_id: activeConversationId,
-      content: content + '\n\n---\n\n' + response
-    });
-    
-    await loadData();
-    render();
-    
-    setTimeout(() => {
-      const messageList = document.querySelector<HTMLDivElement>('#message-list');
-      if (messageList) {
-        messageList.scrollTop = messageList.scrollHeight;
-      }
-    }, 100);
   } catch (e) {
     console.error('Failed to send message:', e);
     alert('Failed to send message: ' + String(e));
-  } finally {
     if (sendBtn) sendBtn.disabled = false;
+  }
+}
+
+// 只刷新右侧聊天内容
+function refreshChatContent() {
+  const mainContent = document.querySelector<HTMLDivElement>('.main-content');
+  if (!mainContent || !activeConversationId) return;
+  
+  const conversation = conversations.find((c: Conversation) => c.id === activeConversationId);
+  if (!conversation) return;
+  
+  const messageList = document.querySelector<HTMLDivElement>('#message-list');
+  const chatHeader = document.querySelector<HTMLDivElement>('.chat-header');
+  
+  if (chatHeader) {
+    chatHeader.innerHTML = `
+      <h2>${escapeHtml(conversation.title)}</h2>
+      <span class="platform-badge">${platforms[conversation.platform]?.name || conversation.platform}</span>
+    `;
+  }
+  
+  if (messageList) {
+    messageList.innerHTML = conversation.messages.map((msg: Message) => `
+      <div class="message ${msg.role}">
+        <div class="message-avatar">${msg.role === 'user' ? 'You' : 'AI'}</div>
+        <div class="message-content">
+          <pre>${escapeHtml(msg.content)}</pre>
+          <div class="message-time">${formatTime(msg.timestamp)}</div>
+        </div>
+      </div>
+    `).join('');
+    
+    messageList.scrollTop = messageList.scrollHeight;
   }
 }
 

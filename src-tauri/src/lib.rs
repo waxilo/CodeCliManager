@@ -4,6 +4,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Message {
@@ -36,6 +37,7 @@ struct AppState {
     conversations: Vec<Conversation>,
     platforms: HashMap<String, PlatformConfig>,
     active_platform: String,
+    current_platform: String,
 }
 
 fn get_data_path() -> PathBuf {
@@ -219,20 +221,30 @@ fn parse_timestamp(iso_string: &str) -> Option<i64> {
     }
 }
 
+fn detect_os() -> String {
+    std::env::consts::OS.to_string()
+}
+
 fn load_app_state() -> AppState {
     let claude_history = load_claude_history();
+    let os = detect_os();
     
     if !claude_history.is_empty() {
         AppState {
             conversations: claude_history,
             platforms: get_default_platforms(),
             active_platform: "claude".to_string(),
+            current_platform: os,
         }
     } else {
         let path = get_data_path().join("state.json");
         if path.exists() {
             match fs::read_to_string(&path) {
-                Ok(content) => serde_json::from_str(&content).unwrap_or_else(|_| get_default_state()),
+                Ok(content) => {
+                    let mut state: AppState = serde_json::from_str(&content).unwrap_or_else(|_| get_default_state());
+                    state.current_platform = os;
+                    state
+                },
                 Err(_) => get_default_state(),
             }
         } else {
@@ -318,6 +330,7 @@ fn get_default_state() -> AppState {
         conversations,
         platforms: get_default_platforms(),
         active_platform: "claude".to_string(),
+        current_platform: detect_os(),
     }
 }
 
@@ -348,6 +361,14 @@ fn get_default_platforms() -> HashMap<String, PlatformConfig> {
     platforms
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct SessionEventPayload {
+    conversation_id: String,
+    title: String,
+    messages: Vec<Message>,
+    updated_at: i64,
+}
+
 #[tauri::command]
 fn get_conversations() -> Vec<Conversation> {
     let state = load_app_state();
@@ -364,6 +385,12 @@ fn get_platforms() -> HashMap<String, PlatformConfig> {
 fn get_active_platform() -> String {
     let state = load_app_state();
     state.active_platform
+}
+
+#[tauri::command]
+fn get_current_platform() -> String {
+    let state = load_app_state();
+    state.current_platform
 }
 
 #[tauri::command]
@@ -482,40 +509,199 @@ async fn send_message(conversation_id: String, content: String) -> Result<Conver
         .ok_or_else(|| "Conversation not found".to_string())
 }
 
-#[tauri::command]
-async fn execute_prompt(prompt: String) -> Result<String, String> {
-    let response_result = run_claude_command(&prompt).await;
-    
-    if response_result.success {
-        Ok(response_result.output)
+// 启动 shell 执行 claude 命令（同步启动，不等待结束）
+fn spawn_claude_shell(input: &str, conversation_id: Option<&String>) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    use std::os::windows::process::CommandExt;
+
+    let mut cmd = if let Some(cid) = conversation_id {
+        if !cid.is_empty() {
+            // 使用 --resume 模式
+            #[cfg(target_os = "windows")]
+            {
+                let mut c = Command::new("cmd");
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                let home_str = home.to_string_lossy().to_string();
+                let full_cmd = format!("cd /d {} && claude --resume {}", home_str, cid);
+                c.args(["/C", &full_cmd]);
+                c.creation_flags(0x08000000);
+                c
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let mut c = Command::new("sh");
+                let cmd_str = format!("claude --resume {}", cid);
+                c.args(["-c", &cmd_str]);
+                c
+            }
+        } else {
+            // 普通模式（有 conversation_id 但为空）
+            #[cfg(target_os = "windows")]
+            {
+                let mut c = Command::new("cmd");
+                c.args(["/C", "claude"]);
+                c.creation_flags(0x08000000);
+                c
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let mut c = Command::new("sh");
+                c.args(["-c", "claude"]);
+                c
+            }
+        }
     } else {
-        Err(format!(
-            "Error: {}\n{}",
-            response_result.error.as_deref().unwrap_or("Unknown error"),
-            response_result.output
-        ))
+        // 没有 conversation_id，普通模式
+        #[cfg(target_os = "windows")]
+        {
+            let mut c = Command::new("cmd");
+            c.args(["/C", "claude"]);
+            c.creation_flags(0x08000000);
+            c
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut c = Command::new("sh");
+            c.args(["-c", "claude"]);
+            c
+        }
+    };
+
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(input.as_bytes());
     }
+
+    Ok(())
 }
 
 #[tauri::command]
-fn create_conversation(platform: String) -> String {
-    let mut state = load_app_state();
-    let now = chrono::Utc::now().timestamp();
-    
-    let new_conv = Conversation {
-        id: uuid::Uuid::new_v4().to_string(),
-        title: "New Conversation".to_string(),
-        messages: Vec::new(),
-        platform,
-        created_at: now,
-        updated_at: now,
-    };
-    
-    let id = new_conv.id.clone();
-    state.conversations.push(new_conv);
-    save_app_state(&state);
-    
-    id
+async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<String>) -> Result<(), String> {
+    let active_cid = conversation_id.clone();
+
+    // 启动 shell 进程和监听线程
+    tauri::async_runtime::spawn(async move {
+        // 记录发送前的会话状态
+        let before_conversations = load_claude_history();
+        let before_ids: std::collections::HashSet<String> =
+            before_conversations.iter().map(|c| c.id.clone()).collect();
+        let before_latest = if before_conversations.is_empty() {
+            0
+        } else {
+            before_conversations
+                .iter()
+                .map(|c| c.updated_at)
+                .max()
+                .unwrap_or(0)
+        };
+
+        // 启动 shell 执行 claude
+        let _ = spawn_claude_shell(&prompt, active_cid.as_ref());
+
+        // 启动监听循环
+        let mut attempts = 0;
+        let max_attempts = 120; // 最多监听 120 次
+        let interval = std::time::Duration::from_millis(500);
+        let mut current_session_id: Option<String> = None;
+        let mut last_message_count: usize = 0;
+        let mut last_updated_at: i64 = 0;
+
+        loop {
+            attempts += 1;
+
+            // 获取最新会话列表
+            let latest_conversations = load_claude_history();
+
+            if !latest_conversations.is_empty() {
+                let newest_conv = latest_conversations.iter().max_by_key(|c| c.updated_at);
+
+                if let Some(conv) = newest_conv {
+                    let is_new =
+                        !before_ids.contains(&conv.id) || conv.updated_at > before_latest;
+
+                    if current_session_id.is_none() && is_new {
+                        current_session_id = Some(conv.id.clone());
+
+                        let payload = SessionEventPayload {
+                            conversation_id: conv.id.clone(),
+                            title: conv.title.clone(),
+                            messages: conv.messages.clone(),
+                            updated_at: conv.updated_at,
+                        };
+
+                        let _ = app.emit("session-created", &payload);
+
+                        last_message_count = conv.messages.len();
+                        last_updated_at = conv.updated_at;
+                    } else if let Some(cid) = &current_session_id {
+                        if let Some(current_conv) =
+                            latest_conversations.iter().find(|c| c.id == *cid)
+                        {
+                            let message_count_changed =
+                                current_conv.messages.len() != last_message_count;
+                            let updated_changed = current_conv.updated_at != last_updated_at;
+
+                            if message_count_changed || updated_changed {
+                                let payload = SessionEventPayload {
+                                    conversation_id: current_conv.id.clone(),
+                                    title: current_conv.title.clone(),
+                                    messages: current_conv.messages.clone(),
+                                    updated_at: current_conv.updated_at,
+                                };
+
+                                let _ = app.emit("messages-updated", &payload);
+
+                                last_message_count = current_conv.messages.len();
+                                last_updated_at = current_conv.updated_at;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if attempts >= max_attempts {
+                let _ = app.emit("session-ended", current_session_id.clone());
+                break;
+            }
+
+            std::thread::sleep(interval);
+        }
+    });
+
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct SimpleConversation {
+    id: String,
+    title: String,
+    updated_at: i64,
+}
+
+#[tauri::command]
+fn get_conversation_list() -> Vec<SimpleConversation> {
+    let state = load_app_state();
+    state.conversations.iter()
+        .map(|c| SimpleConversation {
+            id: c.id.clone(),
+            title: c.title.clone(),
+            updated_at: c.updated_at,
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn get_conversation_messages(conversation_id: String) -> Vec<Message> {
+    let state = load_app_state();
+    state.conversations.iter()
+        .find(|c| c.id == conversation_id)
+        .map(|c| c.messages.clone())
+        .unwrap_or_default()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -537,9 +723,13 @@ async fn execute_cli_command(platform_id: String, input: String) -> Result<Comma
 
 async fn run_claude_command(input: &str) -> CommandResult {
     #[cfg(target_os = "windows")]
+    use std::os::windows::process::CommandExt;
+
+    #[cfg(target_os = "windows")]
     {
         let mut cmd = Command::new("cmd");
         cmd.args(["/C", "claude"]);
+        cmd.creation_flags(0x08000000);
         
         run_command_with_input(cmd, input).await
     }
@@ -548,6 +738,33 @@ async fn run_claude_command(input: &str) -> CommandResult {
     {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "claude"]);
+        
+        run_command_with_input(cmd, input).await
+    }
+}
+
+#[allow(dead_code)]
+async fn run_claude_command_with_resume(input: &str, conversation_id: &str) -> CommandResult {
+    #[cfg(target_os = "windows")]
+    use std::os::windows::process::CommandExt;
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut cmd = Command::new("cmd");
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home_str = home.to_string_lossy().to_string();
+        let full_cmd = format!("cd /d {} && claude --resume {}", home_str, conversation_id);
+        cmd.args(["/C", &full_cmd]);
+        cmd.creation_flags(0x08000000);
+        
+        run_command_with_input(cmd, input).await
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut cmd = Command::new("sh");
+        let cmd_str = format!("claude --resume {}", conversation_id);
+        cmd.args(["-c", &cmd_str]);
         
         run_command_with_input(cmd, input).await
     }
@@ -605,6 +822,7 @@ pub fn run() {
             get_conversations,
             get_platforms,
             get_active_platform,
+            get_current_platform,
             set_active_platform,
             add_platform,
             delete_conversation,
@@ -613,8 +831,9 @@ pub fn run() {
             send_message,
             execute_cli_command,
             execute_prompt,
-            create_conversation,
+            get_conversation_list,
+            get_conversation_messages,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .expect("error while running tauri application")
 }
