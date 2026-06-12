@@ -86,6 +86,9 @@ interface FetchedModel {
 }
 
 type ModelFieldName = 'defaultModel' | 'haikuModel' | 'sonnetModel' | 'opusModel';
+type ThemeMode = 'light' | 'dark';
+
+const THEME_STORAGE_KEY = 'codemanager-theme';
 
 interface StreamingState {
   thinking: string;
@@ -109,7 +112,59 @@ let streamRefreshTimer: number | null = null;
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
+function getStoredTheme(): ThemeMode | null {
+  const stored = localStorage.getItem(THEME_STORAGE_KEY);
+  if (stored === 'light' || stored === 'dark') {
+    return stored;
+  }
+  return null;
+}
+
+function getSystemTheme(): ThemeMode {
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function getCurrentTheme(): ThemeMode {
+  const theme = document.documentElement.dataset.theme;
+  return theme === 'light' ? 'light' : 'dark';
+}
+
+function applyTheme(theme: ThemeMode) {
+  document.documentElement.dataset.theme = theme;
+  localStorage.setItem(THEME_STORAGE_KEY, theme);
+  updateThemeToggleButton();
+}
+
+function getThemeToggleTitle(theme: ThemeMode = getCurrentTheme()): string {
+  return theme === 'dark' ? '切换到日间模式' : '切换到夜间模式';
+}
+
+function getThemeToggleIcon(theme: ThemeMode = getCurrentTheme()): string {
+  if (theme === 'dark') {
+    return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>`;
+  }
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`;
+}
+
+function updateThemeToggleButton() {
+  const themeBtn = document.querySelector('#theme-toggle-btn') as HTMLButtonElement | null;
+  if (!themeBtn) return;
+  themeBtn.title = getThemeToggleTitle();
+  themeBtn.setAttribute('aria-label', getThemeToggleTitle());
+  themeBtn.innerHTML = getThemeToggleIcon();
+}
+
+function initTheme() {
+  applyTheme(getStoredTheme() || getSystemTheme());
+}
+
+function toggleTheme() {
+  applyTheme(getCurrentTheme() === 'dark' ? 'light' : 'dark');
+}
+
 async function init() {
+  initPlatformClass();
+  initTheme();
   await loadData();
   await refreshActiveApiProfileLabel();
   render();
@@ -552,9 +607,38 @@ function renderConversationList(): string {
   }).join('');
 }
 
+function initPlatformClass() {
+  const ua = navigator.userAgent.toLowerCase();
+  if (ua.includes('mac')) {
+    document.documentElement.classList.add('platform-macos');
+  } else if (ua.includes('win')) {
+    document.documentElement.classList.add('platform-windows');
+  }
+}
+
+function renderTitlebarActions(): string {
+  return `
+    <button type="button" class="toolbar-icon-btn settings-btn" id="settings-btn" title="API 配置" aria-label="API 配置">
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8.94 4.43a8.06 8.06 0 0 0 .06-.93 8.06 8.06 0 0 0-.06-.93l2.01-1.57a.5.5 0 0 0 .12-.64l-1.9-3.29a.5.5 0 0 0-.6-.22l-2.37.96a7.28 7.28 0 0 0-1.61-.93l-.36-2.52A.5.5 0 0 0 14.06 2h-3.12a.5.5 0 0 0-.49.42l-.36 2.52c-.58.22-1.12.52-1.61.93l-2.37-.96a.5.5 0 0 0-.6.22l-1.9 3.29a.5.5 0 0 0 .12.64l2.01 1.57c-.04.31-.06.62-.06.93s.02.62.06.93l-2.01 1.57a.5.5 0 0 0-.12.64l1.9 3.29a.5.5 0 0 0 .6.22l2.37-.96c.49.41 1.03.71 1.61.93l.36 2.52a.5.5 0 0 0 .49.42h3.12a.5.5 0 0 0 .49-.42l.36-2.52c.58-.22 1.12-.52 1.61-.93l2.37.96a.5.5 0 0 0 .6-.22l1.9-3.29a.5.5 0 0 0-.12-.64l-2.01-1.57Z"/>
+      </svg>
+    </button>
+    <button type="button" class="toolbar-icon-btn theme-toggle-btn" id="theme-toggle-btn" title="${escapeHtml(getThemeToggleTitle())}" aria-label="${escapeHtml(getThemeToggleTitle())}">
+      ${getThemeToggleIcon()}
+    </button>
+  `;
+}
+
 function render() {
   app.innerHTML = `
-    <div class="app-container">
+    <div class="app-shell">
+      <header class="app-titlebar">
+        <div class="app-titlebar-drag" data-tauri-drag-region></div>
+        <div class="app-titlebar-actions">
+          ${renderTitlebarActions()}
+        </div>
+      </header>
+      <div class="app-container">
       <div class="sidebar">
         <div class="sidebar-header">
           <h1>AI CLI Manager</h1>
@@ -564,21 +648,23 @@ function render() {
           ${renderConversationList()}
         </div>
         <div class="sidebar-footer">
-          <button type="button" class="settings-btn" id="settings-btn" title="API 配置">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Zm8.94 4.43a8.06 8.06 0 0 0 .06-.93 8.06 8.06 0 0 0-.06-.93l2.01-1.57a.5.5 0 0 0 .12-.64l-1.9-3.29a.5.5 0 0 0-.6-.22l-2.37.96a7.28 7.28 0 0 0-1.61-.93l-.36-2.52A.5.5 0 0 0 14.06 2h-3.12a.5.5 0 0 0-.49.42l-.36 2.52c-.58.22-1.12.52-1.61.93l-2.37-.96a.5.5 0 0 0-.6.22l-1.9 3.29a.5.5 0 0 0 .12.64l2.01 1.57c-.04.31-.06.62-.06.93s.02.62.06.93l-2.01 1.57a.5.5 0 0 0-.12.64l1.9 3.29a.5.5 0 0 0 .6.22l2.37-.96c.49.41 1.03.71 1.61.93l.36 2.52a.5.5 0 0 0 .49.42h3.12a.5.5 0 0 0 .49-.42l.36-2.52c.58-.22 1.12-.52 1.61-.93l2.37.96a.5.5 0 0 0 .6-.22l1.9-3.29a.5.5 0 0 0-.12-.64l-2.01-1.57Z"/>
-            </svg>
-            <span>API 配置</span>
-          </button>
-          <div class="active-api-profile-label" id="active-api-profile-label">${escapeHtml(activeApiProfileName ? `当前: ${activeApiProfileName}` : '')}</div>
+          <div class="active-api-profile-label" id="active-api-profile-label">${escapeHtml(formatActiveApiProfileLabel(activeApiProfileName))}</div>
         </div>
       </div>
       <div class="main-content">
+        ${activeConversationId || pendingUserMessage ? `
+        <div class="main-topbar">
+          <div class="main-topbar-main">
+            ${renderChatHeaderHtml(conversations.find((c) => c.id === activeConversationId))}
+          </div>
+        </div>
+        ` : ''}
         ${activeConversationId || pendingUserMessage ? renderChatContent() : renderEmptyState()}
         <div class="input-area">
           <textarea id="message-input" rows="1" placeholder="Enter your message..."></textarea>
           <button class="send-btn" id="send-btn">Send</button>
         </div>
+      </div>
       </div>
     </div>
   `;
@@ -601,6 +687,7 @@ function attachEventListeners() {
   }
 
   document.querySelector('#send-btn')?.addEventListener('click', sendMessage);
+  document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
   document.querySelector('#settings-btn')?.addEventListener('click', () => {
     void openSettingsModal();
   });
@@ -706,6 +793,10 @@ function showDeleteConfirm(title: string): Promise<boolean> {
   });
 }
 
+function formatActiveApiProfileLabel(profileName: string): string {
+  return profileName ? `当前 API 配置: ${profileName}` : '当前 API 配置';
+}
+
 async function refreshActiveApiProfileLabel() {
   try {
     const state = await invoke<ApiProfilesState>('get_api_profiles_state');
@@ -713,7 +804,7 @@ async function refreshActiveApiProfileLabel() {
     activeApiProfileName = active?.name || '';
     const label = document.querySelector('#active-api-profile-label');
     if (label) {
-      label.textContent = activeApiProfileName ? `当前: ${activeApiProfileName}` : '';
+      label.textContent = formatActiveApiProfileLabel(activeApiProfileName);
     }
   } catch (e) {
     console.error('Failed to load active API profile:', e);
@@ -1484,9 +1575,6 @@ function renderChatContent(): string {
   }
 
   return `
-    <div class="chat-header">
-      ${renderChatHeaderHtml(conversation)}
-    </div>
     <div class="message-list" id="message-list">
       ${filterVisibleMessages(messages).map(renderMessageHtml).join('')}
     </div>
@@ -1621,10 +1709,10 @@ function refreshChatContent() {
     : undefined;
   
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
-  const chatHeader = document.querySelector<HTMLDivElement>('.chat-header');
-  
-  if (chatHeader) {
-    chatHeader.innerHTML = renderChatHeaderHtml(conversation);
+  const topbarMain = document.querySelector<HTMLDivElement>('.main-topbar-main');
+
+  if (topbarMain) {
+    topbarMain.innerHTML = renderChatHeaderHtml(conversation);
   }
   
   if (messageList) {
