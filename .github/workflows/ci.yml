@@ -1,12 +1,11 @@
 name: CI
 
 on:
-  push:
-    branches:
-      - main
   pull_request:
     branches:
       - main
+  # main 分支发版由 fast_push_mac.sh 打 tag 触发 release.yml，避免重复构建
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}

@@ -2,6 +2,11 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag（例如 v0.1.0）'
+        required: true
+        type: string
   push:
     tags:
       - 'v*'
@@ -10,22 +15,27 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
+permissions:
+  contents: write
+
 jobs:
-  publish:
-    permissions:
-      contents: write
+  build:
     strategy:
       fail-fast: false
       matrix:
         include:
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'
+            name: macOS-ARM64
           - platform: macos-latest
             args: '--target x86_64-apple-darwin'
+            name: macOS-x64
           - platform: windows-latest
             args: ''
+            name: Windows-x64
 
     runs-on: ${{ matrix.platform }}
+    name: Build ${{ matrix.name }}
 
     steps:
       - uses: actions/checkout@v4
@@ -49,24 +59,100 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
-      - name: Build and publish release
-        uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Tauri app
+        run: npm run tauri build -- ${{ matrix.args }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
         with:
-          tagName: v__VERSION__
-          releaseName: CodeCliManager v__VERSION__
-          releaseBody: |
-            ## CodeCliManager v__VERSION__
+          name: ${{ matrix.name }}
+          path: src-tauri/target/**/release/bundle/**
+          if-no-files-found: error
 
-            ### macOS
-            - Apple Silicon (M 系列): `.dmg` / `.app` (aarch64)
-            - Intel Mac: `.dmg` / `.app` (x86_64)
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    name: Publish Release
 
-            ### Windows
-            - `.msi` 或 `.exe` 安装包
+    steps:
+      - uses: actions/checkout@v4
 
-            > 首次在 macOS 打开若提示未验证开发者，请在「系统设置 → 隐私与安全性」中允许运行。
-          releaseDraft: false
-          prerelease: false
-          args: ${{ matrix.args }}
+      - name: Resolve release tag
+        id: meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets
+
+          find_installer() {
+            local platform="$1"
+            local pattern="$2"
+            find "artifacts/${platform}" -type f -name "${pattern}" | head -n 1
+          }
+
+          copy_or_fail() {
+            local src="$1"
+            local dest="$2"
+            if [ -z "$src" ] || [ ! -f "$src" ]; then
+              echo "Missing release asset: $dest"
+              exit 1
+            fi
+            cp "$src" "release-assets/$dest"
+            echo "Prepared: $dest"
+          }
+
+          ARM64_DMG="$(find_installer macOS-ARM64 '*.dmg')"
+          X64_DMG="$(find_installer macOS-x64 '*.dmg')"
+          WIN_MSI="$(find_installer Windows-x64 '*.msi')"
+          WIN_EXE="$(find_installer Windows-x64 '*.exe')"
+
+          copy_or_fail "$ARM64_DMG" "CodeCliManager-${RELEASE_TAG}-macOS-ARM64.dmg"
+          copy_or_fail "$X64_DMG" "CodeCliManager-${RELEASE_TAG}-macOS-x64.dmg"
+          copy_or_fail "$WIN_MSI" "CodeCliManager-${RELEASE_TAG}-Windows-x64.msi"
+          copy_or_fail "$WIN_EXE" "CodeCliManager-${RELEASE_TAG}-Windows-x64-setup.exe"
+
+          ls -la release-assets/
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          {
+            echo "## CodeCliManager ${RELEASE_TAG}"
+            echo
+            echo "### macOS"
+            echo "- Apple Silicon (M 系列): \`CodeCliManager-${RELEASE_TAG}-macOS-ARM64.dmg\`"
+            echo "- Intel Mac: \`CodeCliManager-${RELEASE_TAG}-macOS-x64.dmg\`"
+            echo
+            echo "### Windows"
+            echo "- \`CodeCliManager-${RELEASE_TAG}-Windows-x64.msi\`"
+            echo "- \`CodeCliManager-${RELEASE_TAG}-Windows-x64-setup.exe\`"
+            echo
+            echo "> 首次在 macOS 打开若提示未验证开发者，请在「系统设置 → 隐私与安全性」中允许运行。"
+          } > release-notes.md
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists, uploading assets..."
+            gh release upload "$RELEASE_TAG" release-assets/* --clobber
+          else
+            gh release create "$RELEASE_TAG" release-assets/* \
+              --title "CodeCliManager ${RELEASE_TAG}" \
+              --notes-file release-notes.md
+          fi
