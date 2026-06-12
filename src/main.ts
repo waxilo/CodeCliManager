@@ -106,7 +106,6 @@ let transientSessionError: string | null = null;
 const streamingBySession = new Map<string, StreamingState>();
 const pendingTextDelta = new Map<string, string>();
 let streamRefreshTimer: number | null = null;
-let pendingRequestStartedAt: number | null = null;
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
@@ -1071,8 +1070,9 @@ async function openSettingsModal() {
     });
 
     pickerOverlay.querySelector('.model-picker-search')?.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
+      const keyboardEvent = event as KeyboardEvent;
+      if (keyboardEvent.key === 'Enter') {
+        keyboardEvent.preventDefault();
         const searchInput = pickerOverlay.querySelector('.model-picker-search') as HTMLInputElement | null;
         applyValue(searchInput?.value || '');
       }
@@ -1532,7 +1532,6 @@ async function sendMessage() {
   }
 
   pendingUserMessage = content;
-  pendingRequestStartedAt = Date.now();
 
   if (activeConversationId) {
     const conv = conversations.find((c) => c.id === activeConversationId);
@@ -1602,7 +1601,6 @@ function updatePendingStatus(statusText: string) {
 }
 
 function clearPendingRequestState() {
-  pendingRequestStartedAt = null;
   removePendingAssistantIndicator();
 }
 
