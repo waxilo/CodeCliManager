@@ -878,6 +878,8 @@ function handleMessageChunk(payload: MessageChunkPayload) {
       break;
     case 'complete':
       flushPendingTextDelta(sid);
+      refreshStreamingUI(sid);
+      hideSendingState();
       break;
     default:
       break;
@@ -1043,6 +1045,11 @@ function canSendMessage(content?: string): boolean {
     return false;
   }
   return true;
+}
+
+function isSendButtonLoading(): boolean {
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+  return sendBtn?.dataset.loading === 'true';
 }
 
 function updateSendButtonState() {
@@ -1930,9 +1937,41 @@ async function openSettingsModal() {
   const livePathEl = overlay.querySelector('.settings-live-path') as HTMLElement | null;
   let fetchedModels: FetchedModel[] = [];
   let modelsFetchKey = '';
+  let modelsFetchInFlight = 0;
+  let refreshOpenModelPicker: (() => void) | null = null;
   /** 空数组表示展示 API 拉取到的全部模型 */
   let displayModels: string[] = [];
   let customModels: string[] = [];
+
+  const isModelsLoading = (): boolean => modelsFetchInFlight > 0;
+
+  const setModelsLoading = (loading: boolean) => {
+    modelsFetchInFlight = loading
+      ? modelsFetchInFlight + 1
+      : Math.max(0, modelsFetchInFlight - 1);
+    updateModelConfigSummary();
+    refreshOpenModelPicker?.();
+  };
+
+  const renderModelsLoadingState = (
+    listEl: Element,
+    message = '正在从 API 获取模型列表…',
+    subMessage = '请稍候，这可能需要几秒钟',
+  ) => {
+    listEl.innerHTML = `
+      <div class="model-picker-loading">
+        <div class="model-picker-loading-dots" aria-hidden="true">
+          <span class="pending-dot"></span>
+          <span class="pending-dot"></span>
+          <span class="pending-dot"></span>
+        </div>
+        <div class="model-picker-loading-copy">
+          <span class="model-picker-loading-text">${escapeHtml(message)}</span>
+          <span class="model-picker-loading-subtext">${escapeHtml(subMessage)}</span>
+        </div>
+      </div>
+    `;
+  };
 
   const usesAllFetchedModels = (): boolean => displayModels.length === 0;
 
@@ -1968,6 +2007,17 @@ async function openSettingsModal() {
     const hintEl = overlay.querySelector('.settings-model-config-hint');
     if (!input) return;
 
+    if (isModelsLoading()) {
+      input.value = '正在从 API 获取模型列表…';
+      input.placeholder = '';
+      input.classList.add('is-loading');
+      if (hintEl) {
+        hintEl.textContent = '请稍候，正在连接 API 并加载可用模型';
+      }
+      return;
+    }
+
+    input.classList.remove('is-loading');
     const ids = getEffectiveDisplayModels();
 
     if (ids.length === 0) {
@@ -2057,13 +2107,18 @@ async function openSettingsModal() {
       throw new Error('请先填写 API Base URL');
     }
 
-    fetchedModels = await invoke<FetchedModel[]>('fetch_api_models', {
-      baseUrl,
-      apiKey: apiKeyRaw || null,
-      profileId,
-    });
-    modelsFetchKey = getModelsFetchKey();
-    return fetchedModels;
+    setModelsLoading(true);
+    try {
+      fetchedModels = await invoke<FetchedModel[]>('fetch_api_models', {
+        baseUrl,
+        apiKey: apiKeyRaw || null,
+        profileId,
+      });
+      modelsFetchKey = getModelsFetchKey();
+      return fetchedModels;
+    } finally {
+      setModelsLoading(false);
+    }
   };
 
   const saveModelConfigImmediately = async (modelsToSave: {
@@ -2236,7 +2291,12 @@ async function openSettingsModal() {
       </div>
     `;
 
-    const closePicker = () => pickerOverlay.remove();
+    const closePicker = () => {
+      if (refreshOpenModelPicker === renderDialog) {
+        refreshOpenModelPicker = null;
+      }
+      pickerOverlay.remove();
+    };
 
     const persistDraft = async (): Promise<boolean> => {
       const { apiModels, customInDraft } = splitDraftModels(draftModels);
@@ -2289,12 +2349,17 @@ async function openSettingsModal() {
       const listEl = pickerOverlay.querySelector('.display-models-api-list');
       if (!listEl) return;
 
+      if (isModelsLoading() && fetchedModels.length === 0) {
+        renderModelsLoadingState(listEl);
+        return;
+      }
+
       const fetchedIds = getFetchedModelIds();
       const apiModelIds = draftModels.filter((modelId) => fetchedIds.has(modelId));
       renderModelRows(
         listEl,
         apiModelIds,
-        fetchedModels.length === 0 ? '请先同步 API 模型' : '暂无 API 展示模型，请同步 API',
+        fetchedModels.length === 0 ? '暂无 API 模型，请点击右上角「同步 API」' : '暂无 API 展示模型，请同步 API',
       );
     };
 
@@ -2375,7 +2440,7 @@ async function openSettingsModal() {
       const syncBtn = pickerOverlay.querySelector('.display-models-picker-sync') as HTMLButtonElement | null;
       if (syncBtn) {
         syncBtn.disabled = true;
-        syncBtn.textContent = '同步中...';
+        syncBtn.textContent = '正在同步…';
       }
 
       try {
@@ -2474,6 +2539,7 @@ async function openSettingsModal() {
     pickerOverlay.querySelector('.display-models-custom-list')?.addEventListener('click', handleModelRowAction);
 
     document.body.appendChild(pickerOverlay);
+    refreshOpenModelPicker = renderDialog;
     renderDialog();
 
     const baseUrl =
@@ -2483,7 +2549,7 @@ async function openSettingsModal() {
         const syncBtn = pickerOverlay.querySelector('.display-models-picker-sync') as HTMLButtonElement | null;
         if (syncBtn) {
           syncBtn.disabled = true;
-          syncBtn.textContent = '同步中...';
+          syncBtn.textContent = '正在同步…';
         }
         try {
           await fetchModelsForSettings();
@@ -2492,7 +2558,10 @@ async function openSettingsModal() {
           }
           renderDialog();
         } catch {
-          // 打开弹窗时静默失败，用户可手动同步
+          const listEl = pickerOverlay.querySelector('.display-models-api-list');
+          if (listEl && fetchedModels.length === 0) {
+            listEl.innerHTML = `<div class="model-picker-empty">未能自动加载模型，请点击右上角「同步 API」重试</div>`;
+          }
         } finally {
           if (syncBtn) {
             syncBtn.disabled = false;
@@ -3070,9 +3139,10 @@ function refreshChatContent() {
       });
     }
     messageList.innerHTML = filterVisibleMessages(messages).map(renderMessageHtml).join('');
-    const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
-    if (sendBtn?.disabled) {
+    if (isSendButtonLoading()) {
       showPendingAssistantIndicator();
+    } else {
+      removePendingAssistantIndicator();
     }
     scrollMessageListToBottom();
   }

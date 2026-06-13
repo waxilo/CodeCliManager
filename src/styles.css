@@ -1925,6 +1925,11 @@ body.is-sidebar-resizing {
   background: var(--color-bg-deep);
 }
 
+.settings-model-input.is-loading {
+  cursor: wait;
+  color: var(--color-text-secondary);
+}
+
 .settings-model-input:focus {
   border-color: var(--color-accent);
   box-shadow: 0 0 0 1px var(--color-accent-ring);
@@ -2287,6 +2292,38 @@ body.is-sidebar-resizing {
   text-align: center;
   color: var(--color-text-muted);
   font-size: 12px;
+}
+
+.model-picker-loading {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px 16px;
+  text-align: center;
+}
+
+.model-picker-loading-dots {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.model-picker-loading-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.model-picker-loading-text {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.model-picker-loading-subtext {
+  font-size: 11px;
+  color: var(--color-text-muted);
 }
 
 .model-picker-item {
