@@ -95,6 +95,13 @@ type ThemeMode = 'light' | 'dark';
 
 const THEME_STORAGE_KEY = 'codemanager-theme';
 const CONVERSATION_MODELS_KEY = 'codemanager-conversation-models';
+const SIDEBAR_WIDTH_STORAGE_KEY = 'codemanager-sidebar-width';
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codemanager-sidebar-collapsed';
+const DEFAULT_SIDEBAR_WIDTH = 184;
+const LEGACY_DEFAULT_SIDEBAR_WIDTH = 320;
+const MIN_SIDEBAR_WIDTH = 160;
+const MIN_MAIN_CONTENT_WIDTH = 300;
+const SIDEBAR_RESIZER_WIDTH = 4;
 
 interface StreamingState {
   thinking: string;
@@ -117,6 +124,8 @@ let pendingSessionModel: string | null = null;
 /** 新会话尚未创建 ID 时，用户选择的工作目录 */
 let pendingProjectDir: string | null = null;
 let chatModelPickerHighlightIndex = -1;
+let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
+let isSidebarCollapsed = false;
 
 const streamingBySession = new Map<string, StreamingState>();
 const pendingTextDelta = new Map<string, string>();
@@ -168,6 +177,128 @@ function updateThemeToggleButton() {
 
 function initTheme() {
   applyTheme(getStoredTheme() || getSystemTheme());
+}
+
+function loadSidebarWidth(): number {
+  try {
+    const stored = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+    if (stored) {
+      const parsed = Number.parseInt(stored, 10);
+      if (!Number.isNaN(parsed) && parsed >= MIN_SIDEBAR_WIDTH) {
+        if (parsed === LEGACY_DEFAULT_SIDEBAR_WIDTH) {
+          return DEFAULT_SIDEBAR_WIDTH;
+        }
+        return parsed;
+      }
+    }
+  } catch {
+    // ignore invalid storage
+  }
+  return DEFAULT_SIDEBAR_WIDTH;
+}
+
+function getMaxSidebarWidth(): number {
+  const container = document.querySelector('.app-container');
+  const containerWidth = container?.clientWidth ?? window.innerWidth;
+  return containerWidth - MIN_MAIN_CONTENT_WIDTH - SIDEBAR_RESIZER_WIDTH;
+}
+
+function clampSidebarWidth(width: number): number {
+  const maxWidth = Math.max(MIN_SIDEBAR_WIDTH, getMaxSidebarWidth());
+  return Math.round(Math.min(Math.max(width, MIN_SIDEBAR_WIDTH), maxWidth));
+}
+
+function applySidebarWidth(width: number) {
+  sidebarWidth = clampSidebarWidth(width);
+  document.documentElement.style.setProperty('--sidebar-width', `${sidebarWidth}px`);
+}
+
+function saveSidebarWidth(width: number) {
+  localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+}
+
+function initSidebarWidth() {
+  applySidebarWidth(loadSidebarWidth());
+}
+
+function bindSidebarResizer() {
+  const resizer = document.querySelector('#sidebar-resizer') as HTMLElement | null;
+  if (!resizer || isSidebarCollapsed) return;
+
+  const onPointerMove = (event: PointerEvent) => {
+    applySidebarWidth(event.clientX);
+  };
+
+  const onPointerUp = (event: PointerEvent) => {
+    resizer.releasePointerCapture(event.pointerId);
+    resizer.classList.remove('is-dragging');
+    document.body.classList.remove('is-sidebar-resizing');
+    document.removeEventListener('pointermove', onPointerMove);
+    document.removeEventListener('pointerup', onPointerUp);
+    saveSidebarWidth(sidebarWidth);
+  };
+
+  resizer.addEventListener('pointerdown', (event: PointerEvent) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    resizer.setPointerCapture(event.pointerId);
+    resizer.classList.add('is-dragging');
+    document.body.classList.add('is-sidebar-resizing');
+    document.addEventListener('pointermove', onPointerMove);
+    document.addEventListener('pointerup', onPointerUp);
+  });
+}
+
+function loadSidebarCollapsed(): boolean {
+  try {
+    return localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function saveSidebarCollapsed(collapsed: boolean) {
+  localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? '1' : '0');
+}
+
+function getSidebarToggleTitle(collapsed: boolean = isSidebarCollapsed): string {
+  return collapsed ? '展开侧边栏' : '收起侧边栏';
+}
+
+function getSidebarToggleIcon(collapsed: boolean = isSidebarCollapsed): string {
+  if (collapsed) {
+    return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m14 9 3 3-3 3"/></svg>`;
+  }
+  return `<svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M9 3v18"/><path d="m16 15-3-3 3-3"/></svg>`;
+}
+
+function updateSidebarToggleButtons() {
+  const title = getSidebarToggleTitle();
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('.sidebar-toggle-btn')) {
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+    btn.setAttribute('aria-expanded', String(!isSidebarCollapsed));
+    btn.innerHTML = getSidebarToggleIcon();
+  }
+}
+
+function syncSidebarCollapsedUI() {
+  document.querySelector('.app-container')?.classList.toggle('is-sidebar-collapsed', isSidebarCollapsed);
+  updateSidebarToggleButtons();
+}
+
+function setSidebarCollapsed(collapsed: boolean) {
+  isSidebarCollapsed = collapsed;
+  saveSidebarCollapsed(collapsed);
+  syncSidebarCollapsedUI();
+}
+
+function toggleSidebarCollapsed() {
+  setSidebarCollapsed(!isSidebarCollapsed);
+}
+
+function initSidebarCollapsed() {
+  isSidebarCollapsed = loadSidebarCollapsed();
 }
 
 function toggleTheme() {
@@ -546,10 +677,15 @@ async function loadChatModelOptions(): Promise<void> {
 async function init() {
   initPlatformClass();
   initTheme();
+  initSidebarWidth();
+  initSidebarCollapsed();
   await loadData();
   await loadChatModelOptions();
   render();
   setupEventListeners();
+  window.addEventListener('resize', () => {
+    applySidebarWidth(sidebarWidth);
+  });
   setInterval(() => {
     currentTime = new Date();
     renderConversationList();
@@ -1349,21 +1485,40 @@ function render() {
   app.innerHTML = `
     <div class="app-shell">
       <header class="app-titlebar">
+        <div class="app-titlebar-leading">
+          <button
+            type="button"
+            class="toolbar-icon-btn sidebar-toggle-btn"
+            id="sidebar-toggle-btn"
+            title="${escapeHtml(getSidebarToggleTitle())}"
+            aria-label="${escapeHtml(getSidebarToggleTitle())}"
+            aria-expanded="${!isSidebarCollapsed}"
+          >
+            ${getSidebarToggleIcon()}
+          </button>
+        </div>
         <div class="app-titlebar-drag" data-tauri-drag-region></div>
+        <h1 class="app-titlebar-title">AI CLI Manager</h1>
         <div class="app-titlebar-actions">
           ${renderTitlebarActions()}
         </div>
       </header>
-      <div class="app-container">
+      <div class="app-container${isSidebarCollapsed ? ' is-sidebar-collapsed' : ''}">
       <div class="sidebar">
         <div class="sidebar-header">
-          <h1>AI CLI Manager</h1>
           <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
         </div>
         <div class="conversation-list" id="conversation-list">
           ${renderConversationList()}
         </div>
       </div>
+      <div
+        class="sidebar-resizer"
+        id="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整侧边栏宽度"
+      ></div>
       <div class="main-content">
         ${activeConversationId || pendingUserMessage ? `
         <div class="main-topbar">
@@ -1407,6 +1562,11 @@ function attachEventListeners() {
 
   bindChatModelPickerEvents();
   bindSessionIdCopyEvents();
+  bindSidebarResizer();
+  document.querySelectorAll('.sidebar-toggle-btn').forEach((btn) => {
+    btn.addEventListener('click', toggleSidebarCollapsed);
+  });
+  syncSidebarCollapsedUI();
   document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
   document.querySelector('#settings-btn')?.addEventListener('click', () => {
     void openSettingsModal();

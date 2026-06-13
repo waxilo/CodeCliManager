@@ -28,20 +28,63 @@ html, body {
 }
 
 .app-titlebar {
+  position: relative;
   display: flex;
   align-items: center;
   flex-shrink: 0;
   height: 38px;
-  padding: 0 12px 0 78px;
+  padding: 0 12px 0 0;
   background: var(--color-titlebar);
   border-bottom: 1px solid var(--color-titlebar-border);
   user-select: none;
   -webkit-app-region: drag;
 }
 
+.platform-macos .app-titlebar {
+  height: 28px;
+}
+
 .platform-windows .app-titlebar {
-  padding-left: 12px;
   height: 32px;
+}
+
+.app-titlebar-leading {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  flex-shrink: 0;
+  padding-left: 78px;
+  padding-right: 8px;
+  box-sizing: border-box;
+  -webkit-app-region: no-drag;
+}
+
+.platform-macos .app-titlebar-leading {
+  padding-left: 72px;
+}
+
+.platform-macos .app-titlebar-leading .sidebar-toggle-btn {
+  transform: translateY(2px);
+}
+
+.platform-windows .app-titlebar-leading {
+  padding-left: 12px;
+}
+
+.app-titlebar-title {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  pointer-events: none;
+  max-width: min(320px, 50vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .app-titlebar-drag {
@@ -66,6 +109,23 @@ html, body {
   -webkit-app-region: no-drag;
 }
 
+.platform-macos .app-titlebar .toolbar-icon-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+}
+
+.platform-macos .app-titlebar .toolbar-icon-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.platform-macos .app-titlebar .toolbar-settings-btn {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
 .app-container {
   display: flex;
   flex: 1;
@@ -74,24 +134,64 @@ html, body {
 }
 
 .sidebar {
-  width: 320px;
+  width: var(--sidebar-width, 184px);
+  flex-shrink: 0;
   background: linear-gradient(180deg, var(--color-bg-base) 0%, var(--color-bg-elevated) 100%);
   color: var(--color-text);
   display: flex;
   flex-direction: column;
-  border-right: 1px solid var(--color-bg-surface);
+  transition: width 0.2s ease, opacity 0.15s ease;
+  overflow: hidden;
+}
+
+.app-container.is-sidebar-collapsed .sidebar {
+  width: 0 !important;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar-resizer {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  position: relative;
+  touch-action: none;
+  -webkit-app-region: no-drag;
+  transition: width 0.2s ease, opacity 0.15s ease;
+}
+
+.app-container.is-sidebar-collapsed .sidebar-resizer {
+  width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1px;
+  background: var(--color-bg-surface);
+  transition: width 0.15s, background 0.15s;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer.is-dragging::after {
+  width: 2px;
+  background: var(--color-accent);
+}
+
+body.is-sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .sidebar-header {
   padding: 12px 14px;
   border-bottom: 1px solid var(--color-bg-surface);
-}
-
-.sidebar-header h1 {
-  font-size: 15px;
-  font-weight: 600;
-  color: var(--color-text);
-  margin-bottom: 8px;
 }
 
 .new-chat-btn {
