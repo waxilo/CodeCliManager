@@ -144,6 +144,16 @@ fn set_env_string(env: &mut serde_json::Map<String, serde_json::Value>, key: &st
     }
 }
 
+fn set_model_and_display_name(
+    env: &mut serde_json::Map<String, serde_json::Value>,
+    model_key: &str,
+    name_key: &str,
+    value: &str,
+) {
+    set_env_string(env, model_key, value);
+    set_env_string(env, name_key, value);
+}
+
 fn claude_api_key_from_env(env: &serde_json::Map<String, serde_json::Value>) -> String {
     let auth_token = env_string(env, "ANTHROPIC_AUTH_TOKEN");
     if !auth_token.is_empty() {
@@ -274,9 +284,24 @@ fn apply_save_config_to_settings(config: &SaveClaudeCodeApiConfig) -> Result<(),
 
     set_env_string(env, "ANTHROPIC_BASE_URL", &config.base_url);
     set_env_string(env, "ANTHROPIC_MODEL", &config.default_model);
-    set_env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", &config.haiku_model);
-    set_env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", &config.sonnet_model);
-    set_env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", &config.opus_model);
+    set_model_and_display_name(
+        env,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+        &config.haiku_model,
+    );
+    set_model_and_display_name(
+        env,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+        &config.sonnet_model,
+    );
+    set_model_and_display_name(
+        env,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+        &config.opus_model,
+    );
 
     if let Some(api_key) = config.api_key.as_ref().filter(|key| !key.trim().is_empty()) {
         let trimmed = api_key.trim();
