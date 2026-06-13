@@ -25,6 +25,10 @@ write_version() {
 	local ver="$1"
 	sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"${ver}\"/" "$TAURI_CONF" "$PACKAGE_JSON"
 	sed -i '' "s/^version = \"[^\"]*\"/version = \"${ver}\"/" "$CARGO_TOML"
+	# 同步 Cargo.lock 中本 crate 的版本号，避免提交后 lock 漂移导致 rebase 失败
+	if [ -f "src-tauri/Cargo.lock" ]; then
+		sed -i '' "/^name = \"codecli-manager\"$/,/^version = / s/^version = \"[^\"]*\"/version = \"${ver}\"/" "src-tauri/Cargo.lock"
+	fi
 }
 
 bump_patch() {
@@ -59,6 +63,12 @@ if git diff --cached --quiet; then
 fi
 
 git commit -m "$COMMIT_MSG"
+
+if ! git diff --quiet || ! git diff --cached --quiet; then
+	echo "警告: 提交后仍有未暂存变更，自动一并纳入本次 release"
+	git add -A
+	git commit --amend --no-edit
+fi
 
 # 提交后再 rebase，工作区已干净
 sync_remote_branch
