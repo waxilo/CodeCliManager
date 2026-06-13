@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { open } from '@tauri-apps/plugin-dialog';
 import { renderMarkdown } from './markdown';
 
 interface Message {
@@ -28,10 +29,13 @@ interface SessionErrorPayload {
 
 interface SessionEventPayload {
   conversation_id: string;
+  conversationId?: string;
   title: string;
   messages: Message[];
   project_dir?: string | null;
+  projectDir?: string | null;
   updated_at: number;
+  updatedAt?: number;
 }
 
 interface PlatformConfig {
@@ -110,6 +114,8 @@ let chatModelOptions: string[] = [];
 let conversationModels: Record<string, string> = loadConversationModels();
 /** 新会话尚未创建 ID 时，用户在聊天区临时选择的模型 */
 let pendingSessionModel: string | null = null;
+/** 新会话尚未创建 ID 时，用户选择的工作目录 */
+let pendingProjectDir: string | null = null;
 let chatModelPickerHighlightIndex = -1;
 
 const streamingBySession = new Map<string, StreamingState>();
@@ -559,7 +565,7 @@ async function setupEventListeners() {
 
   // 监听会话创建事件
   await listen<SessionEventPayload>('session-created', (event) => {
-    const payload = event.payload;
+    const payload = normalizeSessionEventPayload(event.payload);
     activeConversationId = payload.conversation_id;
     pendingUserMessage = null;
     transientSessionError = null;
@@ -568,6 +574,7 @@ async function setupEventListeners() {
       saveConversationModel(payload.conversation_id, pendingSessionModel);
       pendingSessionModel = null;
     }
+    pendingProjectDir = null;
 
     updateOrAddConversation({
       id: payload.conversation_id,
@@ -589,7 +596,7 @@ async function setupEventListeners() {
   
   // 监听消息更新事件
   await listen<SessionEventPayload>('messages-updated', (event) => {
-    const payload = event.payload;
+    const payload = normalizeSessionEventPayload(event.payload);
     pendingUserMessage = null;
     transientSessionError = null;
 
@@ -676,22 +683,21 @@ function handleMessageChunk(payload: MessageChunkPayload) {
   if (kind === 'session_created') {
     activeConversationId = sid;
     pendingUserMessage = null;
+    const now = Math.floor(Date.now() / 1000);
     const existing = conversations.find((c) => c.id === sid);
-    if (!existing) {
-      conversations.unshift({
-        id: sid,
-        title: 'New Chat',
-        messages: pendingUserMessage
-          ? [{ id: `user-${Date.now()}`, role: 'user', content: pendingUserMessage, timestamp: Math.floor(Date.now() / 1000) }]
-          : [],
-        platform: 'claude',
-        project_dir: content || null,
-        created_at: Math.floor(Date.now() / 1000),
-        updated_at: Math.floor(Date.now() / 1000),
-      });
-    } else if (content) {
-      existing.project_dir = content;
-    }
+    updateOrAddConversation({
+      id: sid,
+      title: existing?.title || 'New Chat',
+      messages: existing?.messages ?? (pendingUserMessage
+        ? [{ id: `user-${Date.now()}`, role: 'user', content: pendingUserMessage, timestamp: now }]
+        : []),
+      platform: 'claude',
+      project_dir: content?.trim() || existing?.project_dir || null,
+      source_path: existing?.source_path ?? null,
+      created_at: existing?.created_at ?? now,
+      updated_at: now,
+    });
+    updateProjectDirControl();
     ensureChatViewVisible();
     return;
   }
@@ -874,20 +880,325 @@ function scrollMessageListToBottom() {
   }
 }
 
-function getProjectDir(conversation: Conversation | undefined): string {
-  if (!conversation) return '—';
-  const dir = conversation.project_dir;
-  return dir && dir.trim() ? dir : '—';
+function isNewChatSession(): boolean {
+  return !activeConversationId;
+}
+
+function getEffectiveProjectDir(): string {
+  if (activeConversationId) {
+    const conv = conversations.find((c) => c.id === activeConversationId);
+    const dir = conv?.project_dir?.trim();
+    return dir || '';
+  }
+  return pendingProjectDir?.trim() || '';
+}
+
+function hasRequiredProjectDir(): boolean {
+  return getEffectiveProjectDir().length > 0;
+}
+
+function canSendMessage(content?: string): boolean {
+  const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  const text = (content ?? input?.value ?? '').trim();
+  if (!text) {
+    return false;
+  }
+  if (isNewChatSession() && !hasRequiredProjectDir()) {
+    return false;
+  }
+  return true;
+}
+
+function updateSendButtonState() {
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+  if (!sendBtn || sendBtn.dataset.loading === 'true') {
+    return;
+  }
+  sendBtn.disabled = !canSendMessage();
+}
+
+function setSendButtonLoading(loading: boolean) {
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+  if (!sendBtn) {
+    return;
+  }
+  sendBtn.dataset.loading = loading ? 'true' : 'false';
+  sendBtn.classList.toggle('is-loading', loading);
+  sendBtn.disabled = loading || !canSendMessage();
+  sendBtn.setAttribute('aria-label', loading ? '发送中' : '发送');
+}
+
+function updateProjectDirControl() {
+  const control = document.querySelector<HTMLButtonElement>('#project-dir-control');
+  if (!control) {
+    return;
+  }
+
+  const dir = getEffectiveProjectDir();
+  const canPick = canPickProjectDirectory();
+  const label = getProjectDirDisplayLabel(dir);
+  const title = getProjectDirHoverTitle(dir);
+  const labelEl = control.querySelector('.project-dir-label');
+  if (labelEl) {
+    labelEl.textContent = label;
+    labelEl.setAttribute('title', title);
+  }
+  control.title = title;
+  control.dataset.empty = dir ? 'false' : 'true';
+  control.disabled = !canPick && !dir;
+  control.classList.toggle('is-readonly', !canPick && Boolean(dir));
+  control.classList.toggle('is-copyable', Boolean(dir) && !canPick);
+
+  control.querySelector('.project-dir-toolbar-chevron')?.remove();
+  control.querySelector('.project-dir-toolbar-copy')?.remove();
+  if (dir && !canPick) {
+    control.insertAdjacentHTML('beforeend', renderProjectDirCopyIconHtml().trim());
+  } else if (canPick) {
+    control.insertAdjacentHTML(
+      'beforeend',
+      '<span class="project-dir-toolbar-chevron" aria-hidden="true">▾</span>',
+    );
+  }
+
+  updateSendButtonState();
+}
+
+function formatProjectDirShortName(dir: string): string {
+  const trimmed = dir.trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (trimmed === '/') {
+    return '/';
+  }
+  if (/^[A-Za-z]:\\?$/.test(trimmed)) {
+    return trimmed.replace(/\\$/, '');
+  }
+  const normalized = trimmed.replace(/[\\/]+$/, '');
+  const segments = normalized.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] || trimmed;
+}
+
+function getProjectDirDisplayLabel(dir: string): string {
+  return formatProjectDirShortName(dir) || '选择工作目录';
+}
+
+function getProjectDirHoverTitle(dir: string, canPick = canPickProjectDirectory()): string {
+  const trimmed = dir.trim();
+  if (!trimmed) {
+    return '点击选择工作目录';
+  }
+  if (canPick) {
+    return `工作目录: ${trimmed}（点击更换）`;
+  }
+  return `工作目录: ${trimmed}（点击复制）`;
+}
+
+function renderCopyIconHtml(className = 'toolbar-copy-icon'): string {
+  return `
+    <span class="${className}" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="9" y="9" width="13" height="13" rx="2"/>
+        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+      </svg>
+    </span>
+  `;
+}
+
+function renderProjectDirCopyIconHtml(): string {
+  return renderCopyIconHtml('project-dir-toolbar-copy');
+}
+
+async function copyTextToClipboard(text: string): Promise<boolean> {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return false;
+  }
+  try {
+    await navigator.clipboard.writeText(trimmed);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function handleProjectDirClick() {
+  if (canPickProjectDirectory()) {
+    void pickProjectDirectory();
+    return;
+  }
+  const dir = getEffectiveProjectDir().trim();
+  if (dir) {
+    void copyTextToClipboard(dir);
+  }
+}
+
+function handleSessionIdClick() {
+  const control = document.querySelector<HTMLButtonElement>('#session-id-copy');
+  const sessionId = control?.dataset.sessionId?.trim();
+  if (!sessionId || sessionId === '—') {
+    return;
+  }
+  void copyTextToClipboard(sessionId);
+}
+
+function bindSessionIdCopyEvents() {
+  const control = document.querySelector('#session-id-copy');
+  if (!control) {
+    return;
+  }
+  control.removeEventListener('click', handleSessionIdClick);
+  control.addEventListener('click', handleSessionIdClick);
+}
+
+function renderSendButtonHtml(): string {
+  const disabled = canSendMessage() ? '' : ' disabled';
+  return `
+    <button class="send-btn" id="send-btn" type="button" aria-label="发送"${disabled}>
+      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M12 19V5"/>
+        <path d="m5 12 7-7 7 7"/>
+      </svg>
+    </button>
+  `;
+}
+
+function renderProjectDirToolbarHtml(): string {
+  const dir = getEffectiveProjectDir();
+  const canPick = canPickProjectDirectory();
+  const label = getProjectDirDisplayLabel(dir);
+  const title = getProjectDirHoverTitle(dir, canPick);
+
+  return `
+    <button
+      type="button"
+      class="project-dir-toolbar ${canPick ? '' : 'is-readonly'}${dir && !canPick ? ' is-copyable' : ''}"
+      id="project-dir-control"
+      data-empty="${dir ? 'false' : 'true'}"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+      ${!canPick && !dir ? 'disabled' : ''}
+    >
+      <span class="project-dir-toolbar-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+        </svg>
+      </span>
+      <span class="project-dir-toolbar-label project-dir-label" title="${escapeHtml(title)}">${escapeHtml(label)}</span>
+      ${dir && !canPick ? renderProjectDirCopyIconHtml() : canPick ? '<span class="project-dir-toolbar-chevron" aria-hidden="true">▾</span>' : ''}
+    </button>
+  `;
+}
+
+function renderInputComposerHtml(): string {
+  return `
+    <div class="input-area">
+      <div class="input-composer">
+        <textarea
+          id="message-input"
+          class="input-composer-textarea"
+          rows="1"
+          placeholder="输入你的问题，Enter 发送，Shift+Enter 换行..."
+        ></textarea>
+        <div class="input-composer-toolbar">
+          <div class="input-composer-toolbar-start"></div>
+          <div class="input-composer-toolbar-end">
+            ${renderProjectDirToolbarHtml()}
+            ${renderChatModelPickerHtml()}
+            ${renderSendButtonHtml()}
+          </div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+async function pickProjectDirectory() {
+  if (!canPickProjectDirectory()) {
+    return;
+  }
+
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: '选择工作目录',
+    });
+    if (typeof selected !== 'string' || !selected.trim()) {
+      return;
+    }
+    const trimmed = selected.trim();
+    if (activeConversationId) {
+      const conv = conversations.find((c) => c.id === activeConversationId);
+      if (conv) {
+        conv.project_dir = trimmed;
+      }
+    } else {
+      pendingProjectDir = trimmed;
+    }
+    updateProjectDirControl();
+
+    const topbarMain = document.querySelector<HTMLDivElement>('.main-topbar-main');
+    if (topbarMain && (activeConversationId || pendingUserMessage)) {
+      topbarMain.innerHTML = renderChatHeaderHtml(undefined);
+    }
+  } catch (e) {
+    console.error('Failed to pick project directory:', e);
+  }
 }
 
 function normalizeConversation(
   raw: Conversation & { projectDir?: string | null; sourcePath?: string | null }
 ): Conversation {
+  const projectDir = raw.project_dir ?? raw.projectDir ?? null;
   return {
     ...raw,
-    project_dir: raw.project_dir ?? raw.projectDir ?? null,
+    project_dir: projectDir?.trim() ? projectDir.trim() : null,
     source_path: raw.source_path ?? raw.sourcePath ?? null,
   };
+}
+
+function normalizeSessionEventPayload(raw: SessionEventPayload): SessionEventPayload {
+  const conversationId = raw.conversation_id ?? raw.conversationId ?? '';
+  const projectDir = raw.project_dir ?? raw.projectDir ?? null;
+  const updatedAt = raw.updated_at ?? raw.updatedAt ?? Math.floor(Date.now() / 1000);
+  return {
+    conversation_id: conversationId,
+    title: raw.title,
+    messages: raw.messages,
+    project_dir: projectDir?.trim() ? projectDir.trim() : null,
+    updated_at: updatedAt,
+  };
+}
+
+function resolveConversationProjectDir(
+  incoming: string | null | undefined,
+  existing: string | null | undefined,
+): string | null {
+  const trimmedIncoming = incoming?.trim();
+  if (trimmedIncoming) {
+    return trimmedIncoming;
+  }
+  const trimmedExisting = existing?.trim();
+  if (trimmedExisting) {
+    return trimmedExisting;
+  }
+  return null;
+}
+
+function hasStartedConversation(): boolean {
+  if (pendingUserMessage) {
+    return true;
+  }
+  if (!activeConversationId) {
+    return false;
+  }
+  const conv = conversations.find((c) => c.id === activeConversationId);
+  return Boolean(conv && conv.messages.length > 0);
+}
+
+function canPickProjectDirectory(): boolean {
+  return !hasStartedConversation();
 }
 
 // 在内存中更新或添加会话
@@ -898,7 +1209,7 @@ function updateOrAddConversation(conv: Conversation) {
     const existing = conversations[idx];
     conversations[idx] = {
       ...normalized,
-      project_dir: normalized.project_dir ?? existing.project_dir,
+      project_dir: resolveConversationProjectDir(normalized.project_dir, existing.project_dir),
       source_path: normalized.source_path ?? existing.source_path,
       created_at: existing.created_at,
     };
@@ -906,6 +1217,22 @@ function updateOrAddConversation(conv: Conversation) {
     conversations.unshift(normalized);
   }
   conversations.sort((a, b) => b.updated_at - a.updated_at);
+}
+
+async function refreshConversationFromBackend(conversationId: string) {
+  if (!conversationId) {
+    return;
+  }
+  try {
+    const raw = await invoke<(Conversation & { projectDir?: string | null }) | null>('get_conversation', {
+      conversationId,
+    });
+    if (raw) {
+      updateOrAddConversation(raw);
+    }
+  } catch (e) {
+    console.error('Failed to refresh conversation:', e);
+  }
 }
 
 async function loadData() {
@@ -1046,11 +1373,7 @@ function render() {
         </div>
         ` : ''}
         ${activeConversationId || pendingUserMessage ? renderChatContent() : renderEmptyState()}
-        <div class="input-area">
-          <textarea id="message-input" rows="1" placeholder="Enter your message..."></textarea>
-          ${renderChatModelPickerHtml()}
-          <button class="send-btn" id="send-btn">Send</button>
-        </div>
+        ${renderInputComposerHtml()}
       </div>
       </div>
     </div>
@@ -1071,10 +1394,19 @@ function attachEventListeners() {
   const textarea = document.querySelector('#message-input') as HTMLTextAreaElement;
   if (textarea) {
     textarea.addEventListener('keydown', handleKeydown);
+    textarea.addEventListener('input', updateSendButtonState);
   }
 
   document.querySelector('#send-btn')?.addEventListener('click', sendMessage);
+
+  const projectDirControl = document.querySelector('#project-dir-control');
+  if (projectDirControl) {
+    projectDirControl.removeEventListener('click', handleProjectDirClick);
+    projectDirControl.addEventListener('click', handleProjectDirClick);
+  }
+
   bindChatModelPickerEvents();
+  bindSessionIdCopyEvents();
   document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
   document.querySelector('#settings-btn')?.addEventListener('click', () => {
     void openSettingsModal();
@@ -2348,7 +2680,10 @@ function renderChatHeaderHtml(conversation: Conversation | undefined): string {
   const title = conversation?.title || 'New Chat';
   const platform = conversation?.platform || 'claude';
   const sessionId = conversation?.id || activeConversationId || '—';
-  const cwd = getProjectDir(conversation);
+  const canCopySessionId = sessionId !== '—';
+  const sessionTitle = canCopySessionId
+    ? `Session ID: ${sessionId}（点击复制）`
+    : 'Session ID';
 
   return `
     <div class="chat-header-left">
@@ -2356,8 +2691,23 @@ function renderChatHeaderHtml(conversation: Conversation | undefined): string {
       <span class="platform-badge">${platforms[platform]?.name || platform}</span>
     </div>
     <div class="chat-header-meta">
-      <span class="session-id" title="Session ID: ${escapeHtml(sessionId)}">${escapeHtml(sessionId)}</span>
-      <span class="session-cwd" title="Working Directory: ${escapeHtml(cwd)}">${escapeHtml(cwd)}</span>
+      ${
+        canCopySessionId
+          ? `
+        <button
+          type="button"
+          class="session-id session-id-copy"
+          id="session-id-copy"
+          data-session-id="${escapeHtml(sessionId)}"
+          title="${escapeHtml(sessionTitle)}"
+          aria-label="${escapeHtml(sessionTitle)}"
+        >
+          <span class="session-id-text">${escapeHtml(sessionId)}</span>
+          ${renderCopyIconHtml('session-id-copy-icon')}
+        </button>
+      `
+          : `<span class="session-id">${escapeHtml(sessionId)}</span>`
+      }
     </div>
   `;
 }
@@ -2408,6 +2758,7 @@ function newChat() {
   pendingUserMessage = null;
   transientSessionError = null;
   pendingSessionModel = null;
+  pendingProjectDir = null;
   render();
   
   setTimeout(() => {
@@ -2424,12 +2775,15 @@ async function sendMessage() {
   if (!input || !input.value.trim()) return;
   if (sendBtn?.disabled) return;
 
+  if (isNewChatSession() && !hasRequiredProjectDir()) {
+    return;
+  }
+
   const content = input.value.trim();
   input.value = '';
 
   if (sendBtn) {
-    sendBtn.disabled = true;
-    sendBtn.textContent = 'Waiting...';
+    setSendButtonLoading(true);
   }
 
   pendingUserMessage = content;
@@ -2459,6 +2813,12 @@ async function sendMessage() {
     const model = getActiveChatModel();
     if (model) {
       args.model = model;
+    }
+    if (!activeConversationId) {
+      const projectDir = getEffectiveProjectDir();
+      if (projectDir) {
+        args.projectDir = projectDir;
+      }
     }
     await invoke('execute_prompt', args);
   } catch (e) {
@@ -2511,11 +2871,8 @@ function clearPendingRequestState() {
 
 function hideSendingState() {
   clearPendingRequestState();
-  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
-  if (sendBtn) {
-    sendBtn.disabled = false;
-    sendBtn.textContent = 'Send';
-  }
+  setSendButtonLoading(false);
+  updateSendButtonState();
 }
 
 function refreshChatContent() {
@@ -2530,8 +2887,10 @@ function refreshChatContent() {
 
   if (topbarMain) {
     topbarMain.innerHTML = renderChatHeaderHtml(conversation);
+    bindSessionIdCopyEvents();
   }
-  
+
+  updateProjectDirControl();
   if (messageList) {
     const messages = [...(conversation?.messages ?? [])];
     if (pendingUserMessage && !messages.some((m) => m.role === 'user' && m.content === pendingUserMessage)) {
@@ -2580,14 +2939,16 @@ function escapeHtml(text: string): string {
 // 全局函数 - 用于 HTML 模板中调用
 function selectConversation(id: string) {
   activeConversationId = id;
-  render();
-  
-  setTimeout(() => {
-    const messageList = document.querySelector<HTMLDivElement>('#message-list');
-    if (messageList) {
-      messageList.scrollTop = messageList.scrollHeight;
-    }
-  }, 100);
+  void refreshConversationFromBackend(id).then(() => {
+    render();
+
+    setTimeout(() => {
+      const messageList = document.querySelector<HTMLDivElement>('#message-list');
+      if (messageList) {
+        messageList.scrollTop = messageList.scrollHeight;
+      }
+    }, 100);
+  });
 }
 
 async function deleteConversation(id: string) {

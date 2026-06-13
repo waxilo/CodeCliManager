@@ -47,6 +47,13 @@
   --color-bubble-user-code-bg: rgba(255, 255, 255, 0.12);
   --color-bubble-assistant-bg: #3a3a52;
   --color-bubble-assistant-border: rgba(255, 255, 255, 0.06);
+  --color-composer-bg: #282836;
+  --color-composer-border: rgba(255, 255, 255, 0.08);
+  --color-composer-footer: #1f1f2b;
+  --color-send-btn: rgba(137, 180, 250, 0.22);
+  --color-send-btn-hover: rgba(137, 180, 250, 0.34);
+  --color-send-btn-disabled: #313244;
+  --color-send-icon: #cdd6f4;
 }
 
 [data-theme='light'] {
@@ -97,4 +104,11 @@
   --color-bubble-user-code-bg: rgba(255, 255, 255, 0.65);
   --color-bubble-assistant-bg: #ffffff;
   --color-bubble-assistant-border: #e2e8f0;
+  --color-composer-bg: #ffffff;
+  --color-composer-border: rgba(15, 23, 42, 0.1);
+  --color-composer-footer: #f5f6f8;
+  --color-send-btn: #e8e0ff;
+  --color-send-btn-hover: #ddd6fe;
+  --color-send-btn-disabled: #e8eaef;
+  --color-send-icon: #6366f1;
 }

@@ -947,6 +947,15 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             Err(_) => continue,
         };
 
+        if project_dir.is_none() {
+            project_dir = value
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .map(str::trim)
+                .filter(|cwd| !cwd.is_empty())
+                .map(|cwd| cwd.to_string());
+        }
+
         if value.get("type").and_then(|t| t.as_str()) == Some("custom-title") {
             custom_title = value.get("customTitle").and_then(|t| t.as_str()).map(|s| s.to_string());
             continue;
@@ -958,11 +967,6 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
 
         if session_id.is_none() {
             session_id = value.get("sessionId").and_then(|s| s.as_str()).map(|s| s.to_string());
-        }
-
-        // 从 JSONL 行中提取 cwd（项目工作目录）
-        if project_dir.is_none() {
-            project_dir = value.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string());
         }
         
         let ts = value.get("timestamp").and_then(|t| t.as_str()).and_then(parse_timestamp);
@@ -1059,12 +1063,25 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     })
 }
 
-/// 从 JSONL 文件所在目录名反推工作目录（Claude 编码规则：非字母数字替换为 `-`）
+/// 从 JSONL 文件所在目录名反推工作目录（Claude 编码规则：`/` → `-`，并以 `-` 开头）
 fn decode_project_dir_from_jsonl_path(path: &PathBuf) -> Option<String> {
-    path.parent()
+    let encoded = path
+        .parent()
         .and_then(|p| p.file_name())
-        .and_then(|name| name.to_str())
-        .map(|encoded| encoded.replace('-', "/"))
+        .and_then(|name| name.to_str())?;
+
+    if !encoded.starts_with('-') {
+        return None;
+    }
+
+    let decoded = encoded.replace('-', "/");
+    if decoded == "/" {
+        Some("/".to_string())
+    } else if decoded.is_empty() {
+        None
+    } else {
+        Some(decoded)
+    }
 }
 
 // 从 content 中提取文本和思考内容
@@ -2300,12 +2317,14 @@ async fn execute_prompt(
     prompt: String,
     conversation_id: Option<String>,
     model: Option<String>,
+    project_dir: Option<String>,
 ) -> Result<(), String> {
     let active_cid = conversation_id.clone();
     let active_model = model.filter(|value| !value.trim().is_empty());
+    let explicit_project_dir = project_dir.filter(|value| !value.trim().is_empty());
     eprintln!(
-        "[execute_prompt] received: prompt='{}', conversation_id={:?}, model={:?}",
-        prompt, active_cid, active_model
+        "[execute_prompt] received: prompt='{}', conversation_id={:?}, model={:?}, project_dir={:?}",
+        prompt, active_cid, active_model, explicit_project_dir
     );
 
     tauri::async_runtime::spawn(async move {
@@ -2313,13 +2332,16 @@ async fn execute_prompt(
         let before_ids: std::collections::HashSet<String> =
             before_conversations.iter().map(|c| c.id.clone()).collect();
 
-        let project_dir = active_cid.as_ref().and_then(|cid| {
-            before_conversations
-                .iter()
-                .find(|c| c.id == *cid)
-                .and_then(|c| c.project_dir.as_ref())
-                .cloned()
-        });
+        let project_dir = active_cid
+            .as_ref()
+            .and_then(|cid| {
+                before_conversations
+                    .iter()
+                    .find(|c| c.id == *cid)
+                    .and_then(|c| c.project_dir.as_ref())
+                    .cloned()
+            })
+            .or(explicit_project_dir);
 
         let app_handle = app.clone();
         let prompt_clone = prompt.clone();
@@ -2722,6 +2744,7 @@ fn apply_responsive_window_size(app: &tauri::App) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             apply_responsive_window_size(app);
             Ok(())
