@@ -92,6 +92,10 @@ struct ClaudeCodeApiConfig {
     haiku_model: String,
     sonnet_model: String,
     opus_model: String,
+    #[serde(default)]
+    display_models: Vec<String>,
+    #[serde(default)]
+    custom_models: Vec<String>,
     config_path: String,
 }
 
@@ -104,6 +108,10 @@ struct SaveClaudeCodeApiConfig {
     haiku_model: String,
     sonnet_model: String,
     opus_model: String,
+    #[serde(default)]
+    display_models: Vec<String>,
+    #[serde(default)]
+    custom_models: Vec<String>,
 }
 
 fn read_claude_settings_json() -> serde_json::Value {
@@ -173,6 +181,10 @@ struct ApiProfile {
     haiku_model: String,
     sonnet_model: String,
     opus_model: String,
+    #[serde(default)]
+    display_models: Vec<String>,
+    #[serde(default)]
+    custom_models: Vec<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -230,6 +242,20 @@ fn save_api_profiles_store(store: &ApiProfilesStore) -> Result<(), String> {
         .map_err(|e| format!("Failed to write api profiles: {e}"))
 }
 
+fn apply_model_override_env(cmd: &mut std::process::Command, model: &str) {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    cmd.env("ANTHROPIC_MODEL", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_HAIKU_MODEL", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_SONNET_MODEL", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", trimmed);
+}
+
 fn config_from_env(env: &serde_json::Map<String, serde_json::Value>) -> ClaudeCodeApiConfig {
     let api_key = claude_api_key_from_env(env);
     ClaudeCodeApiConfig {
@@ -239,6 +265,8 @@ fn config_from_env(env: &serde_json::Map<String, serde_json::Value>) -> ClaudeCo
         haiku_model: env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
         sonnet_model: env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
         opus_model: env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        display_models: Vec::new(),
+        custom_models: Vec::new(),
         config_path: get_claude_settings_path().to_string_lossy().to_string(),
     }
 }
@@ -251,18 +279,39 @@ fn config_from_profile(profile: &ApiProfile) -> ClaudeCodeApiConfig {
         haiku_model: profile.haiku_model.clone(),
         sonnet_model: profile.sonnet_model.clone(),
         opus_model: profile.opus_model.clone(),
+        display_models: profile.display_models.clone(),
+        custom_models: profile.custom_models.clone(),
         config_path: get_claude_settings_path().to_string_lossy().to_string(),
     }
 }
 
+fn resolve_profile_env_model(profile: &ApiProfile) -> String {
+    profile
+        .custom_models
+        .iter()
+        .find(|model| !model.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            profile
+                .display_models
+                .iter()
+                .find(|model| !model.trim().is_empty())
+                .cloned()
+        })
+        .unwrap_or_default()
+}
+
 fn profile_to_save_config(profile: &ApiProfile) -> SaveClaudeCodeApiConfig {
+    let env_model = resolve_profile_env_model(profile);
     SaveClaudeCodeApiConfig {
         base_url: profile.base_url.clone(),
         api_key: Some(profile.api_key.clone()),
-        default_model: profile.default_model.clone(),
-        haiku_model: profile.haiku_model.clone(),
-        sonnet_model: profile.sonnet_model.clone(),
-        opus_model: profile.opus_model.clone(),
+        default_model: env_model.clone(),
+        haiku_model: env_model.clone(),
+        sonnet_model: env_model.clone(),
+        opus_model: env_model,
+        display_models: profile.display_models.clone(),
+        custom_models: profile.custom_models.clone(),
     }
 }
 
@@ -365,6 +414,8 @@ fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) {
         haiku_model: config.haiku_model,
         sonnet_model: config.sonnet_model,
         opus_model: config.opus_model,
+        display_models: Vec::new(),
+        custom_models: Vec::new(),
         created_at: now,
         updated_at: now,
     };
@@ -424,10 +475,22 @@ fn upsert_api_profile(
 
         profile.name = trimmed_name.to_string();
         profile.base_url = config.base_url.trim().to_string();
-        profile.default_model = config.default_model.trim().to_string();
-        profile.haiku_model = config.haiku_model.trim().to_string();
-        profile.sonnet_model = config.sonnet_model.trim().to_string();
-        profile.opus_model = config.opus_model.trim().to_string();
+        profile.default_model.clear();
+        profile.haiku_model.clear();
+        profile.sonnet_model.clear();
+        profile.opus_model.clear();
+        profile.display_models = config
+            .display_models
+            .iter()
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .collect();
+        profile.custom_models = config
+            .custom_models
+            .iter()
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .collect();
         profile.updated_at = now;
 
         if let Some(api_key) = config.api_key.filter(|key| !key.trim().is_empty()) {
@@ -445,10 +508,22 @@ fn upsert_api_profile(
             name: trimmed_name.to_string(),
             base_url: config.base_url.trim().to_string(),
             api_key: api_key.trim().to_string(),
-            default_model: config.default_model.trim().to_string(),
-            haiku_model: config.haiku_model.trim().to_string(),
-            sonnet_model: config.sonnet_model.trim().to_string(),
-            opus_model: config.opus_model.trim().to_string(),
+            default_model: String::new(),
+            haiku_model: String::new(),
+            sonnet_model: String::new(),
+            opus_model: String::new(),
+            display_models: config
+                .display_models
+                .iter()
+                .map(|model| model.trim().to_string())
+                .filter(|model| !model.is_empty())
+                .collect(),
+            custom_models: config
+                .custom_models
+                .iter()
+                .map(|model| model.trim().to_string())
+                .filter(|model| !model.is_empty())
+                .collect(),
             created_at: now,
             updated_at: now,
         };
@@ -567,6 +642,8 @@ fn profile_from_cc_switch_row(name: &str, settings_config: &str, now: i64) -> Op
         haiku_model: api_config.haiku_model,
         sonnet_model: api_config.sonnet_model,
         opus_model: api_config.opus_model,
+        display_models: Vec::new(),
+        custom_models: Vec::new(),
         created_at: now,
         updated_at: now,
     })
@@ -699,6 +776,14 @@ async fn fetch_api_models(
     model_fetch::fetch_models(trimmed_base_url, &resolved_key).await
 }
 
+fn active_api_profile<'a>(store: &'a ApiProfilesStore) -> Option<&'a ApiProfile> {
+    store
+        .active_profile_id
+        .as_ref()
+        .and_then(|id| store.profiles.iter().find(|profile| profile.id == *id))
+        .or_else(|| store.profiles.first())
+}
+
 #[tauri::command]
 fn get_claude_api_config() -> ClaudeCodeApiConfig {
     let settings = read_claude_settings_json();
@@ -707,7 +792,15 @@ fn get_claude_api_config() -> ClaudeCodeApiConfig {
         .and_then(|value| value.as_object())
         .cloned()
         .unwrap_or_default();
-    config_from_env(&env)
+    let mut config = config_from_env(&env);
+
+    let store = load_api_profiles_store();
+    if let Some(profile) = active_api_profile(&store) {
+        config.display_models = profile.display_models.clone();
+        config.custom_models = profile.custom_models.clone();
+    }
+
+    config
 }
 
 #[tauri::command]
@@ -1593,6 +1686,7 @@ fn spawn_claude_stream(
     prompt: &str,
     conversation_id: Option<&String>,
     project_dir: Option<&String>,
+    model: Option<&str>,
 ) -> std::io::Result<StreamOutcome> {
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
     const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -1620,6 +1714,9 @@ fn spawn_claude_stream(
     let mut cmd = Command::new(&claude_bin);
     cmd.args(&args);
     apply_cli_runtime_env(&mut cmd);
+    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+        apply_model_override_env(&mut cmd, model);
+    }
     #[cfg(target_os = "windows")]
     {
         cmd.creation_flags(0x08000000);
@@ -2198,9 +2295,18 @@ fn resolve_or_create_dir(cwd: &str) -> Option<String> {
 }
 
 #[tauri::command]
-async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<String>) -> Result<(), String> {
+async fn execute_prompt(
+    app: AppHandle,
+    prompt: String,
+    conversation_id: Option<String>,
+    model: Option<String>,
+) -> Result<(), String> {
     let active_cid = conversation_id.clone();
-    eprintln!("[execute_prompt] received: prompt='{}', conversation_id={:?}", prompt, active_cid);
+    let active_model = model.filter(|value| !value.trim().is_empty());
+    eprintln!(
+        "[execute_prompt] received: prompt='{}', conversation_id={:?}, model={:?}",
+        prompt, active_cid, active_model
+    );
 
     tauri::async_runtime::spawn(async move {
         let before_conversations = load_claude_history();
@@ -2218,6 +2324,7 @@ async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<
         let app_handle = app.clone();
         let prompt_clone = prompt.clone();
         let cid_clone = active_cid.clone();
+        let model_clone = active_model.clone();
 
         let stream_result = tauri::async_runtime::spawn_blocking(move || {
             spawn_claude_stream(
@@ -2225,6 +2332,7 @@ async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<
                 &prompt_clone,
                 cid_clone.as_ref(),
                 project_dir.as_ref(),
+                model_clone.as_deref(),
             )
         })
         .await;
