@@ -2111,6 +2111,21 @@ async function refreshSettingsModal(
   onConfigLoaded?: (config: ClaudeCodeApiConfig) => void,
 ) {
   const state = await invoke<ApiProfilesState>('get_api_profiles_state');
+
+  // 官方默认处于使用中（无指定 profile 且无激活 profile）：展示只读官方视图，
+  // 不要回退到第一个 API 配置，否则会把别的配置的模型/详情显示成「官方默认」
+  const officialActive = !selectedProfileId && !state.activeProfileId;
+  if (officialActive) {
+    const listEl = overlay.querySelector('.settings-profile-list');
+    if (listEl) {
+      listEl.innerHTML = renderSettingsProfileList(state.profiles, OFFICIAL_PROFILE_ID);
+    }
+    fillOfficialView(overlay);
+    // 复用 onConfigLoaded 清空遗留的模型缓存（官方无 Base URL，不会触发拉取）
+    onConfigLoaded?.(state.current);
+    return { state, selectedProfileId: OFFICIAL_PROFILE_ID };
+  }
+
   const resolvedSelectedId =
     selectedProfileId ||
     state.activeProfileId ||
@@ -2305,6 +2320,15 @@ async function openSettingsModal() {
     const input = overlay.querySelector('.settings-model-config-summary') as HTMLInputElement | null;
     const hintEl = overlay.querySelector('.settings-model-config-hint');
     if (!input) return;
+
+    // 官方默认只读：模型由订阅 / 官方登录决定，不展示 API 模型数量
+    // （防止上一个配置遗留的异步取模型完成后把官方详情覆盖成「API N 个」）
+    if (overlay.dataset.profileId === OFFICIAL_PROFILE_ID) {
+      input.classList.remove('is-loading');
+      input.value = '由订阅 / 官方登录决定';
+      if (hintEl) hintEl.textContent = '官方默认模型由 Claude 订阅 / 官方登录决定';
+      return;
+    }
 
     if (isModelsLoading()) {
       input.value = '正在从 API 获取模型列表…';
