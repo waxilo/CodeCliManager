@@ -2876,6 +2876,8 @@ async function openSettingsModal() {
 
   const bindModelConfigEvents = () => {
     overlay.querySelector('.settings-model-config-summary')?.addEventListener('click', () => {
+      // 官方默认为只读，模型由订阅 / 官方登录决定，不打开模型配置
+      if (overlay.dataset.profileId === OFFICIAL_PROFILE_ID) return;
       openModelConfigDialog();
     });
   };
@@ -2945,6 +2947,11 @@ async function openSettingsModal() {
         } catch {
           /* 列表刷新失败不影响查看 */
         }
+        // 清空上一个配置遗留的模型缓存，避免官方详情里看到别的配置的模型
+        fetchedModels = [];
+        modelsFetchKey = '';
+        displayModels = [];
+        customModels = [];
         fillOfficialView(overlay);
         return;
       }
