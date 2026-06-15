@@ -1,6 +1,6 @@
 [package]
 name = "codecli-manager"
-version = "0.1.25"
+version = "0.1.26"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -25,4 +25,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 dirs = "5"
 rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+base64 = "0.22"
 

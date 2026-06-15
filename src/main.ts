@@ -25,6 +25,12 @@ interface Message {
   content: string;
   thinking?: string;
   timestamp: number;
+  refs?: FileRef[];
+}
+
+interface FileRef {
+  path: string;
+  isImage: boolean;
 }
 
 interface Conversation {
@@ -1333,6 +1339,10 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   }
 }
 
+function showCopyToast(): void {
+  showCopyToastMsg('已复制');
+}
+
 function handleProjectDirClick() {
   if (canPickProjectDirectory()) {
     void pickProjectDirectory();
@@ -1340,7 +1350,9 @@ function handleProjectDirClick() {
   }
   const dir = getEffectiveProjectDir().trim();
   if (dir) {
-    void copyTextToClipboard(dir);
+    copyTextToClipboard(dir).then((ok) => {
+      if (ok) showCopyToast();
+    });
   }
 }
 
@@ -1350,7 +1362,9 @@ function handleSessionIdClick() {
   if (!sessionId || sessionId === '—') {
     return;
   }
-  void copyTextToClipboard(sessionId);
+  copyTextToClipboard(sessionId).then((ok) => {
+    if (ok) showCopyToast();
+  });
 }
 
 function bindSessionIdCopyEvents() {
@@ -1408,12 +1422,14 @@ function renderInputComposerHtml(): string {
   return `
     <div class="input-area">
       <div class="input-composer">
+        <div id="paste-attachments-bar" class="paste-attachments-bar" style="display:none"></div>
         <textarea
           id="message-input"
           class="input-composer-textarea"
           rows="1"
-          placeholder="输入你的问题，Enter 发送，Shift+Enter 换行..."
+          placeholder="输入你的问题，Enter 发送，Shift+Enter 换行，@ 引用文件，粘贴图片..."
         ></textarea>
+        <div id="file-suggestions" class="file-suggestions" style="display:none"></div>
         <div class="input-composer-toolbar">
           <div class="input-composer-toolbar-start"></div>
           <div class="input-composer-toolbar-end">
@@ -1450,6 +1466,7 @@ async function pickProjectDirectory() {
       }
     } else {
       pendingProjectDir = trimmed;
+    invalidateFileCache();
     }
     updateProjectDirControl();
 
@@ -1798,6 +1815,13 @@ function attachEventListeners() {
   if (textarea) {
     textarea.addEventListener('keydown', handleKeydown);
     textarea.addEventListener('input', updateSendButtonState);
+    textarea.addEventListener('input', handleFileSuggestionInput);
+    textarea.addEventListener('keydown', handleFileSuggestionKeydown);
+    textarea.addEventListener('paste', handlePaste);
+    textarea.addEventListener('blur', () => {
+      // 延迟关闭，让点击建议项有时间触发
+      setTimeout(() => hideFileSuggestions(), 150);
+    });
   }
 
   document.querySelector('#send-btn')?.addEventListener('click', handleSendButtonClick);
@@ -1818,6 +1842,17 @@ function attachEventListeners() {
   document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
   document.querySelector('#settings-btn')?.addEventListener('click', () => {
     void openSettingsModal();
+  });
+
+  // 拖拽文件自动引用
+  bindDragDropFileRefs();
+
+  // 图片引用芯片点击大图预览（事件委托）
+  document.querySelector('#message-list')?.addEventListener('click', (e) => {
+    const chip = (e.target as HTMLElement).closest('.file-ref-chip') as HTMLElement | null;
+    if (chip?.dataset.filePath) {
+      viewImageFile(chip.dataset.filePath);
+    }
   });
 
   if (editingConversationId) {
@@ -3369,16 +3404,59 @@ function renderMessageHtml(msg: Message): string {
     }
   }
 
+  // 用户消息：引用文件芯片和正文合并展示为一条消息
+  const userRefs = msg.role === 'user' && msg.refs && msg.refs.length > 0
+    ? renderFileRefChipsHtml(msg.refs)
+    : '';
+
   return `
     <div class="message ${roleClass}">
       <div class="message-avatar">${avatarLabel}</div>
       <div class="message-content">
+        ${userRefs}
         ${thinkingHtml}
         ${contentHtml}
         <div class="message-time">${formatTime(msg.timestamp)}</div>
       </div>
     </div>
   `;
+}
+
+function renderFileRefChipsHtml(refs: FileRef[]): string {
+  // 为图片文件异步预加载缩略图
+  setTimeout(() => {
+    const dir = getEffectiveProjectDir();
+    if (!dir) return;
+    const baseDir = dir.endsWith('/') ? dir : dir + '/';
+    const chips = document.querySelectorAll<HTMLElement>('.file-ref-chip[data-file-path] img.file-ref-chip-thumb');
+    chips.forEach(async (img) => {
+      const filePath = ((img as HTMLElement).parentElement as HTMLElement)?.dataset.filePath;
+      if (!filePath || img.getAttribute('src') !== '') return;
+      try {
+        const mime = getImageMime(filePath);
+        const b64 = await invoke<string>('read_file_base64', { filePath: baseDir + filePath });
+        (img as HTMLImageElement).src = `data:${mime};base64,${b64}`;
+      } catch { /* 加载缩略图失败，保持空状态 */ }
+    });
+  }, 100);
+
+  return `
+    <div class="file-ref-chips">
+      ${refs
+        .map(
+          (ref) => {
+            const icon = getFileSuggestionIcon(ref.path);
+            const isImg = isImageFile(ref.path);
+            return `
+        <span class="file-ref-chip${ref.isImage ? ' file-ref-chip--misc' : ''}" title="${escapeHtml(ref.path)}" ${isImg ? `data-file-path="${escapeHtml(ref.path)}"` : ''}>
+          ${isImg ? `<img class="file-ref-chip-thumb" src="" alt="" loading="lazy" />` : ''}
+          <span class="file-ref-chip-icon">${icon}</span>
+          <span class="file-ref-chip-path">${escapeHtml(ref.path)}</span>
+        </span>`;
+          },
+        )
+        .join('')}
+    </div>`;
 }
 
 function formatTokenCount(n: number): string {
@@ -3603,6 +3681,7 @@ async function refreshModelInfo() {
 
 function newChat() {
   activeConversationId = '';
+  invalidateFileCache();
   pendingUserMessage = null;
   transientSessionError = null;
   pendingSessionModel = null;
@@ -3624,17 +3703,44 @@ async function sendMessage() {
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
 
-  if (!input || !input.value.trim()) return;
+  if (!input) return;
+
+  const hasPastedImages = pasteAttachments.length > 0;
+  if (!input.value.trim() && !hasPastedImages) return;
   if (sendBtn?.disabled) return;
 
   if (isNewChatSession() && !hasRequiredProjectDir()) {
     return;
   }
 
-  const content = input.value.trim();
+  let content = input.value.trim();
   input.value = '';
 
-  pendingUserMessage = content;
+  // 粘贴图片附件：拼到 prompt 前（给 CLI 用的），content 保持原始文字用于展示
+  const pasteRefs: { path: string; name: string; objectUrl: string }[] = [];
+  let promptWithPaste = content;
+  if (hasPastedImages) {
+    for (const att of pasteAttachments) {
+      pasteRefs.push({ ...att });
+    }
+    const pasteRefStr = pasteRefs.map((a) => `@${a.path}`).join(' ');
+    promptWithPaste = pasteRefStr + (content ? ' ' + content : '');
+    clearPasteAttachments();
+  }
+
+  // 所有引用（@file 引用 + 粘贴图片）合并
+  const allRefs: FileRef[] = pasteRefs.map((a) => ({ path: a.path, isImage: true }));
+
+  const { prompt: resolvedContent, refs: fileRefs } = await resolveFileReferences(promptWithPaste);
+
+  // 合并 @file 引用
+  for (const ref of fileRefs) {
+    if (!allRefs.some((r) => r.path === ref.path)) {
+      allRefs.push(ref);
+    }
+  }
+
+  pendingUserMessage = resolvedContent;
 
   if (activeConversationId) {
     runningSessions.add(activeConversationId);
@@ -3643,7 +3749,8 @@ async function sendMessage() {
       conv.messages.push({
         id: `user-${Date.now()}`,
         role: 'user',
-        content,
+        content: resolvedContent,
+        refs: allRefs.length > 0 ? allRefs : undefined,
         timestamp: Math.floor(Date.now() / 1000),
       });
       conv.updated_at = Math.floor(Date.now() / 1000);
@@ -3662,7 +3769,7 @@ async function sendMessage() {
   updateConversationListSpinner();
 
   try {
-    const args: Record<string, string> = { prompt: content };
+    const args: Record<string, string> = { prompt: resolvedContent };
     if (activeConversationId) {
       args.conversationId = activeConversationId;
     }
@@ -3855,6 +3962,15 @@ function handleKeydown(e: KeyboardEvent) {
   if (isSendButtonLoading()) {
     return;
   }
+  // 文件建议列表可见且有待选项时，Enter 交给文件建议键盘处理逻辑（选择当前高亮项）
+  const suggestionContainer = getFileSuggestionsContainer();
+  if (suggestionContainer && suggestionContainer.style.display !== 'none' && e.key === 'Enter' && !e.shiftKey) {
+    const activeIdx = getActiveSuggestionIndex();
+    if (activeIdx >= 0) {
+      // handleFileSuggestionKeydown 已注册在同一个 textarea 上，会处理选择逻辑
+      return;
+    }
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
@@ -3878,6 +3994,7 @@ function escapeHtml(text: string): string {
 // 全局函数 - 用于 HTML 模板中调用
 function selectConversation(id: string) {
   activeConversationId = id;
+  invalidateFileCache();
 
   void refreshConversationFromBackend(id).then(() => {
     render();
@@ -3982,6 +4099,540 @@ function handleEditKeydown(e: KeyboardEvent, id: string) {
     e.preventDefault();
     cancelEdit();
   }
+}
+
+// ── @file 引用功能 ──────────────────────────────────────────────────
+let _cachedFileList: string[] | null = null;
+let _cachedProjectDir = '';
+
+// ── 粘贴图片附件 ────────────────────────────────────────────────────
+let pasteAttachments: { path: string; name: string; objectUrl: string }[] = [];
+
+function getPasteUploadsDir(): string {
+  const dir = getEffectiveProjectDir();
+  return dir.endsWith('/') ? dir + '.clipboard-uploads' : dir + '/.clipboard-uploads';
+}
+
+async function handlePaste(e: ClipboardEvent) {
+  const items = e.clipboardData?.items;
+  if (!items) return;
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type.startsWith('image/')) {
+      e.preventDefault();
+      const blob = item.getAsFile();
+      if (!blob) continue;
+
+      const ext = item.type === 'image/png' ? 'png' : item.type === 'image/gif' ? 'gif' : item.type === 'image/webp' ? 'webp' : 'jpg';
+      const fileName = `pasted-${Date.now()}-${i}.${ext}`;
+      const uploadsDir = getPasteUploadsDir();
+      const filePath = `${uploadsDir}/${fileName}`;
+
+      try {
+        const buf = await blob.arrayBuffer();
+        await invoke('write_file_bytes', { filePath, data: Array.from(new Uint8Array(buf)) });
+
+        const objectUrl = URL.createObjectURL(new Blob([buf], { type: item.type }));
+        pasteAttachments.push({ path: `.clipboard-uploads/${fileName}`, name: fileName, objectUrl });
+        renderPasteAttachmentsBar();
+      } catch (e) {
+        console.error('Failed to save pasted image:', e);
+      }
+    }
+  }
+}
+
+function renderPasteAttachmentsBar() {
+  const bar = document.querySelector('#paste-attachments-bar');
+  if (!bar) return;
+
+  if (pasteAttachments.length === 0) {
+    (bar as HTMLElement).style.display = 'none';
+    bar.innerHTML = '';
+    return;
+  }
+
+  (bar as HTMLElement).style.display = 'flex';
+  bar.innerHTML = pasteAttachments
+    .map(
+      (att, idx) => `
+      <div class="paste-attachment-thumb" data-idx="${idx}">
+        <img src="${att.objectUrl}" alt="${escapeHtml(att.name)}" />
+        <button type="button" class="paste-attachment-remove" data-idx="${idx}" title="移除" aria-label="移除附件">×</button>
+      </div>`,
+    )
+    .join('');
+
+  bar.querySelectorAll('.paste-attachment-remove').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt((btn as HTMLElement).dataset.idx || '');
+      if (!isNaN(idx) && pasteAttachments[idx]) {
+        URL.revokeObjectURL(pasteAttachments[idx].objectUrl);
+        pasteAttachments.splice(idx, 1);
+        renderPasteAttachmentsBar();
+      }
+    });
+  });
+
+  bar.querySelectorAll('.paste-attachment-thumb').forEach((thumb) => {
+    thumb.addEventListener('click', () => {
+      const idx = parseInt((thumb as HTMLElement).dataset.idx || '');
+      if (!isNaN(idx) && pasteAttachments[idx]) {
+        openImageLightbox(pasteAttachments[idx].objectUrl);
+      }
+    });
+  });
+}
+
+function clearPasteAttachments() {
+  pasteAttachments.forEach((att) => URL.revokeObjectURL(att.objectUrl));
+  pasteAttachments = [];
+  renderPasteAttachmentsBar();
+}
+
+function openImageLightbox(src: string) {
+  const existing = document.querySelector('#image-lightbox');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'image-lightbox';
+  overlay.className = 'image-lightbox';
+  overlay.innerHTML = `<img src="${src}" alt="预览" />`;
+  overlay.addEventListener('click', () => overlay.remove());
+  document.body.appendChild(overlay);
+
+  // ESC 关闭
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+    }
+  };
+  document.addEventListener('keydown', onKey);
+}
+
+async function loadProjectFiles(): Promise<string[]> {
+  const dir = getEffectiveProjectDir();
+  if (!dir) return [];
+  if (_cachedFileList !== null && _cachedProjectDir === dir) {
+    return _cachedFileList;
+  }
+  try {
+    const files = await invoke<string[]>('list_project_files', { projectDir: dir });
+    _cachedFileList = files;
+    _cachedProjectDir = dir;
+    return files;
+  } catch (e) {
+    console.error('Failed to list project files:', e);
+    return [];
+  }
+}
+
+function invalidateFileCache() {
+  _cachedFileList = null;
+  _cachedProjectDir = '';
+}
+
+function getFileSuggestionsContainer(): HTMLDivElement | null {
+  return document.querySelector('#file-suggestions');
+}
+
+function showFileSuggestions(files: string[], filter: string) {
+  const container = getFileSuggestionsContainer();
+  if (!container || files.length === 0) {
+    hideFileSuggestions();
+    return;
+  }
+
+  const lFilter = filter.toLowerCase();
+  const filtered = lFilter
+    ? files.filter((f) => f.toLowerCase().includes(lFilter)).slice(0, 100)
+    : files.slice(0, 100);
+
+  if (filtered.length === 0) {
+    hideFileSuggestions();
+    return;
+  }
+
+  container.innerHTML = filtered
+    .map(
+      (f, i) => {
+        const isDir = f.endsWith('/');
+        const displayPath = isDir ? f.slice(0, -1) : f;
+        return `<div class="file-suggestion-item${i === 0 ? ' active' : ''}${isDir ? ' file-suggestion-item--dir' : ''}" data-path="${escapeHtml(f)}">
+          <span class="file-suggestion-icon">${getFileSuggestionIcon(f)}</span>
+          <span class="file-suggestion-path">${escapeHtml(displayPath)}</span>
+        </div>`;
+      },
+    )
+    .join('');
+
+  container.style.display = 'block';
+
+  // 绑定点击事件
+  container.querySelectorAll('.file-suggestion-item').forEach((item) => {
+    item.addEventListener('mousedown', (e) => {
+      e.preventDefault(); // 阻止 blur 先触发
+      const path = (item as HTMLElement).dataset.path || '';
+      insertFileReference(path);
+      hideFileSuggestions();
+    });
+  });
+}
+
+function hideFileSuggestions() {
+  const container = getFileSuggestionsContainer();
+  if (container) {
+    container.style.display = 'none';
+    container.innerHTML = '';
+  }
+}
+
+/**
+ * 根据文件路径判断文件类型，用于图标展示
+ */
+function isImageFile(filePath: string): boolean {
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'].includes(ext);
+}
+
+function isOtherBinaryFile(filePath: string): boolean {
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  return ['pdf', 'zip', 'tar', 'gz', '7z', 'rar', 'mp4', 'mp3', 'mov', 'avi',
+    'woff', 'woff2', 'ttf', 'eot', 'otf', 'exe', 'dll', 'so', 'dylib',
+    'class', 'jar', 'war', 'wasm', 'bin', 'dat', 'db', 'sqlite',
+    'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'pages', 'numbers', 'key',
+  ].includes(ext);
+}
+
+function getFileSuggestionIcon(filePath: string): string {
+  // 目录
+  if (filePath.endsWith('/')) return '📁';
+  // 图片
+  if (isImageFile(filePath)) return '🖼️';
+  // 已知二进制
+  if (isOtherBinaryFile(filePath)) return '📎';
+  // 默认文本
+  return '📄';
+}
+
+function getImageMime(filePath: string): string {
+  const ext = filePath.split('.').pop()?.toLowerCase() || 'png';
+  const mimeMap: Record<string, string> = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg',
+    gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml',
+    bmp: 'image/bmp', ico: 'image/x-icon', avif: 'image/avif',
+  };
+  return mimeMap[ext] || 'image/png';
+}
+
+async function viewImageFile(filePath: string) {
+  try {
+    const dir = getEffectiveProjectDir();
+    if (!dir) return;
+    const baseDir = dir.endsWith('/') ? dir : dir + '/';
+    const mime = getImageMime(filePath);
+    const b64 = await invoke<string>('read_file_base64', { filePath: baseDir + filePath });
+    openImageLightbox(`data:${mime};base64,${b64}`);
+  } catch (e) {
+    console.error('Failed to load image for preview:', e);
+  }
+}
+
+function getActiveSuggestionIndex(): number {
+  const container = getFileSuggestionsContainer();
+  if (!container) return -1;
+  const items = container.querySelectorAll('.file-suggestion-item');
+  for (let i = 0; i < items.length; i++) {
+    if (items[i].classList.contains('active')) return i;
+  }
+  return -1;
+}
+
+function selectSuggestion(index: number) {
+  const container = getFileSuggestionsContainer();
+  if (!container) return;
+  const items = container.querySelectorAll('.file-suggestion-item');
+  items.forEach((item) => item.classList.remove('active'));
+  if (index >= 0 && index < items.length) {
+    items[index].classList.add('active');
+    items[index].scrollIntoView({ block: 'nearest' });
+  }
+}
+
+function getCurrentAtFilter(): { before: string; filter: string } | null {
+  const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
+  if (!textarea) return null;
+
+  const value = textarea.value;
+  const cursorPos = textarea.selectionStart;
+  const textBeforeCursor = value.substring(0, cursorPos);
+
+  // 找到最后一个 @ 的位置（不在已完成的 @path 后面的）
+  const lastAtIndex = textBeforeCursor.lastIndexOf('@');
+  if (lastAtIndex === -1) return null;
+
+  // @ 后面不能有空格、换行
+  const afterAt = textBeforeCursor.substring(lastAtIndex + 1);
+  if (afterAt.includes(' ') || afterAt.includes('\n') || afterAt.includes('@')) return null;
+
+  return {
+    before: textBeforeCursor.substring(0, lastAtIndex),
+    filter: afterAt,
+  };
+}
+
+async function handleFileSuggestionInput() {
+  const atInfo = getCurrentAtFilter();
+  if (!atInfo) {
+    hideFileSuggestions();
+    return;
+  }
+
+  const files = await loadProjectFiles();
+  showFileSuggestions(files, atInfo.filter);
+}
+
+function insertFileReference(filePath: string) {
+  const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
+  if (!textarea) return;
+
+  const atInfo = getCurrentAtFilter();
+  if (!atInfo) return;
+
+  const value = textarea.value;
+  const cursorPos = textarea.selectionStart;
+  const textAfter = value.substring(cursorPos);
+
+  textarea.value = atInfo.before + '@' + filePath + ' ' + textAfter;
+
+  // 将光标移到插入内容之后
+  const newCursorPos = atInfo.before.length + filePath.length + 2; // @ + path + space
+  textarea.setSelectionRange(newCursorPos, newCursorPos);
+  textarea.focus();
+  updateSendButtonState();
+}
+
+function handleFileSuggestionKeydown(e: KeyboardEvent) {
+  const container = getFileSuggestionsContainer();
+  if (!container || container.style.display === 'none') return;
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    const idx = getActiveSuggestionIndex();
+    const items = container.querySelectorAll('.file-suggestion-item');
+    const nextIdx = idx < items.length - 1 ? idx + 1 : 0;
+    selectSuggestion(nextIdx);
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    const idx = getActiveSuggestionIndex();
+    const items = container.querySelectorAll('.file-suggestion-item');
+    const prevIdx = idx > 0 ? idx - 1 : items.length - 1;
+    selectSuggestion(prevIdx);
+  } else if (e.key === 'Enter' || e.key === 'Tab') {
+    const idx = getActiveSuggestionIndex();
+    const items = container.querySelectorAll('.file-suggestion-item');
+    if (idx >= 0 && idx < items.length) {
+      e.preventDefault();
+      const path = (items[idx] as HTMLElement).dataset.path || '';
+      insertFileReference(path);
+      hideFileSuggestions();
+    }
+  } else if (e.key === 'Escape') {
+    e.preventDefault();
+    hideFileSuggestions();
+  }
+}
+
+// ── 拖拽文件自动引用 ────────────────────────────────────────────────
+let _dragCounter = 0;
+
+function bindDragDropFileRefs() {
+  document.body.addEventListener('dragover', (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  document.body.addEventListener('dragenter', (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    _dragCounter++;
+    if (_dragCounter === 1) {
+      document.body.classList.add('drag-over');
+    }
+  });
+
+  document.body.addEventListener('dragleave', (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    _dragCounter--;
+    if (_dragCounter <= 0) {
+      _dragCounter = 0;
+      document.body.classList.remove('drag-over');
+    }
+  });
+
+  document.body.addEventListener('drop', async (e: DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    _dragCounter = 0;
+    document.body.classList.remove('drag-over');
+
+    const files = e.dataTransfer?.files;
+    if (!files || files.length === 0) return;
+
+    const projectDir = getEffectiveProjectDir();
+    if (!projectDir) {
+      showCopyToastMsg('请先选择工作目录');
+      return;
+    }
+
+    const projectFiles = await loadProjectFiles();
+    if (projectFiles.length === 0) {
+      showCopyToastMsg('未能加载项目文件列表');
+      return;
+    }
+
+    const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
+    if (!textarea) return;
+
+    const insertedRefs: string[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const fileName = files[i].name;
+      // 按文件名精确匹配项目文件列表
+      const matches = projectFiles.filter((f) => {
+        const parts = f.split('/');
+        return parts[parts.length - 1] === fileName;
+      });
+
+      if (matches.length === 1) {
+        // 唯一匹配，直接引用
+        if (!insertedRefs.includes(matches[0])) {
+          insertedRefs.push(matches[0]);
+        }
+      } else if (matches.length > 1) {
+        // 多个同名文件，选择路径最短的（最接近根目录）
+        const shortest = matches.reduce((a, b) => (a.length <= b.length ? a : b));
+        if (!insertedRefs.includes(shortest)) {
+          insertedRefs.push(shortest);
+        }
+      }
+      // 不在项目文件列表中则忽略
+    }
+
+    if (insertedRefs.length > 0) {
+      const currentValue = textarea.value.trimEnd();
+      const refStr = insertedRefs.map((r) => `@${r}`).join(' ');
+      textarea.value = currentValue ? `${currentValue} ${refStr} ` : `${refStr} `;
+      textarea.focus();
+      const newCursorPos = textarea.value.length;
+      textarea.setSelectionRange(newCursorPos, newCursorPos);
+      updateSendButtonState();
+      showCopyToastMsg(`已引用 ${insertedRefs.length} 个文件`);
+    }
+  });
+}
+
+function showCopyToastMsg(msg: string): void {
+  const existing = document.querySelector('.copy-toast');
+  if (existing) existing.remove();
+
+  const toast = document.createElement('div');
+  toast.className = 'copy-toast';
+  toast.innerHTML = `
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="20 6 9 17 4 12"/>
+    </svg>
+    ${escapeHtml(msg)}
+  `;
+  document.body.appendChild(toast);
+
+  requestAnimationFrame(() => {
+    toast.classList.add('copy-toast--visible');
+  });
+
+  setTimeout(() => {
+    toast.classList.remove('copy-toast--visible');
+    setTimeout(() => toast.remove(), 300);
+  }, 2000);
+}
+
+/**
+ * 解析 prompt 中的 @file 引用。
+ * - 文本文件：尝试读取内容拼入 prompt
+ * - 图片/二进制/目录：保留 @path 引用让 CLI 处理
+ * 返回 { prompt, refs }，refs 为匹配到的文件引用列表。
+ */
+async function resolveFileReferences(prompt: string): Promise<{ prompt: string; refs: FileRef[] }> {
+  const atPattern = /@([^\s@]+)/g;
+  const rawRefs: string[] = [];
+  let match: RegExpExecArray | null;
+  const files = await loadProjectFiles();
+
+  while ((match = atPattern.exec(prompt)) !== null) {
+    rawRefs.push(match[1]);
+  }
+
+  if (rawRefs.length === 0) return { prompt, refs: [] };
+
+  // 精确匹配项目中的文件路径（含目录）
+  const matchedRefs = rawRefs.filter((ref) => files.some((f) => f === ref));
+  if (matchedRefs.length === 0) return { prompt, refs: [] };
+
+  const projectDir = getEffectiveProjectDir();
+  if (!projectDir) return { prompt, refs: [] };
+
+  const dir = projectDir.endsWith('/') ? projectDir : projectDir + '/';
+  const fileRefs: FileRef[] = [];
+  const embeddedContents: string[] = [];
+  const unresolvedRefs: string[] = [];
+
+  for (const ref of matchedRefs) {
+    const isDir = ref.endsWith('/');
+    const isImg = isImageFile(ref);
+    fileRefs.push({ path: ref, isImage: isImg || isDir });
+
+    // 目录：直接保留 @path 引用
+    if (isDir) {
+      unresolvedRefs.push(ref);
+      continue;
+    }
+
+    // 图片和已知二进制文件：保留 @path 引用
+    if (isImg || isOtherBinaryFile(ref)) {
+      unresolvedRefs.push(ref);
+      continue;
+    }
+
+    // 尝试作为文本文件读取
+    try {
+      const fullPath = dir + ref;
+      const content = await invoke<string>('read_file_content', { filePath: fullPath });
+      embeddedContents.push(`--- File: ${ref} ---\n${content}\n---\n`);
+    } catch {
+      // 读取失败（实际是二进制文件），保留 @path 引用
+      unresolvedRefs.push(ref);
+    }
+  }
+
+  // 去掉 prompt 中的 @file 引用标签
+  let cleanedPrompt = prompt;
+  for (const ref of matchedRefs) {
+    cleanedPrompt = cleanedPrompt.replace(new RegExp(`@${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'g'), '');
+  }
+  cleanedPrompt = cleanedPrompt.trim();
+
+  // 组装最终 prompt：嵌入内容 + 保留引用 + 用户消息
+  let finalPrompt = embeddedContents.join('\n');
+  if (finalPrompt) finalPrompt += '\n';
+  if (unresolvedRefs.length > 0) {
+    finalPrompt += unresolvedRefs.map((r) => `@${r}`).join(' ') + '\n';
+  }
+  finalPrompt += cleanedPrompt;
+
+  return { prompt: finalPrompt, refs: fileRefs };
 }
 
 init();

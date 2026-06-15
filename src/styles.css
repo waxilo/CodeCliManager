@@ -2817,3 +2817,298 @@ body.is-sidebar-resizing {
   color: #664d03;
   box-shadow: 0 4px 16px rgba(102,77,3,0.15);
 }
+
+/* ── @file 引用下拉建议 ─────────────────────────────────────────── */
+.file-suggestions {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12);
+  z-index: 100;
+}
+
+.file-suggestion-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  transition: background 0.1s;
+}
+
+.file-suggestion-item:hover,
+.file-suggestion-item.active {
+  background: var(--color-bg-hover);
+}
+
+.file-suggestion-item.active {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  border-radius: 4px;
+}
+
+.file-suggestion-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.file-suggestion-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 12px;
+}
+
+/* 目录项视觉区分 */
+.file-suggestion-item--dir {
+  border-radius: 0;
+}
+.file-suggestion-item--dir .file-suggestion-path {
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+/* 键盘选中目录项时覆盖为白色文字，避免蓝底蓝字看不清 */
+.file-suggestion-item.active .file-suggestion-path {
+  color: var(--color-on-accent);
+}
+
+/* 目录与文件之间的分隔 */
+.file-suggestion-item:not(.file-suggestion-item--dir) {
+  /* 文件项不用特殊标记 */
+}
+/* 最后一个目录项后加分隔线 */
+.file-suggestion-item--dir + .file-suggestion-item:not(.file-suggestion-item--dir) {
+  border-top: 1px solid var(--color-bg-surface-hover);
+  margin-top: 2px;
+  padding-top: 8px;
+}
+
+/* 深色主题适配 */
+[data-theme="dark"] .file-suggestions {
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.4);
+}
+
+[data-theme="dark"] .drag-over::before {
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+[data-theme="dark"] .drag-over::after {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* 复制提示 Toast */
+.copy-toast {
+  position: fixed;
+  bottom: 96px;
+  left: 50%;
+  transform: translateX(-50%) translateY(12px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  box-shadow: 0 4px 16px var(--color-bg-base);
+  border: 1px solid var(--color-bg-surface-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 9999;
+}
+
+.copy-toast--visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.copy-toast svg {
+  color: var(--color-accent);
+}
+
+/* ── 文件引用芯片 ─────────────────────────────────────────────────── */
+.file-ref-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+
+.file-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-bg-surface-hover);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: default;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.file-ref-chip--misc {
+  border-color: var(--color-accent);
+  opacity: 0.85;
+}
+
+.file-ref-chip-icon {
+  flex-shrink: 0;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.file-ref-chip-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+}
+
+/* ── 拖拽文件视觉反馈 ─────────────────────────────────────────────── */
+body.drag-over::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  border: 3px dashed var(--color-accent);
+  border-radius: 12px;
+  background: rgba(128, 128, 128, 0.06);
+  pointer-events: none;
+  z-index: 9998;
+}
+
+body.drag-over::before {
+  content: '释放文件以引用';
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  padding: 16px 32px;
+  border-radius: 12px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  font-size: 18px;
+  font-weight: 600;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
+  pointer-events: none;
+  z-index: 9999;
+}
+
+/* ── 粘贴图片附件栏 ───────────────────────────────────────────────── */
+.paste-attachments-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  padding: 6px 10px 2px;
+  overflow-x: auto;
+}
+
+.paste-attachment-thumb {
+  position: relative;
+  flex-shrink: 0;
+  width: 52px;
+  height: 52px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 2px solid var(--color-bg-surface-hover);
+  cursor: pointer;
+  background: var(--color-bg-surface);
+}
+
+.paste-attachment-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.paste-attachment-thumb:hover {
+  border-color: var(--color-accent);
+}
+
+.paste-attachment-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 0 6px 0 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.paste-attachment-thumb:hover .paste-attachment-remove {
+  opacity: 1;
+}
+
+/* ── 图片引用芯片缩略图 ────────────────────────────────────────────── */
+.file-ref-chip-thumb {
+  width: 28px;
+  height: 28px;
+  border-radius: 3px;
+  object-fit: cover;
+  flex-shrink: 0;
+  margin-right: -2px;
+  border: 1px solid var(--color-bg-surface-hover);
+  cursor: pointer;
+}
+
+.file-ref-chip {
+  cursor: default;
+}
+.file-ref-chip[data-file-path] {
+  cursor: pointer;
+}
+.file-ref-chip[data-file-path]:hover {
+  opacity: 0.85;
+}
+
+/* ── 图片大图预览 Lightbox ─────────────────────────────────────────── */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  cursor: pointer;
+  animation: fadeIn 0.15s ease;
+}
+
+.image-lightbox img {
+  max-width: 90vw;
+  max-height: 90vh;
+  border-radius: 8px;
+  box-shadow: 0 8px 48px rgba(0, 0, 0, 0.5);
+  object-fit: contain;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+

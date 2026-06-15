@@ -13,6 +13,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewWindow};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 mod model_fetch;
 
 // ── 全局进程注册表：用于支持 abort（取消正在运行的任务） ──────────────
@@ -2781,6 +2783,85 @@ fn resolve_or_create_dir(cwd: &str) -> Option<String> {
     }
 }
 
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // 跳过隐藏文件和常见忽略目录
+            if file_name.starts_with('.') {
+                continue;
+            }
+            if file_name == "node_modules" || file_name == "target" || file_name == "dist"
+                || file_name == ".next" || file_name == "__pycache__" || file_name == "vendor"
+                || file_name == "build" || file_name == ".turbo" || file_name == ".cache"
+            {
+                continue;
+            }
+            if let Ok(rel) = path.strip_prefix(root) {
+                let mut rel_str = rel.to_string_lossy().to_string();
+                if path.is_dir() {
+                    rel_str.push('/');
+                }
+                out.push(rel_str);
+                if path.is_dir() {
+                    collect_files(root, &path, out);
+                }
+            }
+        }
+    }
+}
+
+// ── 文件引用功能：列出项目文件 ─────────────────────────────────────
+/// 递归列出项目目录下的所有文件和目录（排除隐藏目录、node_modules 等）
+#[tauri::command]
+fn list_project_files(project_dir: String) -> Result<Vec<String>, String> {
+    let root = Path::new(&project_dir);
+    if !root.is_dir() {
+        return Err(format!("目录不存在: {}", project_dir));
+    }
+    let mut files = Vec::new();
+    collect_files(root, root, &mut files);
+    // 排序：目录在前，文件在后，各自按字母序
+    files.sort_by(|a, b| {
+        let a_is_dir = a.ends_with('/');
+        let b_is_dir = b.ends_with('/');
+        b_is_dir.cmp(&a_is_dir).then_with(|| a.cmp(b))
+    });
+    Ok(files)
+}
+
+// ── 文件引用功能：读取文件内容 ──────────────────────────────────────
+#[tauri::command]
+fn read_file_content(file_path: String) -> Result<String, String> {
+    let path = Path::new(&file_path);
+    if !path.is_file() {
+        return Err(format!("文件不存在: {}", file_path));
+    }
+    fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))
+}
+
+/// 写入二进制文件（用于保存粘贴的图片）
+#[tauri::command]
+fn write_file_bytes(file_path: String, data: Vec<u8>) -> Result<(), String> {
+    let path = Path::new(&file_path);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+    }
+    fs::write(path, &data).map_err(|e| format!("写入文件失败: {}", e))
+}
+
+/// 读取文件为 base64 字符串（用于图片预览）
+#[tauri::command]
+fn read_file_base64(file_path: String) -> Result<String, String> {
+    let path = Path::new(&file_path);
+    if !path.is_file() {
+        return Err(format!("文件不存在: {}", file_path));
+    }
+    let bytes = fs::read(path).map_err(|e| format!("读取文件失败: {}", e))?;
+    Ok(STANDARD.encode(&bytes))
+}
+
 #[tauri::command]
 async fn execute_prompt(
     app: AppHandle,
@@ -3299,6 +3380,10 @@ pub fn run() {
             delete_api_profile,
             import_cc_switch_profiles,
             fetch_api_models,
+            list_project_files,
+            read_file_content,
+            write_file_bytes,
+            read_file_base64,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")
