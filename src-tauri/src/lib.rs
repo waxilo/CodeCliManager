@@ -1621,26 +1621,44 @@ fn process_claude_stream_line(
 /// macOS GUI 应用从 Finder 启动时 PATH 很窄，通常找不到 /usr/local/bin/claude。
 fn extended_path_for_cli() -> String {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let mut segments: Vec<PathBuf> = vec![
-        PathBuf::from("/usr/local/bin"),
-        PathBuf::from("/opt/homebrew/bin"),
-        home.join(".local/bin"),
-        home.join(".npm-global/bin"),
-        home.join("bin"),
-    ];
+
+    #[cfg(target_os = "windows")]
+    let separator = ";";
+    #[cfg(not(target_os = "windows"))]
+    let separator = ":";
+
+    let mut segments: Vec<PathBuf> = if cfg!(target_os = "windows") {
+        vec![
+            // npm 全局路径（Windows）
+            home.join("AppData").join("Roaming").join("npm"),
+            home.join("AppData").join("Local").join("Programs").join("nodejs"),
+            PathBuf::from("C:\\Program Files\\nodejs"),
+        ]
+    } else {
+        vec![
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            home.join(".local/bin"),
+            home.join(".npm-global/bin"),
+            home.join("bin"),
+        ]
+    };
 
     if let Ok(existing) = std::env::var("PATH") {
-        for part in existing.split(':').filter(|s| !s.is_empty()) {
+        for part in existing.split(separator).filter(|s| !s.is_empty()) {
             segments.push(PathBuf::from(part));
         }
     }
 
-    segments.extend([
-        PathBuf::from("/usr/bin"),
-        PathBuf::from("/bin"),
-        PathBuf::from("/usr/sbin"),
-        PathBuf::from("/sbin"),
-    ]);
+    #[cfg(not(target_os = "windows"))]
+    {
+        segments.extend([
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/sbin"),
+        ]);
+    }
 
     let mut seen = HashSet::new();
     segments
@@ -1648,7 +1666,7 @@ fn extended_path_for_cli() -> String {
         .map(|p| p.to_string_lossy().to_string())
         .filter(|p| seen.insert(p.clone()))
         .collect::<Vec<_>>()
-        .join(":")
+        .join(separator)
 }
 
 fn resolve_claude_executable() -> PathBuf {
@@ -1660,6 +1678,20 @@ fn resolve_claude_executable() -> PathBuf {
         home.join(".npm-global/bin/claude"),
         home.join("bin/claude"),
     ];
+
+    #[cfg(target_os = "windows")]
+    {
+        candidates.extend([
+            home.join(".claude/bin/claude.exe"),
+            // npm 全局安装路径 (npm install -g @anthropic-ai/claude-code)
+            home.join("AppData/Roaming/npm/claude.cmd"),
+            home.join("AppData/Roaming/npm/claude.exe"),
+            PathBuf::from("C:\\Program Files\\Claude\\claude.exe"),
+            PathBuf::from("C:\\Program Files (x86)\\Claude\\claude.exe"),
+            dirs::data_local_dir().unwrap_or_default().join("claude/bin/claude.exe"),
+            dirs::data_dir().unwrap_or_default().join("claude/bin/claude.exe"),
+        ]);
+    }
 
     #[cfg(unix)]
     {
@@ -1682,7 +1714,15 @@ fn resolve_claude_executable() -> PathBuf {
         }
     }
 
-    PathBuf::from("claude")
+    #[cfg(target_os = "windows")]
+    {
+        // 优先尝试不带扩展名的命令（PowerShell 会自动查找 .ps1）
+        PathBuf::from("claude")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from("claude")
+    }
 }
 
 fn apply_cli_runtime_env(cmd: &mut Command) {
@@ -2472,10 +2512,11 @@ async fn run_claude_command(input: &str) -> CommandResult {
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
 
+    let claude_bin = resolve_claude_executable();
+
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "claude"]);
+        let mut cmd = Command::new(&claude_bin);
         cmd.creation_flags(0x08000000);
         
         run_command_with_input(cmd, input).await
@@ -2483,7 +2524,6 @@ async fn run_claude_command(input: &str) -> CommandResult {
     
     #[cfg(not(target_os = "windows"))]
     {
-        let claude_bin = resolve_claude_executable();
         let mut cmd = Command::new(&claude_bin);
         apply_cli_runtime_env(&mut cmd);
 
@@ -2496,13 +2536,12 @@ async fn run_claude_command_with_resume(input: &str, conversation_id: &str) -> C
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
 
+    let claude_bin = resolve_claude_executable();
+
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = Command::new("cmd");
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let home_str = home.to_string_lossy().to_string();
-        let full_cmd = format!("cd /d {} && claude --resume {}", home_str, conversation_id);
-        cmd.args(["/C", &full_cmd]);
+        let mut cmd = Command::new(&claude_bin);
+        cmd.args(["--resume", conversation_id]);
         cmd.creation_flags(0x08000000);
         
         run_command_with_input(cmd, input).await
@@ -2510,7 +2549,6 @@ async fn run_claude_command_with_resume(input: &str, conversation_id: &str) -> C
     
     #[cfg(not(target_os = "windows"))]
     {
-        let claude_bin = resolve_claude_executable();
         let mut cmd = Command::new(&claude_bin);
         cmd.args(["--resume", conversation_id]);
         apply_cli_runtime_env(&mut cmd);
