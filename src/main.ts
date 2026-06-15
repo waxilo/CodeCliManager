@@ -1,7 +1,23 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { renderMarkdown } from './markdown';
+import { renderMarkdown as _renderMarkdown } from './markdown';
+
+// Markdown 渲染缓存：避免对相同内容重复调用 marked.parse + DOMPurify
+const _mdCache = new Map<string, string>();
+const _MD_CACHE_MAX = 200;
+function renderMarkdown(src: string): string {
+  const cached = _mdCache.get(src);
+  if (cached !== undefined) return cached;
+  const html = _renderMarkdown(src);
+  if (_mdCache.size >= _MD_CACHE_MAX) {
+    // 简单 LRU：删除最早的条目
+    const firstKey = _mdCache.keys().next().value;
+    if (firstKey !== undefined) _mdCache.delete(firstKey);
+  }
+  _mdCache.set(src, html);
+  return html;
+}
 
 interface Message {
   id: string;
@@ -693,7 +709,18 @@ async function init() {
   });
   setInterval(() => {
     currentTime = new Date();
-    renderConversationList();
+    // 更新相对时间显示（仅更新 .compact-time 元素，不重建整个列表）
+    document.querySelectorAll<HTMLElement>('.conversation-item').forEach((item) => {
+      const id = item.dataset.id;
+      if (!id) return;
+      const conv = conversations.find(c => c.id === id);
+      if (!conv) return;
+      const timeEl = item.querySelector('.compact-time');
+      const newTime = formatCompactTime(conv.updated_at);
+      if (timeEl && newTime) {
+        timeEl.textContent = newTime;
+      }
+    });
   }, 60000);
 }
 
@@ -958,7 +985,7 @@ function scheduleStreamingRefresh(sessionId: string) {
     streamRefreshTimer = null;
     flushPendingTextDelta(sessionId);
     refreshStreamingUI(sessionId);
-  }, 80);
+  }, 200);
 }
 
 function handleSessionError(payload: SessionErrorPayload) {
@@ -1031,40 +1058,48 @@ function refreshStreamingUI(sessionId: string) {
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   if (!messageList) return;
 
-  removeStreamingElements();
   removePendingAssistantIndicator();
 
   const state = getStreamingState(sessionId);
 
-  // 只要有思考内容就显示（不再受 state.content 限制）
+  // 思考元素：就地更新而非删除重建
+  let thinkingEl = document.getElementById('streaming-thinking');
   if (state.thinking) {
-    const thinkingEl = document.createElement('div');
-    thinkingEl.id = 'streaming-thinking';
-    thinkingEl.className = 'message assistant thinking-msg streaming';
-    thinkingEl.innerHTML = `
-      <div class="message-avatar">🧠</div>
-      <div class="message-content">
-        ${renderThinkingDetails(
-          state.thinking,
-          state.thinkingDone ? '思考过程' : '思考中...',
-          true,
-        )}
-      </div>
-    `;
-    messageList.appendChild(thinkingEl);
+    if (!thinkingEl) {
+      thinkingEl = document.createElement('div');
+      thinkingEl.id = 'streaming-thinking';
+      thinkingEl.className = 'message assistant thinking-msg streaming';
+      thinkingEl.innerHTML = `<div class="message-avatar">🧠</div><div class="message-content"></div>`;
+      messageList.appendChild(thinkingEl);
+    }
+    const contentEl = thinkingEl.querySelector('.message-content');
+    if (contentEl) {
+      contentEl.innerHTML = renderThinkingDetails(
+        state.thinking,
+        state.thinkingDone ? '思考过程' : '思考中...',
+        true,
+      );
+    }
+  } else if (thinkingEl) {
+    thinkingEl.remove();
   }
 
+  // 回答元素：就地更新而非删除重建
+  let answerEl = document.getElementById('streaming-answer');
   if (state.content) {
-    const answerEl = document.createElement('div');
-    answerEl.id = 'streaming-answer';
-    answerEl.className = 'message assistant streaming';
-    answerEl.innerHTML = `
-      <div class="message-avatar">AI</div>
-      <div class="message-content">
-        <div class="markdown-body">${renderMarkdown(state.content)}</div>
-      </div>
-    `;
-    messageList.appendChild(answerEl);
+    if (!answerEl) {
+      answerEl = document.createElement('div');
+      answerEl.id = 'streaming-answer';
+      answerEl.className = 'message assistant streaming';
+      answerEl.innerHTML = `<div class="message-avatar">AI</div><div class="message-content"><div class="markdown-body"></div></div>`;
+      messageList.appendChild(answerEl);
+    }
+    const mdBody = answerEl.querySelector('.markdown-body');
+    if (mdBody) {
+      mdBody.innerHTML = renderMarkdown(state.content);
+    }
+  } else if (answerEl) {
+    answerEl.remove();
   }
 
   if (isNearBottom()) {
@@ -1555,12 +1590,28 @@ function renderConversationList(): string {
   }).join('');
 }
 
-/** 仅更新侧边栏会话列表（用于刷新转圈动画，不触发完整 render） */
+/** 仅更新侧边栏会话列表的转圈状态（局部 DOM 更新，不重建整个列表） */
 function updateConversationListSpinner() {
-  const listEl = document.querySelector('#conversation-list');
-  if (listEl) {
-    listEl.innerHTML = renderConversationList();
-  }
+  const items = document.querySelectorAll<HTMLElement>('.conversation-item');
+  items.forEach((item) => {
+    const id = item.dataset.id;
+    if (!id) return;
+    const isRunning = runningSessions.has(id);
+    item.classList.toggle('running', isRunning);
+
+    const header = item.querySelector('.conversation-header');
+    if (!header) return;
+
+    let spinner = header.querySelector<HTMLElement>('.conversation-spinner');
+    if (isRunning && !spinner) {
+      const el = document.createElement('span');
+      el.className = 'conversation-spinner';
+      el.title = 'AI 正在回答中...';
+      header.insertBefore(el, header.firstChild);
+    } else if (!isRunning && spinner) {
+      spinner.remove();
+    }
+  });
 }
 
 function initPlatformClass() {
@@ -3409,9 +3460,12 @@ function formatTime(timestamp: number): string {
 }
 
 function escapeHtml(text: string): string {
-  const div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 // 全局函数 - 用于 HTML 模板中调用

@@ -1878,6 +1878,7 @@ fn spawn_claude_stream(
         "--output-format".to_string(),
         "stream-json".to_string(),
         "--include-partial-messages".to_string(),
+        "--dangerously-skip-permissions".to_string(),
     ];
 
     if let Some(cid) = conversation_id.filter(|c| !c.is_empty()) {
