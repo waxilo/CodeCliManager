@@ -2704,3 +2704,33 @@ body.is-sidebar-resizing {
   opacity: 0.7;
   cursor: not-allowed;
 }
+
+/* ── Toast notification ── */
+.toast-notification {
+  position: fixed;
+  top: 48px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  background: var(--color-bg-elevated, #323232);
+  color: var(--color-text, #fff);
+  padding: 10px 22px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+  z-index: 100000;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  max-width: 420px;
+  text-align: center;
+}
+.toast-notification.is-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+.toast-notification.is-toast-warning {
+  background: #fff3cd;
+  color: #664d03;
+  box-shadow: 0 4px 16px rgba(102,77,3,0.15);
+}

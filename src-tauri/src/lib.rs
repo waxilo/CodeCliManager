@@ -1918,6 +1918,11 @@ fn spawn_claude_stream(
         args.push("--resume".to_string());
         args.push(cid.clone());
     }
+    // 通过 --model 命令行参数确保模型覆盖生效
+    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
     args.push(prompt.to_string());
 
     let effective_cwd = project_dir.and_then(|cwd| resolve_or_create_dir(cwd));
@@ -2382,6 +2387,74 @@ fn find_claude_session_file(session_id: &str) -> Option<PathBuf> {
     None
 }
 
+/// 修改 JSONL 会话文件中所有 assistant 消息的 model 字段为新模型。
+/// 这样 CLI --resume 恢复会话时，对话历史中的模型名称与当前选择一致，
+/// 避免模型看到历史中的旧模型名而产生自我认知混乱。
+fn rewrite_session_model(session_id: &str, new_model: &str) -> Result<bool, String> {
+    let path = find_claude_session_file(session_id)
+        .ok_or_else(|| format!("Session file not found for {}", session_id))?;
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read session file: {}", e))?;
+
+    let mut modified = false;
+    let mut new_lines = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            new_lines.push(line.to_string());
+            continue;
+        }
+
+        match serde_json::from_str::<serde_json::Value>(line) {
+            Ok(mut value) => {
+                // 检查是否为 assistant 消息且包含 model 字段
+                let is_assistant = value
+                    .get("message")
+                    .and_then(|m| m.get("role"))
+                    .and_then(|r| r.as_str())
+                    == Some("assistant");
+
+                if is_assistant {
+                    if let Some(msg) = value.get_mut("message") {
+                        if let Some(obj) = msg.as_object_mut() {
+                            if let Some(current_model) = obj.get("model").and_then(|m| m.as_str())
+                            {
+                                if current_model != new_model {
+                                    obj.insert(
+                                        "model".to_string(),
+                                        serde_json::Value::String(new_model.to_string()),
+                                    );
+                                    modified = true;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                new_lines.push(serde_json::to_string(&value).unwrap_or_else(|_| line.to_string()));
+            }
+            Err(_) => {
+                // 无法解析的行保持原样
+                new_lines.push(line.to_string());
+            }
+        }
+    }
+
+    if modified {
+        let new_content = new_lines.join("\n");
+        std::fs::write(&path, new_content)
+            .map_err(|e| format!("Failed to write session file: {}", e))?;
+        eprintln!(
+            "[rewrite_session_model] Updated model to '{}' in {}",
+            new_model,
+            path.display()
+        );
+    }
+
+    Ok(modified)
+}
+
 fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
     match fs::metadata(path) {
         Ok(meta) => {
@@ -2632,6 +2705,29 @@ async fn execute_prompt(
         let prompt_clone = prompt.clone();
         let cid_clone = active_cid.clone();
         let model_clone = active_model.clone();
+
+        // resume 已有会话时，先修改 JSONL 文件中历史 assistant 消息的 model 字段，
+        // 使 CLI 恢复会话时看到的对话历史与当前选择的模型一致，
+        // 避免模型因看到旧模型名而自我认知混乱。
+        if let (Some(ref cid), Some(ref new_model)) = (&active_cid, &active_model) {
+            match rewrite_session_model(cid, new_model) {
+                Ok(true) => {
+                    eprintln!(
+                        "[execute_prompt] JSONL model rewritten to '{}' for session {}",
+                        new_model, cid
+                    );
+                }
+                Ok(false) => {
+                    // 模型未变或文件中无需修改
+                }
+                Err(e) => {
+                    eprintln!(
+                        "[execute_prompt] Warning: failed to rewrite session model: {}",
+                        e
+                    );
+                }
+            }
+        }
 
         let stream_result = tauri::async_runtime::spawn_blocking(move || {
             spawn_claude_stream(

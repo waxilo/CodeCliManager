@@ -140,6 +140,8 @@ let pendingSessionModel: string | null = null;
 /** 新会话尚未创建 ID 时，用户选择的工作目录 */
 let pendingProjectDir: string | null = null;
 let chatModelPickerHighlightIndex = -1;
+/** 跟踪用户折叠了哪些思考块（key: session ID 或 message ID） */
+const collapsedThinkingBlocks = new Set<string>();
 let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
 let isSidebarCollapsed = false;
 
@@ -1065,7 +1067,7 @@ function refreshStreamingUI(sessionId: string) {
 
   const state = getStreamingState(sessionId);
 
-  // 思考元素：就地更新而非删除重建
+  // 思考元素：就地更新，保留用户折叠状态
   let thinkingEl = document.getElementById('streaming-thinking');
   if (state.thinking) {
     if (!thinkingEl) {
@@ -1077,11 +1079,29 @@ function refreshStreamingUI(sessionId: string) {
     }
     const contentEl = thinkingEl.querySelector('.message-content');
     if (contentEl) {
-      contentEl.innerHTML = renderThinkingDetails(
-        state.thinking,
-        state.thinkingDone ? '思考过程' : '思考中...',
-        true,
-      );
+      const isCollapsed = collapsedThinkingBlocks.has(sessionId);
+      const label = state.thinkingDone ? '思考过程' : '思考中...';
+      // 尝试只更新 <pre> 文本（保留 <details> 折叠状态）
+      const existingPre = contentEl.querySelector('.thinking-content pre');
+      const existingSummary = contentEl.querySelector('.thinking-summary');
+      if (existingPre && existingSummary) {
+        existingPre.textContent = state.thinking;
+        existingSummary.textContent = label;
+      } else {
+        // 首次创建 <details> 元素
+        contentEl.innerHTML = renderThinkingDetails(state.thinking, label, !isCollapsed);
+        // 监听折叠事件，跟踪用户操作
+        const detailsEl = contentEl.querySelector('.thinking-block');
+        if (detailsEl) {
+          detailsEl.addEventListener('toggle', () => {
+            if (!(detailsEl as HTMLDetailsElement).open) {
+              collapsedThinkingBlocks.add(sessionId);
+            } else {
+              collapsedThinkingBlocks.delete(sessionId);
+            }
+          });
+        }
+      }
     }
   } else if (thinkingEl) {
     thinkingEl.remove();
@@ -3080,7 +3100,42 @@ async function openSettingsModal() {
   }
 }
 
+/** 将独立的 thinking 消息内容合并到后续 assistant 消息的 thinking 属性中 */
+function mergeThinkingIntoAssistant(messages: Message[]): Message[] {
+  const hiddenRoles = new Set(['tool_use', 'tool_result']);
+  const result: Message[] = [];
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+
+    if (msg.role === 'thinking' && msg.content.trim()) {
+      // 向后查找对应的 assistant 消息
+      let targetIdx = -1;
+      for (let j = i + 1; j < messages.length; j++) {
+        const next = messages[j];
+        if (next.role === 'thinking' || hiddenRoles.has(next.role)) continue;
+        if (next.role === 'assistant' && next.content.trim()) targetIdx = j;
+        break;
+      }
+      if (targetIdx >= 0) {
+        // 将思考内容合并到目标 assistant 消息（浅拷贝避免修改原数据）
+        const target = messages[targetIdx];
+        const merged = { ...target, thinking: ((target.thinking || '') + '\n' + msg.content).trim() };
+        messages[targetIdx] = merged;
+        continue; // 跳过此 thinking 消息
+      }
+    }
+
+    result.push(msg);
+  }
+
+  return result;
+}
+
 function filterVisibleMessages(messages: Message[]): Message[] {
+  // 收集所有需要隐藏的内部角色
+  const hiddenRoles = new Set(['tool_use', 'tool_result']);
+
   return messages.filter((msg, index) => {
     // 过滤内部系统消息
     const trimmed = msg.content.trim();
@@ -3093,21 +3148,25 @@ function filterVisibleMessages(messages: Message[]): Message[] {
       return false;
     }
 
+    // 隐藏 tool_use 和 tool_result 消息
+    if (hiddenRoles.has(msg.role)) return false;
+
     if (msg.role !== 'thinking') return true;
-    // thinking 消息：如果后面紧跟有内容的 assistant 消息则去重隐藏
+    // thinking 消息：如果后续（跳过其他 thinking / tool_use / tool_result）有内容的 assistant 消息则隐藏
     for (let i = index + 1; i < messages.length; i++) {
       const next = messages[i];
-      if (next.role === 'thinking') continue;
+      if (next.role === 'thinking' || hiddenRoles.has(next.role)) continue;
       return !(next.role === 'assistant' && next.content.trim());
     }
     return true;
   });
 }
 
-function renderThinkingDetails(thinking: string, label: string, expanded: boolean): string {
+function renderThinkingDetails(thinking: string, label: string, expanded: boolean, dataId?: string): string {
   const openAttr = expanded ? ' open' : '';
+  const dataAttr = dataId ? ` data-thinking-id="${escapeHtml(dataId)}"` : '';
   return `
-    <details class="thinking-block"${openAttr}>
+    <details class="thinking-block"${openAttr}${dataAttr}>
       <summary class="thinking-summary">${escapeHtml(label)}</summary>
       <div class="thinking-content"><pre>${escapeHtml(thinking)}</pre></div>
     </details>
@@ -3133,12 +3192,14 @@ function renderMessageHtml(msg: Message): string {
 
   let thinkingHtml = '';
   let contentHtml = '';
+  const thinkingExpanded = !collapsedThinkingBlocks.has(msg.id);
 
   if (isThinking && msg.content.trim()) {
-    thinkingHtml = renderThinkingDetails(msg.content, '思考过程', false);
+    thinkingHtml = renderThinkingDetails(msg.content, '思考过程', thinkingExpanded, msg.id);
   } else {
-    if (msg.thinking && msg.thinking.trim() && !msg.content.trim()) {
-      thinkingHtml = renderThinkingDetails(msg.thinking, '思考过程', false);
+    // 始终显示思考内容（如果有），不论是否有正文
+    if (msg.thinking && msg.thinking.trim()) {
+      thinkingHtml = renderThinkingDetails(msg.thinking, '思考过程', thinkingExpanded, msg.id);
     }
     if (msg.content.trim()) {
       contentHtml = `<div class="markdown-body">${renderMarkdown(msg.content)}</div>`;
@@ -3219,7 +3280,7 @@ function renderChatContent(): string {
 
   return `
     <div class="message-list" id="message-list">
-      ${filterVisibleMessages(messages).map(renderMessageHtml).join('')}
+      ${filterVisibleMessages(mergeThinkingIntoAssistant(messages)).map(renderMessageHtml).join('')}
     </div>
   `;
 }
@@ -3505,7 +3566,19 @@ function refreshChatContent() {
         timestamp: Math.floor(Date.now() / 1000),
       });
     }
-    messageList.innerHTML = filterVisibleMessages(messages).map(renderMessageHtml).join('');
+    messageList.innerHTML = filterVisibleMessages(mergeThinkingIntoAssistant(messages)).map(renderMessageHtml).join('');
+    // 绑定思考块折叠事件，跟踪用户操作
+    messageList.querySelectorAll('.thinking-block[data-thinking-id]').forEach((details) => {
+      details.addEventListener('toggle', () => {
+        const id = (details as HTMLElement).dataset.thinkingId;
+        if (!id) return;
+        if (!(details as HTMLDetailsElement).open) {
+          collapsedThinkingBlocks.add(id);
+        } else {
+          collapsedThinkingBlocks.delete(id);
+        }
+      });
+    });
     if (isSendButtonLoading()) {
       showPendingAssistantIndicator();
     } else {
