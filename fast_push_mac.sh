@@ -11,6 +11,10 @@ CARGO_TOML="src-tauri/Cargo.toml"
 REMOTE="${REMOTE:-origin}"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 
+# 本次发布说明：优先取命令行参数或 RELEASE_NOTES 环境变量；为空则用 AI 自动总结
+MANUAL_NOTES="${RELEASE_NOTES:-${1:-}}"
+NOTES_MODEL="${RELEASE_NOTES_MODEL:-haiku}"
+
 sync_remote_branch() {
 	echo "同步 ${REMOTE}/${BRANCH}..."
 	git fetch "$REMOTE"
@@ -39,6 +43,41 @@ tag_exists_on_remote() {
 	git ls-remote --tags "$REMOTE" "refs/tags/$1" | grep -q .
 }
 
+# 生成本次发布的变更说明：人工填写优先，否则用 AI 总结已暂存的 diff
+generate_release_notes() {
+	if [ -n "$MANUAL_NOTES" ]; then
+		printf '%s' "$MANUAL_NOTES"
+		return 0
+	fi
+
+	if ! command -v claude >/dev/null 2>&1; then
+		echo "未检测到 claude CLI，跳过 AI 变更总结（可用参数或 RELEASE_NOTES 手动填写）" >&2
+		return 0
+	fi
+
+	# 排除版本号等噪音文件，只让 AI 看真实改动
+	local diff
+	diff="$(git diff --cached \
+		-- ':(exclude)package.json' \
+		   ':(exclude)src-tauri/tauri.conf.json' \
+		   ':(exclude)src-tauri/Cargo.toml' \
+		   ':(exclude)src-tauri/Cargo.lock' \
+		2>/dev/null)"
+
+	if [ -z "$diff" ]; then
+		echo "仅有版本号变更，跳过 AI 变更总结" >&2
+		return 0
+	fi
+
+	echo "调用 AI（${NOTES_MODEL}）总结本次改动..." >&2
+	local notes
+	notes="$(printf '%s' "$diff" | head -c 60000 | claude -p --model "$NOTES_MODEL" \
+		'你是发布日志助手。根据输入的 git diff，用简体中文总结本次发布的主要改动。要求：输出 3-6 条要点，每条以「- 」开头；聚焦用户可感知的功能、修复与体验改进；不要描述代码实现细节；不要输出标题或多余说明文字。' \
+		2>/dev/null || true)"
+	# 去掉尾部空白
+	printf '%s' "$notes" | sed -e 's/[[:space:]]*$//'
+}
+
 # 先 fetch，用于判断远程 tag 是否已占用
 git fetch "$REMOTE"
 
@@ -54,12 +93,22 @@ echo "版本: ${CURRENT} → ${NEW}"
 write_version "$NEW"
 
 DATETIME="$(date '+%Y-%m-%d %H:%M:%S')"
-COMMIT_MSG="release: v${NEW} (${DATETIME})"
+SUBJECT="release: v${NEW} (${DATETIME})"
 
 git add .
 if git diff --cached --quiet; then
 	echo "无变更可提交"
 	exit 1
+fi
+
+# 生成变更说明（人工或 AI），写入提交信息正文
+NOTES="$(generate_release_notes)"
+if [ -n "$NOTES" ]; then
+	echo "本次发布变更说明："
+	printf '%s\n' "$NOTES" | sed 's/^/  /'
+	COMMIT_MSG="$(printf '%s\n\n%s\n' "$SUBJECT" "$NOTES")"
+else
+	COMMIT_MSG="$SUBJECT"
 fi
 
 git commit -m "$COMMIT_MSG"
@@ -82,7 +131,12 @@ if git rev-parse "$TAG" >/dev/null 2>&1; then
 	git tag -d "$TAG"
 fi
 
-git tag "$TAG"
+# 用附注 tag 携带变更说明，供 Release 工作流读取
+if [ -n "$NOTES" ]; then
+	git tag -a "$TAG" -m "$SUBJECT" -m "$NOTES"
+else
+	git tag -a "$TAG" -m "$SUBJECT"
+fi
 echo "推送 tag ${TAG}..."
 git push "$REMOTE" "$TAG"
 

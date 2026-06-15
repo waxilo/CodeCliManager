@@ -76,6 +76,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Resolve release tag
         id: meta
@@ -134,8 +136,22 @@ jobs:
         run: |
           set -euo pipefail
 
+          # 读取本次发布的变更说明：优先取附注 tag 正文，其次取被打 tag 提交的正文
+          git fetch --tags --force >/dev/null 2>&1 || true
+          CHANGELOG="$(git tag -l --format='%(contents:body)' "$RELEASE_TAG" 2>/dev/null || true)"
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="$(git log -1 --format=%b "$RELEASE_TAG" 2>/dev/null || true)"
+          fi
+
           {
             echo "## CodeCliManager ${RELEASE_TAG}"
+            echo
+            echo "### 更新内容"
+            if [ -n "$CHANGELOG" ]; then
+              echo "$CHANGELOG"
+            else
+              echo "- 详见提交记录"
+            fi
             echo
             echo "### macOS"
             echo "- Apple Silicon (M 系列): \`CodeCliManager-${RELEASE_TAG}-macOS-ARM64.dmg\`"

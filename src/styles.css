@@ -776,6 +776,24 @@ body.is-sidebar-resizing {
   color: var(--color-text);
 }
 
+.context-clickable {
+  cursor: pointer;
+}
+
+.context-busy {
+  color: var(--color-text-secondary);
+}
+
+.context-spinner {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  border: 2px solid var(--color-bg-surface-hover);
+  border-top-color: var(--color-accent, #4f8cff);
+  border-radius: 50%;
+  animation: conv-spin 0.7s linear infinite;
+}
+
 .context-ring {
   flex-shrink: 0;
 }
@@ -2194,6 +2212,16 @@ body.is-sidebar-resizing {
 .settings-field input:focus {
   outline: none;
   border-color: var(--color-accent);
+}
+
+.settings-field input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.settings-model-config-summary.is-disabled {
+  opacity: 0.55;
+  pointer-events: none;
 }
 
 .settings-model-input {

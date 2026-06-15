@@ -141,6 +141,7 @@ let chatModelOptions: string[] = [];
 let conversationModels: Record<string, string> = loadConversationModels();
 /** 新会话尚未创建 ID 时，用户在聊天区临时选择的模型 */
 let pendingSessionModel: string | null = null;
+let compactingConversationId: string | null = null;
 /** 新会话尚未创建 ID 时，用户选择的工作目录 */
 let pendingProjectDir: string | null = null;
 let chatModelPickerHighlightIndex = -1;
@@ -845,6 +846,9 @@ async function setupEventListeners() {
     }
     // 无论哪个会话结束，都清理 pending 键
     runningSessions.delete('pending');
+    if (compactingConversationId && (!endedSessionId || endedSessionId === compactingConversationId)) {
+      compactingConversationId = null;
+    }
     clearStreamingState(endedSessionId || '');
 
     const isCurrentSession = !endedSessionId || endedSessionId === activeConversationId;
@@ -874,6 +878,7 @@ async function setupEventListeners() {
       });
 
       updateConversationListSpinner();
+      updateContextIndicator();
 
       if (isCurrentSession && (activeConversationId || transientSessionError)) {
         refreshChatContent();
@@ -1745,6 +1750,12 @@ function render() {
 function attachEventListeners() {
   document.querySelector('#new-chat-btn')?.addEventListener('click', newChat);
 
+  document.querySelector('#context-indicator-slot')?.addEventListener('click', (e) => {
+    if ((e.target as HTMLElement).closest('.context-clickable')) {
+      void compactActiveContext();
+    }
+  });
+
   document.querySelector('#refresh-btn')?.addEventListener('click', async () => {
     const btn = document.querySelector('#refresh-btn') as HTMLButtonElement | null;
     const sidebar = document.querySelector('.sidebar');
@@ -1920,6 +1931,7 @@ interface ProfileContextMenuOptions {
   profileId: string;
   profileName: string;
   isActive: boolean;
+  allowDelete?: boolean;
   onApply: () => void | Promise<void>;
   onDelete: () => void | Promise<void>;
 }
@@ -1942,13 +1954,13 @@ function showProfileContextMenu(options: ProfileContextMenuOptions) {
         ${options.isActive ? 'disabled' : ''}
         ${options.isActive ? 'title="该配置正在使用中"' : ''}
       >应用</button>
-      <button
+      ${options.allowDelete === false ? '' : `<button
         type="button"
         class="profile-context-menu-item profile-context-menu-item-danger"
         data-action="delete"
         ${options.isActive ? 'disabled' : ''}
         ${options.isActive ? 'title="无法删除正在使用的配置"' : ''}
-      >删除</button>
+      >删除</button>`}
     </div>
   `;
 
@@ -1998,9 +2010,10 @@ function showProfileContextMenu(options: ProfileContextMenuOptions) {
 
 function renderSettingsProfileList(profiles: ApiProfileItem[], selectedProfileId: string | null): string {
   const officialActive = !profiles.some((p) => p.isActive);
+  const officialSelected = selectedProfileId === OFFICIAL_PROFILE_ID;
   const officialItem = `
     <div
-      class="settings-profile-item settings-profile-official ${officialActive ? 'active' : ''}"
+      class="settings-profile-item settings-profile-official ${officialActive ? 'active' : ''} ${officialSelected ? 'selected' : ''}"
       data-official="true"
       role="button"
       tabindex="0"
@@ -2041,15 +2054,51 @@ function renderSettingsProfileList(profiles: ApiProfileItem[], selectedProfileId
     .join('');
 }
 
+// 官方默认伪配置的标识：用于「查看」其只读详情
+const OFFICIAL_PROFILE_ID = '__official__';
+
+/** 切换右侧表单是否可编辑（官方默认只读、无需保存） */
+function setSettingsFormEditable(overlay: HTMLElement, editable: boolean) {
+  for (const name of ['profileName', 'baseUrl', 'apiKey']) {
+    const el = overlay.querySelector(`input[name="${name}"]`) as HTMLInputElement | null;
+    if (el) el.disabled = !editable;
+  }
+  const modelInput = overlay.querySelector('.settings-model-config-summary') as HTMLInputElement | null;
+  if (modelInput) modelInput.classList.toggle('is-disabled', !editable);
+  const saveBtn = overlay.querySelector('.save-only') as HTMLButtonElement | null;
+  if (saveBtn) {
+    saveBtn.disabled = !editable;
+    saveBtn.title = editable ? '' : '官方默认无需保存';
+  }
+}
+
+/** 在右侧以只读方式展示「官方默认」详情 */
+function fillOfficialView(overlay: HTMLElement) {
+  overlay.dataset.profileId = OFFICIAL_PROFILE_ID;
+  (overlay.querySelector('input[name="profileName"]') as HTMLInputElement).value = '官方默认（Claude 订阅）';
+  const baseInput = overlay.querySelector('input[name="baseUrl"]') as HTMLInputElement;
+  baseInput.value = '';
+  baseInput.placeholder = '官方登录，无需 Base URL';
+  const keyInput = overlay.querySelector('input[name="apiKey"]') as HTMLInputElement;
+  keyInput.value = '';
+  keyInput.placeholder = '官方登录，无需 API Key';
+  const modelInput = overlay.querySelector('.settings-model-config-summary') as HTMLInputElement | null;
+  if (modelInput) modelInput.value = '由订阅 / 官方登录决定';
+  setSettingsFormEditable(overlay, false);
+}
+
 function fillSettingsForm(
   overlay: HTMLElement,
   config: ClaudeCodeApiConfig,
   profileName = '',
   profileId: string | null = null,
 ) {
+  setSettingsFormEditable(overlay, true);
   overlay.dataset.profileId = profileId || '';
   (overlay.querySelector('input[name="profileName"]') as HTMLInputElement).value = profileName;
-  (overlay.querySelector('input[name="baseUrl"]') as HTMLInputElement).value = config.baseUrl || '';
+  const baseInput = overlay.querySelector('input[name="baseUrl"]') as HTMLInputElement;
+  baseInput.value = config.baseUrl || '';
+  baseInput.placeholder = 'https://api.anthropic.com';
 
   const apiKeyInput = overlay.querySelector('input[name="apiKey"]') as HTMLInputElement;
   apiKeyInput.value = '';
@@ -2889,7 +2938,14 @@ async function openSettingsModal() {
     list.addEventListener('click', async (event) => {
       const target = event.target as HTMLElement;
       if (target.closest('.settings-profile-official')) {
-        await applyOfficial();
+        // 左键查看官方默认只读详情（应用走「应用」按钮 / 右键）
+        try {
+          const state = await invoke<ApiProfilesState>('get_api_profiles_state');
+          list.innerHTML = renderSettingsProfileList(state.profiles, OFFICIAL_PROFILE_ID);
+        } catch {
+          /* 列表刷新失败不影响查看 */
+        }
+        fillOfficialView(overlay);
         return;
       }
 
@@ -2908,6 +2964,24 @@ async function openSettingsModal() {
 
     list.addEventListener('contextmenu', (event) => {
       const target = event.target as HTMLElement;
+
+      const official = target.closest('.settings-profile-official') as HTMLElement | null;
+      if (official) {
+        event.preventDefault();
+        event.stopPropagation();
+        showProfileContextMenu({
+          x: event.clientX,
+          y: event.clientY,
+          profileId: OFFICIAL_PROFILE_ID,
+          profileName: '官方默认',
+          isActive: official.classList.contains('active'),
+          allowDelete: false,
+          onApply: () => applyOfficial(),
+          onDelete: () => {},
+        });
+        return;
+      }
+
       const item = target.closest('.settings-profile-item') as HTMLElement | null;
       if (!item) return;
 
@@ -3050,8 +3124,13 @@ async function openSettingsModal() {
       applyBtn.textContent = '应用中...';
     }
     try {
-      await invoke('switch_api_profile', { profileId });
-      await refreshSettingsModal(overlay, profileId, handleProfileConfigLoaded);
+      if (profileId === OFFICIAL_PROFILE_ID) {
+        await invoke('use_official_api');
+        await refreshSettingsModal(overlay, null, handleProfileConfigLoaded);
+      } else {
+        await invoke('switch_api_profile', { profileId });
+        await refreshSettingsModal(overlay, profileId, handleProfileConfigLoaded);
+      }
       if (livePathEl) {
         const state = await invoke<ApiProfilesState>('get_api_profiles_state');
         livePathEl.textContent = `配置文件：${state.current.configPath}`;
@@ -3290,6 +3369,15 @@ function renderContextIndicatorInner(): string {
   const tokens = conv?.context_tokens ?? 0;
   if (!conv || tokens <= 0) return '';
 
+  if (compactingConversationId === conv.id) {
+    return `
+      <div class="context-indicator context-busy" title="正在压缩上下文…" aria-label="正在压缩上下文">
+        <span class="context-spinner" aria-hidden="true"></span>
+        <span class="context-indicator-pct">压缩中</span>
+      </div>
+    `;
+  }
+
   const model = conv.last_model?.trim() || '';
   const windowSize = getContextWindowFor(tokens);
   const ratio = Math.min(1, tokens / windowSize);
@@ -3298,10 +3386,10 @@ function renderContextIndicatorInner(): string {
   const circumference = 2 * Math.PI * 7;
   const offset = circumference * (1 - ratio);
   const level = pct >= 90 ? 'danger' : pct >= 75 ? 'warn' : 'ok';
-  const tip = `${model ? model + ' · ' : ''}上下文 ${formatTokenCount(tokens)} / ${formatTokenCount(windowSize)} · 剩余 ${formatTokenCount(remaining)}（已用 ${pct}%）`;
+  const tip = `${model ? model + ' · ' : ''}上下文 ${formatTokenCount(tokens)} / ${formatTokenCount(windowSize)} · 剩余 ${formatTokenCount(remaining)}（已用 ${pct}%）· 点击压缩上下文`;
 
   return `
-    <div class="context-indicator context-${level}" title="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}">
+    <div class="context-indicator context-clickable context-${level}" role="button" tabindex="0" title="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}">
       <svg class="context-ring" viewBox="0 0 18 18" width="16" height="16" aria-hidden="true">
         <circle class="context-ring-bg" cx="9" cy="9" r="7" fill="none" stroke-width="2.5"></circle>
         <circle class="context-ring-fg" cx="9" cy="9" r="7" fill="none" stroke-width="2.5"
@@ -3320,6 +3408,40 @@ function renderContextIndicatorHtml(): string {
 function updateContextIndicator(): void {
   const slot = document.querySelector('#context-indicator-slot');
   if (slot) slot.innerHTML = renderContextIndicatorInner();
+}
+
+/** 点击上下文环形：确认后向当前会话发送 /compact 压缩历史，释放上下文空间 */
+async function compactActiveContext(): Promise<void> {
+  const id = activeConversationId;
+  if (!id || compactingConversationId || runningSessions.has(id)) return;
+  const conv = conversations.find((c) => c.id === id);
+  if (!conv || !(conv.context_tokens && conv.context_tokens > 0)) return;
+
+  const confirmed = await showConfirmDialog({
+    title: '压缩上下文',
+    message: '将当前会话历史总结压缩，以释放上下文窗口空间？',
+    sub: '压缩后模型仅保留摘要、会丢失部分原始细节，并消耗少量额度。',
+    confirmLabel: '压缩',
+  });
+  if (!confirmed) return;
+
+  compactingConversationId = id;
+  runningSessions.add(id);
+  setSendButtonLoading(true);
+  updateContextIndicator();
+  updateConversationListSpinner();
+
+  try {
+    // /compact 是 Claude Code 内置命令，经 --resume 在该会话内执行
+    await invoke('execute_prompt', { conversationId: id, prompt: '/compact' });
+  } catch (e) {
+    console.error('压缩上下文失败:', e);
+    compactingConversationId = null;
+    runningSessions.delete(id);
+    setSendButtonLoading(false);
+    updateContextIndicator();
+    updateConversationListSpinner();
+  }
 }
 
 function renderChatHeaderHtml(conversation: Conversation | undefined): string {

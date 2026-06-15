@@ -1166,6 +1166,16 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             continue;
         }
 
+        // 跳过 /compact 压缩摘要与系统元信息条目：
+        // Claude Code 把压缩摘要存成 isCompactSummary 的 user 消息，
+        // 不处理会被显示成用户发出的消息。
+        if value.get("isCompactSummary").and_then(|v| v.as_bool()) == Some(true) {
+            continue;
+        }
+        if value.get("type").and_then(|t| t.as_str()) == Some("system") {
+            continue;
+        }
+
         if session_id.is_none() {
             session_id = value.get("sessionId").and_then(|s| s.as_str()).map(|s| s.to_string());
         }
