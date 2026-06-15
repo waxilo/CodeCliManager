@@ -1,7 +1,7 @@
 {
   "name": "codecli-manager",
   "private": true,
-  "version": "0.1.2",
+  "version": "0.1.15",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-dialog": "^2.7.1",
     "dompurify": "^3.4.10",
     "marked": "^18.0.5"
   }

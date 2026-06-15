@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -92,6 +92,10 @@ struct ClaudeCodeApiConfig {
     haiku_model: String,
     sonnet_model: String,
     opus_model: String,
+    #[serde(default)]
+    display_models: Vec<String>,
+    #[serde(default)]
+    custom_models: Vec<String>,
     config_path: String,
 }
 
@@ -104,6 +108,10 @@ struct SaveClaudeCodeApiConfig {
     haiku_model: String,
     sonnet_model: String,
     opus_model: String,
+    #[serde(default)]
+    display_models: Vec<String>,
+    #[serde(default)]
+    custom_models: Vec<String>,
 }
 
 fn read_claude_settings_json() -> serde_json::Value {
@@ -144,6 +152,16 @@ fn set_env_string(env: &mut serde_json::Map<String, serde_json::Value>, key: &st
     }
 }
 
+fn set_model_and_display_name(
+    env: &mut serde_json::Map<String, serde_json::Value>,
+    model_key: &str,
+    name_key: &str,
+    value: &str,
+) {
+    set_env_string(env, model_key, value);
+    set_env_string(env, name_key, value);
+}
+
 fn claude_api_key_from_env(env: &serde_json::Map<String, serde_json::Value>) -> String {
     let auth_token = env_string(env, "ANTHROPIC_AUTH_TOKEN");
     if !auth_token.is_empty() {
@@ -163,6 +181,10 @@ struct ApiProfile {
     haiku_model: String,
     sonnet_model: String,
     opus_model: String,
+    #[serde(default)]
+    display_models: Vec<String>,
+    #[serde(default)]
+    custom_models: Vec<String>,
     created_at: i64,
     updated_at: i64,
 }
@@ -220,6 +242,20 @@ fn save_api_profiles_store(store: &ApiProfilesStore) -> Result<(), String> {
         .map_err(|e| format!("Failed to write api profiles: {e}"))
 }
 
+fn apply_model_override_env(cmd: &mut std::process::Command, model: &str) {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    cmd.env("ANTHROPIC_MODEL", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_HAIKU_MODEL", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_SONNET_MODEL", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_SONNET_MODEL_NAME", trimmed);
+    cmd.env("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME", trimmed);
+}
+
 fn config_from_env(env: &serde_json::Map<String, serde_json::Value>) -> ClaudeCodeApiConfig {
     let api_key = claude_api_key_from_env(env);
     ClaudeCodeApiConfig {
@@ -229,6 +265,8 @@ fn config_from_env(env: &serde_json::Map<String, serde_json::Value>) -> ClaudeCo
         haiku_model: env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
         sonnet_model: env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL"),
         opus_model: env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        display_models: Vec::new(),
+        custom_models: Vec::new(),
         config_path: get_claude_settings_path().to_string_lossy().to_string(),
     }
 }
@@ -241,18 +279,39 @@ fn config_from_profile(profile: &ApiProfile) -> ClaudeCodeApiConfig {
         haiku_model: profile.haiku_model.clone(),
         sonnet_model: profile.sonnet_model.clone(),
         opus_model: profile.opus_model.clone(),
+        display_models: profile.display_models.clone(),
+        custom_models: profile.custom_models.clone(),
         config_path: get_claude_settings_path().to_string_lossy().to_string(),
     }
 }
 
+fn resolve_profile_env_model(profile: &ApiProfile) -> String {
+    profile
+        .custom_models
+        .iter()
+        .find(|model| !model.trim().is_empty())
+        .cloned()
+        .or_else(|| {
+            profile
+                .display_models
+                .iter()
+                .find(|model| !model.trim().is_empty())
+                .cloned()
+        })
+        .unwrap_or_default()
+}
+
 fn profile_to_save_config(profile: &ApiProfile) -> SaveClaudeCodeApiConfig {
+    let env_model = resolve_profile_env_model(profile);
     SaveClaudeCodeApiConfig {
         base_url: profile.base_url.clone(),
         api_key: Some(profile.api_key.clone()),
-        default_model: profile.default_model.clone(),
-        haiku_model: profile.haiku_model.clone(),
-        sonnet_model: profile.sonnet_model.clone(),
-        opus_model: profile.opus_model.clone(),
+        default_model: env_model.clone(),
+        haiku_model: env_model.clone(),
+        sonnet_model: env_model.clone(),
+        opus_model: env_model,
+        display_models: profile.display_models.clone(),
+        custom_models: profile.custom_models.clone(),
     }
 }
 
@@ -274,9 +333,24 @@ fn apply_save_config_to_settings(config: &SaveClaudeCodeApiConfig) -> Result<(),
 
     set_env_string(env, "ANTHROPIC_BASE_URL", &config.base_url);
     set_env_string(env, "ANTHROPIC_MODEL", &config.default_model);
-    set_env_string(env, "ANTHROPIC_DEFAULT_HAIKU_MODEL", &config.haiku_model);
-    set_env_string(env, "ANTHROPIC_DEFAULT_SONNET_MODEL", &config.sonnet_model);
-    set_env_string(env, "ANTHROPIC_DEFAULT_OPUS_MODEL", &config.opus_model);
+    set_model_and_display_name(
+        env,
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+        &config.haiku_model,
+    );
+    set_model_and_display_name(
+        env,
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+        &config.sonnet_model,
+    );
+    set_model_and_display_name(
+        env,
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+        &config.opus_model,
+    );
 
     if let Some(api_key) = config.api_key.as_ref().filter(|key| !key.trim().is_empty()) {
         let trimmed = api_key.trim();
@@ -340,6 +414,8 @@ fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) {
         haiku_model: config.haiku_model,
         sonnet_model: config.sonnet_model,
         opus_model: config.opus_model,
+        display_models: Vec::new(),
+        custom_models: Vec::new(),
         created_at: now,
         updated_at: now,
     };
@@ -399,10 +475,22 @@ fn upsert_api_profile(
 
         profile.name = trimmed_name.to_string();
         profile.base_url = config.base_url.trim().to_string();
-        profile.default_model = config.default_model.trim().to_string();
-        profile.haiku_model = config.haiku_model.trim().to_string();
-        profile.sonnet_model = config.sonnet_model.trim().to_string();
-        profile.opus_model = config.opus_model.trim().to_string();
+        profile.default_model.clear();
+        profile.haiku_model.clear();
+        profile.sonnet_model.clear();
+        profile.opus_model.clear();
+        profile.display_models = config
+            .display_models
+            .iter()
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .collect();
+        profile.custom_models = config
+            .custom_models
+            .iter()
+            .map(|model| model.trim().to_string())
+            .filter(|model| !model.is_empty())
+            .collect();
         profile.updated_at = now;
 
         if let Some(api_key) = config.api_key.filter(|key| !key.trim().is_empty()) {
@@ -420,10 +508,22 @@ fn upsert_api_profile(
             name: trimmed_name.to_string(),
             base_url: config.base_url.trim().to_string(),
             api_key: api_key.trim().to_string(),
-            default_model: config.default_model.trim().to_string(),
-            haiku_model: config.haiku_model.trim().to_string(),
-            sonnet_model: config.sonnet_model.trim().to_string(),
-            opus_model: config.opus_model.trim().to_string(),
+            default_model: String::new(),
+            haiku_model: String::new(),
+            sonnet_model: String::new(),
+            opus_model: String::new(),
+            display_models: config
+                .display_models
+                .iter()
+                .map(|model| model.trim().to_string())
+                .filter(|model| !model.is_empty())
+                .collect(),
+            custom_models: config
+                .custom_models
+                .iter()
+                .map(|model| model.trim().to_string())
+                .filter(|model| !model.is_empty())
+                .collect(),
             created_at: now,
             updated_at: now,
         };
@@ -542,6 +642,8 @@ fn profile_from_cc_switch_row(name: &str, settings_config: &str, now: i64) -> Op
         haiku_model: api_config.haiku_model,
         sonnet_model: api_config.sonnet_model,
         opus_model: api_config.opus_model,
+        display_models: Vec::new(),
+        custom_models: Vec::new(),
         created_at: now,
         updated_at: now,
     })
@@ -674,6 +776,14 @@ async fn fetch_api_models(
     model_fetch::fetch_models(trimmed_base_url, &resolved_key).await
 }
 
+fn active_api_profile<'a>(store: &'a ApiProfilesStore) -> Option<&'a ApiProfile> {
+    store
+        .active_profile_id
+        .as_ref()
+        .and_then(|id| store.profiles.iter().find(|profile| profile.id == *id))
+        .or_else(|| store.profiles.first())
+}
+
 #[tauri::command]
 fn get_claude_api_config() -> ClaudeCodeApiConfig {
     let settings = read_claude_settings_json();
@@ -682,7 +792,15 @@ fn get_claude_api_config() -> ClaudeCodeApiConfig {
         .and_then(|value| value.as_object())
         .cloned()
         .unwrap_or_default();
-    config_from_env(&env)
+    let mut config = config_from_env(&env);
+
+    let store = load_api_profiles_store();
+    if let Some(profile) = active_api_profile(&store) {
+        config.display_models = profile.display_models.clone();
+        config.custom_models = profile.custom_models.clone();
+    }
+
+    config
 }
 
 #[tauri::command]
@@ -829,6 +947,15 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             Err(_) => continue,
         };
 
+        if project_dir.is_none() {
+            project_dir = value
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .map(str::trim)
+                .filter(|cwd| !cwd.is_empty())
+                .map(|cwd| cwd.to_string());
+        }
+
         if value.get("type").and_then(|t| t.as_str()) == Some("custom-title") {
             custom_title = value.get("customTitle").and_then(|t| t.as_str()).map(|s| s.to_string());
             continue;
@@ -840,11 +967,6 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
 
         if session_id.is_none() {
             session_id = value.get("sessionId").and_then(|s| s.as_str()).map(|s| s.to_string());
-        }
-
-        // 从 JSONL 行中提取 cwd（项目工作目录）
-        if project_dir.is_none() {
-            project_dir = value.get("cwd").and_then(|c| c.as_str()).map(|s| s.to_string());
         }
         
         let ts = value.get("timestamp").and_then(|t| t.as_str()).and_then(parse_timestamp);
@@ -941,12 +1063,25 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     })
 }
 
-/// 从 JSONL 文件所在目录名反推工作目录（Claude 编码规则：非字母数字替换为 `-`）
+/// 从 JSONL 文件所在目录名反推工作目录（Claude 编码规则：`/` → `-`，并以 `-` 开头）
 fn decode_project_dir_from_jsonl_path(path: &PathBuf) -> Option<String> {
-    path.parent()
+    let encoded = path
+        .parent()
         .and_then(|p| p.file_name())
-        .and_then(|name| name.to_str())
-        .map(|encoded| encoded.replace('-', "/"))
+        .and_then(|name| name.to_str())?;
+
+    if !encoded.starts_with('-') {
+        return None;
+    }
+
+    let decoded = encoded.replace('-', "/");
+    if decoded == "/" {
+        Some("/".to_string())
+    } else if decoded.is_empty() {
+        None
+    } else {
+        Some(decoded)
+    }
 }
 
 // 从 content 中提取文本和思考内容
@@ -1483,12 +1618,132 @@ fn process_claude_stream_line(
     }
 }
 
+/// macOS GUI 应用从 Finder 启动时 PATH 很窄，通常找不到 /usr/local/bin/claude。
+fn extended_path_for_cli() -> String {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+
+    #[cfg(target_os = "windows")]
+    let separator = ";";
+    #[cfg(not(target_os = "windows"))]
+    let separator = ":";
+
+    let mut segments: Vec<PathBuf> = if cfg!(target_os = "windows") {
+        vec![
+            // npm 全局路径（Windows）
+            home.join("AppData").join("Roaming").join("npm"),
+            home.join("AppData").join("Local").join("Programs").join("nodejs"),
+            PathBuf::from("C:\\Program Files\\nodejs"),
+        ]
+    } else {
+        vec![
+            PathBuf::from("/usr/local/bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            home.join(".local/bin"),
+            home.join(".npm-global/bin"),
+            home.join("bin"),
+        ]
+    };
+
+    if let Ok(existing) = std::env::var("PATH") {
+        for part in existing.split(separator).filter(|s| !s.is_empty()) {
+            segments.push(PathBuf::from(part));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        segments.extend([
+            PathBuf::from("/usr/bin"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/usr/sbin"),
+            PathBuf::from("/sbin"),
+        ]);
+    }
+
+    let mut seen = HashSet::new();
+    segments
+        .into_iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .filter(|p| seen.insert(p.clone()))
+        .collect::<Vec<_>>()
+        .join(separator)
+}
+
+fn resolve_claude_executable() -> PathBuf {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut candidates = vec![
+        PathBuf::from("/usr/local/bin/claude"),
+        PathBuf::from("/opt/homebrew/bin/claude"),
+        home.join(".local/bin/claude"),
+        home.join(".npm-global/bin/claude"),
+        home.join("bin/claude"),
+    ];
+
+    #[cfg(target_os = "windows")]
+    {
+        candidates.extend([
+            home.join(".claude/bin/claude.exe"),
+            // npm 全局安装路径 (npm install -g @anthropic-ai/claude-code)
+            home.join("AppData/Roaming/npm/claude.cmd"),
+            home.join("AppData/Roaming/npm/claude.exe"),
+            PathBuf::from("C:\\Program Files\\Claude\\claude.exe"),
+            PathBuf::from("C:\\Program Files (x86)\\Claude\\claude.exe"),
+            dirs::data_local_dir().unwrap_or_default().join("claude/bin/claude.exe"),
+            dirs::data_dir().unwrap_or_default().join("claude/bin/claude.exe"),
+        ]);
+    }
+
+    #[cfg(unix)]
+    {
+        if let Ok(output) = Command::new("/bin/zsh")
+            .args(["-l", "-c", "command -v claude"])
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    candidates.insert(0, PathBuf::from(path));
+                }
+            }
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // 优先尝试不带扩展名的命令（PowerShell 会自动查找 .ps1）
+        PathBuf::from("claude")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        PathBuf::from("claude")
+    }
+}
+
+fn apply_cli_runtime_env(cmd: &mut Command) {
+    cmd.env("PATH", extended_path_for_cli());
+    if let Some(home) = dirs::home_dir() {
+        cmd.env("HOME", home);
+    }
+    if let Ok(user) = std::env::var("USER") {
+        cmd.env("USER", user);
+    } else if let Ok(logname) = std::env::var("LOGNAME") {
+        cmd.env("USER", logname);
+    }
+}
+
 /// 使用 stream-json 模式启动 claude，实时推送 thinking / answer 增量
 fn spawn_claude_stream(
     app: AppHandle,
     prompt: &str,
     conversation_id: Option<&String>,
     project_dir: Option<&String>,
+    model: Option<&str>,
 ) -> std::io::Result<StreamOutcome> {
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
     const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -1512,8 +1767,13 @@ fn spawn_claude_stream(
 
     let effective_cwd = project_dir.and_then(|cwd| resolve_or_create_dir(cwd));
 
-    let mut cmd = Command::new("claude");
+    let claude_bin = resolve_claude_executable();
+    let mut cmd = Command::new(&claude_bin);
     cmd.args(&args);
+    apply_cli_runtime_env(&mut cmd);
+    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+        apply_model_override_env(&mut cmd, model);
+    }
     #[cfg(target_os = "windows")]
     {
         cmd.creation_flags(0x08000000);
@@ -1525,7 +1785,7 @@ fn spawn_claude_stream(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    eprintln!("[spawn_stream] claude {}", args.join(" "));
+    eprintln!("[spawn_stream] {:?} {}", claude_bin, args.join(" "));
     eprintln!("[spawn_stream] cwd: {:?}", effective_cwd);
 
     let mut child = cmd.spawn()?;
@@ -2092,26 +2352,41 @@ fn resolve_or_create_dir(cwd: &str) -> Option<String> {
 }
 
 #[tauri::command]
-async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<String>) -> Result<(), String> {
+async fn execute_prompt(
+    app: AppHandle,
+    prompt: String,
+    conversation_id: Option<String>,
+    model: Option<String>,
+    project_dir: Option<String>,
+) -> Result<(), String> {
     let active_cid = conversation_id.clone();
-    eprintln!("[execute_prompt] received: prompt='{}', conversation_id={:?}", prompt, active_cid);
+    let active_model = model.filter(|value| !value.trim().is_empty());
+    let explicit_project_dir = project_dir.filter(|value| !value.trim().is_empty());
+    eprintln!(
+        "[execute_prompt] received: prompt='{}', conversation_id={:?}, model={:?}, project_dir={:?}",
+        prompt, active_cid, active_model, explicit_project_dir
+    );
 
     tauri::async_runtime::spawn(async move {
         let before_conversations = load_claude_history();
         let before_ids: std::collections::HashSet<String> =
             before_conversations.iter().map(|c| c.id.clone()).collect();
 
-        let project_dir = active_cid.as_ref().and_then(|cid| {
-            before_conversations
-                .iter()
-                .find(|c| c.id == *cid)
-                .and_then(|c| c.project_dir.as_ref())
-                .cloned()
-        });
+        let project_dir = active_cid
+            .as_ref()
+            .and_then(|cid| {
+                before_conversations
+                    .iter()
+                    .find(|c| c.id == *cid)
+                    .and_then(|c| c.project_dir.as_ref())
+                    .cloned()
+            })
+            .or(explicit_project_dir);
 
         let app_handle = app.clone();
         let prompt_clone = prompt.clone();
         let cid_clone = active_cid.clone();
+        let model_clone = active_model.clone();
 
         let stream_result = tauri::async_runtime::spawn_blocking(move || {
             spawn_claude_stream(
@@ -2119,6 +2394,7 @@ async fn execute_prompt(app: AppHandle, prompt: String, conversation_id: Option<
                 &prompt_clone,
                 cid_clone.as_ref(),
                 project_dir.as_ref(),
+                model_clone.as_deref(),
             )
         })
         .await;
@@ -2236,10 +2512,11 @@ async fn run_claude_command(input: &str) -> CommandResult {
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
 
+    let claude_bin = resolve_claude_executable();
+
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", "claude"]);
+        let mut cmd = Command::new(&claude_bin);
         cmd.creation_flags(0x08000000);
         
         run_command_with_input(cmd, input).await
@@ -2247,9 +2524,9 @@ async fn run_claude_command(input: &str) -> CommandResult {
     
     #[cfg(not(target_os = "windows"))]
     {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "claude"]);
-        
+        let mut cmd = Command::new(&claude_bin);
+        apply_cli_runtime_env(&mut cmd);
+
         run_command_with_input(cmd, input).await
     }
 }
@@ -2259,13 +2536,12 @@ async fn run_claude_command_with_resume(input: &str, conversation_id: &str) -> C
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
 
+    let claude_bin = resolve_claude_executable();
+
     #[cfg(target_os = "windows")]
     {
-        let mut cmd = Command::new("cmd");
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let home_str = home.to_string_lossy().to_string();
-        let full_cmd = format!("cd /d {} && claude --resume {}", home_str, conversation_id);
-        cmd.args(["/C", &full_cmd]);
+        let mut cmd = Command::new(&claude_bin);
+        cmd.args(["--resume", conversation_id]);
         cmd.creation_flags(0x08000000);
         
         run_command_with_input(cmd, input).await
@@ -2273,10 +2549,10 @@ async fn run_claude_command_with_resume(input: &str, conversation_id: &str) -> C
     
     #[cfg(not(target_os = "windows"))]
     {
-        let mut cmd = Command::new("sh");
-        let cmd_str = format!("claude --resume {}", conversation_id);
-        cmd.args(["-c", &cmd_str]);
-        
+        let mut cmd = Command::new(&claude_bin);
+        cmd.args(["--resume", conversation_id]);
+        apply_cli_runtime_env(&mut cmd);
+
         run_command_with_input(cmd, input).await
     }
 }
@@ -2506,6 +2782,7 @@ fn apply_responsive_window_size(app: &tauri::App) {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             apply_responsive_window_size(app);
             Ok(())
