@@ -5,7 +5,7 @@ import { renderMarkdown as _renderMarkdown } from './markdown';
 
 // Markdown 渲染缓存：避免对相同内容重复调用 marked.parse + DOMPurify
 const _mdCache = new Map<string, string>();
-const _MD_CACHE_MAX = 200;
+const _MD_CACHE_MAX = 3000;
 function renderMarkdown(src: string): string {
   const cached = _mdCache.get(src);
   if (cached !== undefined) return cached;
@@ -1670,7 +1670,7 @@ function render() {
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
             <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
-            <button type="button" class="refresh-btn" id="refresh-btn" title="扫描本地新会话" aria-label="刷新会话列表">↻</button>
+            <button type="button" class="refresh-btn" id="refresh-btn" title="扫描本地新会话" aria-label="刷新会话列表"><span class="refresh-icon">↻</span></button>
           </div>
         </div>
         <div class="conversation-list" id="conversation-list">
@@ -1707,21 +1707,33 @@ function attachEventListeners() {
 
   document.querySelector('#refresh-btn')?.addEventListener('click', async () => {
     const btn = document.querySelector('#refresh-btn') as HTMLButtonElement | null;
-    if (btn) {
-      btn.disabled = true;
-      btn.textContent = '⏳';
+    const sidebar = document.querySelector('.sidebar');
+    if (btn) btn.disabled = true;
+    btn?.classList.add('is-loading');
+
+    let overlay: HTMLDivElement | null = null;
+    if (sidebar && !sidebar.querySelector('.sidebar-loading-overlay')) {
+      overlay = document.createElement('div');
+      overlay.className = 'sidebar-loading-overlay';
+      overlay.innerHTML = `
+        <span class="list-loading-spinner" aria-hidden="true"></span>
+        <span class="list-loading-text">正在扫描会话…</span>
+      `;
+      sidebar.appendChild(overlay);
     }
+
     try {
-      await loadData();
-      const listEl = document.querySelector('#conversation-list');
-      if (listEl) {
-        listEl.innerHTML = renderConversationList();
-      }
+      // 加了缓存后刷新很快，给 loading 一个最小显示时长，避免一闪而过
+      await Promise.all([
+        loadData(),
+        new Promise((resolve) => setTimeout(resolve, 500)),
+      ]);
     } finally {
-      if (btn) {
-        btn.disabled = false;
-        btn.textContent = '↻';
-      }
+      const list = document.querySelector('#conversation-list');
+      if (list) list.innerHTML = renderConversationList();
+      overlay?.remove();
+      if (btn) btn.disabled = false;
+      btn?.classList.remove('is-loading');
     }
   });
 

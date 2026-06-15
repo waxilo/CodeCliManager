@@ -967,6 +967,7 @@ fn mark_session_deleted(session_id: &str) {
     }
 }
 
+#[allow(dead_code)]
 fn is_deleted_session(session_id: &str) -> bool {
     load_overlay()
         .deleted_session_ids
@@ -974,6 +975,7 @@ fn is_deleted_session(session_id: &str) -> bool {
         .any(|id| id == session_id)
 }
 
+#[allow(dead_code)]
 fn get_title_override(session_id: &str) -> Option<String> {
     load_overlay().title_overrides.get(session_id).cloned()
 }
@@ -986,6 +988,7 @@ fn set_title_override(session_id: &str, title: &str) {
     save_overlay(&overlay);
 }
 
+#[allow(dead_code)]
 fn apply_title_override(conv: &mut Conversation) {
     if let Some(title) = get_title_override(&conv.id) {
         conv.title = title;
@@ -999,6 +1002,38 @@ fn is_agent_session(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+// ── 会话解析缓存：按文件 mtime 缓存解析结果，避免每次点击全量重解析 ──────
+static SESSION_CACHE: Mutex<Option<HashMap<PathBuf, (i64, Conversation)>>> = Mutex::new(None);
+
+fn file_mtime_secs(path: &Path) -> i64 {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// 解析会话文件，命中（路径 + mtime 未变）则直接复用缓存，避免重复读盘 + JSON 解析
+fn parse_claude_session_cached(path: &PathBuf) -> Option<Conversation> {
+    let mtime = file_mtime_secs(path);
+    {
+        let cache = SESSION_CACHE.lock().unwrap();
+        if let Some(map) = cache.as_ref() {
+            if let Some((cached_mtime, conv)) = map.get(path) {
+                if *cached_mtime == mtime {
+                    return Some(conv.clone());
+                }
+            }
+        }
+    }
+    let conv = parse_claude_session(path)?;
+    let mut cache = SESSION_CACHE.lock().unwrap();
+    let map = cache.get_or_insert_with(HashMap::new);
+    map.insert(path.clone(), (mtime, conv.clone()));
+    Some(conv)
+}
+
 fn load_claude_history() -> Vec<Conversation> {
     let root = get_claude_history_path();
     if !root.exists() {
@@ -1008,16 +1043,21 @@ fn load_claude_history() -> Vec<Conversation> {
     let mut files = Vec::new();
     collect_jsonl_files(&root, &mut files);
 
+    // overlay 只读一次，避免对每条会话各读盘解析两次（删除标记 + 标题覆盖）
+    let overlay = load_overlay();
     let mut conversations = Vec::new();
     for path in files {
         if is_agent_session(&path) {
             continue;
         }
-        if let Some(mut conv) = parse_claude_session(&path) {
-            if !is_deleted_session(&conv.id) {
-                apply_title_override(&mut conv);
-                conversations.push(conv);
+        if let Some(mut conv) = parse_claude_session_cached(&path) {
+            if overlay.deleted_session_ids.iter().any(|id| id == &conv.id) {
+                continue;
             }
+            if let Some(title) = overlay.title_overrides.get(&conv.id) {
+                conv.title = title.clone();
+            }
+            conversations.push(conv);
         }
     }
 
@@ -2138,20 +2178,28 @@ fn get_conversations() -> Vec<Conversation> {
 
 #[tauri::command]
 fn get_platforms() -> HashMap<String, PlatformConfig> {
-    let state = load_app_state();
-    state.platforms
+    // 平台列表与历史无关：只读持久化状态，避免触发全量历史解析
+    let persisted = load_persisted_state();
+    if persisted.platforms.is_empty() {
+        get_default_platforms()
+    } else {
+        persisted.platforms
+    }
 }
 
 #[tauri::command]
 fn get_active_platform() -> String {
-    let state = load_app_state();
-    state.active_platform
+    let persisted = load_persisted_state();
+    if persisted.active_platform.is_empty() {
+        "claude".to_string()
+    } else {
+        persisted.active_platform
+    }
 }
 
 #[tauri::command]
 fn get_current_platform() -> String {
-    let state = load_app_state();
-    state.current_platform
+    detect_os()
 }
 
 #[tauri::command]
@@ -2357,8 +2405,24 @@ fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {
 
 #[tauri::command]
 fn get_conversation(conversation_id: String) -> Option<Conversation> {
-    let state = load_app_state();
-    state.conversations.into_iter().find(|c| c.id == conversation_id)
+    // 只定位并解析目标会话文件，不再全量扫描解析整个历史目录
+    if let Some(path) = find_claude_session_file(&conversation_id) {
+        if let Some(mut conv) = parse_claude_session_cached(&path) {
+            let overlay = load_overlay();
+            if overlay.deleted_session_ids.iter().any(|id| id == &conv.id) {
+                return None;
+            }
+            if let Some(title) = overlay.title_overrides.get(&conv.id) {
+                conv.title = title.clone();
+            }
+            return Some(conv);
+        }
+    }
+    // 回退：非 claude 历史的持久化会话
+    load_persisted_state()
+        .conversations
+        .into_iter()
+        .find(|c| c.id == conversation_id)
 }
 
 #[tauri::command]

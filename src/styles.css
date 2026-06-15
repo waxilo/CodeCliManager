@@ -130,6 +130,7 @@ html, body {
 }
 
 .sidebar {
+  position: relative;
   width: var(--sidebar-width, 184px);
   flex-shrink: 0;
   background: linear-gradient(180deg, var(--color-bg-base) 0%, var(--color-bg-elevated) 100%);
@@ -186,6 +187,9 @@ body.is-sidebar-resizing {
 }
 
 .sidebar-header {
+  position: relative;
+  z-index: 2;
+  background: var(--color-bg-base);
   padding: 12px 14px;
   border-bottom: 1px solid var(--color-bg-surface);
 }
@@ -435,6 +439,51 @@ body.is-sidebar-resizing {
 
 @keyframes conv-spin {
   to { transform: rotate(360deg); }
+}
+
+/* 历史会话列表刷新中的半透明遮罩（盖在不滚动的 sidebar 上，列表透出） */
+.sidebar-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-bg-base) 58%, transparent);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  animation: overlay-fade-in 0.18s ease;
+}
+
+@keyframes overlay-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.list-loading-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2.5px solid var(--color-bg-surface-hover);
+  border-top-color: var(--color-accent, #4f8cff);
+  border-radius: 50%;
+  animation: conv-spin 0.7s linear infinite;
+}
+
+.list-loading-text {
+  font-size: 12px;
+}
+
+/* 刷新按钮：loading 时图标持续旋转 */
+.refresh-btn .refresh-icon {
+  display: inline-block;
+  line-height: 1;
+}
+
+.refresh-btn.is-loading .refresh-icon {
+  animation: conv-spin 0.7s linear infinite;
 }
 
 .conversation-item.running .conversation-title {
