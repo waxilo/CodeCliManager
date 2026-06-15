@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc::{self, RecvTimeoutError},
@@ -14,6 +14,60 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewWindow};
 
 mod model_fetch;
+
+// ── 全局进程注册表：用于支持 abort（取消正在运行的任务） ──────────────
+static ACTIVE_PROCESSES: Mutex<Option<HashMap<String, Arc<Mutex<Child>>>>> = Mutex::new(None);
+
+fn ensure_process_registry() {
+    let mut reg = ACTIVE_PROCESSES.lock().unwrap();
+    if reg.is_none() {
+        *reg = Some(HashMap::new());
+    }
+}
+
+fn register_active_process(key: &str, child: Arc<Mutex<Child>>) {
+    ensure_process_registry();
+    let mut reg = ACTIVE_PROCESSES.lock().unwrap();
+    if let Some(map) = reg.as_mut() {
+        map.insert(key.to_string(), child);
+    }
+}
+
+fn unregister_active_process(key: &str) {
+    let mut reg = ACTIVE_PROCESSES.lock().unwrap();
+    if let Some(map) = reg.as_mut() {
+        map.remove(key);
+    }
+}
+
+fn kill_active_process(key: &str) -> bool {
+    let reg = ACTIVE_PROCESSES.lock().unwrap();
+    if let Some(map) = reg.as_ref() {
+        if let Some(child_arc) = map.get(key) {
+            let child_arc = Arc::clone(child_arc);
+            drop(reg); // 释放锁再 kill，避免死锁
+            if let Ok(mut child) = child_arc.lock() {
+                let _ = child.kill();
+            }
+            return true;
+        }
+    }
+    false
+}
+
+#[allow(dead_code)]
+fn kill_all_active_processes() {
+    let keys: Vec<String> = {
+        let reg = ACTIVE_PROCESSES.lock().unwrap();
+        match reg.as_ref() {
+            Some(map) => map.keys().cloned().collect(),
+            None => vec![],
+        }
+    };
+    for key in keys {
+        kill_active_process(&key);
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct Message {
@@ -1011,6 +1065,16 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             continue;
         }
 
+        // 跳过内部消息（系统提醒、本地命令输出等）
+        let trimmed = content.trim();
+        if trimmed.starts_with("<system-reminder>")
+            || trimmed.starts_with("<local-command-caveat>")
+            || trimmed.starts_with("<command-name>")
+            || trimmed.starts_with("<local-command-stdout>")
+        {
+            continue;
+        }
+
         // 如果只有 thinking 没有文本，归类为 thinking 角色
         let effective_role = if content.trim().is_empty() && thinking.is_some() {
             "thinking".to_string()
@@ -1085,6 +1149,7 @@ fn decode_project_dir_from_jsonl_path(path: &PathBuf) -> Option<String> {
 }
 
 // 从 content 中提取文本和思考内容
+// tool_use 和 tool_result 不提取为可见文本（它们是内部工具调用细节）
 // 返回 (纯文本, 思考内容)
 fn extract_text_and_thinking(content: Option<&serde_json::Value>) -> (String, Option<String>) {
     match content {
@@ -1105,15 +1170,7 @@ fn extract_text_and_thinking(content: Option<&serde_json::Value>) -> (String, Op
                             thinking_parts.push(th.to_string());
                         }
                     }
-                    Some("tool_result") => {
-                        if let Some(c) = item.get("content").and_then(|c| c.as_str()) {
-                            texts.push(c.to_string());
-                        }
-                    }
-                    Some("tool_use") => {
-                        let name = item.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
-                        texts.push(format!("[Tool: {}]", name));
-                    }
+                    // tool_use 和 tool_result 跳过——不对用户显示内部工具调用细节
                     _ => {}
                 }
             }
@@ -1745,8 +1802,8 @@ fn spawn_claude_stream(
     project_dir: Option<&String>,
     model: Option<&str>,
 ) -> std::io::Result<StreamOutcome> {
-    const REQUEST_TIMEOUT: Duration = Duration::from_secs(180);
-    const IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+    const REQUEST_TIMEOUT: Duration = Duration::from_secs(7200); // 2 小时（Claude Code 复杂任务可能非常久，参考 claudecodeui 不设总超时）
+    const IDLE_TIMEOUT: Duration = Duration::from_secs(600);      // 10 分钟（工具执行期间可能长时间无输出）
 
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
@@ -1792,7 +1849,16 @@ fn spawn_claude_stream(
     let stdout = child.stdout.take().expect("stdout should be piped");
     let stderr = child.stderr.take();
 
+    // 将子进程注册到全局注册表，支持外部 abort
+    let child_arc = Arc::new(Mutex::new(child));
+    let registry_key = conversation_id
+        .filter(|c| !c.is_empty())
+        .cloned()
+        .unwrap_or_else(|| format!("pending-{}", Instant::now().elapsed().as_nanos()));
+    register_active_process(&registry_key, Arc::clone(&child_arc));
+
     let mut captured_session_id = conversation_id.filter(|c| !c.is_empty()).cloned();
+    let mut captured_registry_key = registry_key.clone();
     let mut block_types: HashMap<usize, String> = HashMap::new();
     let mut stream_error: Option<String> = None;
 
@@ -1846,14 +1912,25 @@ fn spawn_claude_stream(
                     &mut block_types,
                     &mut stream_error,
                 );
+                // 首次捕获到 session_id 时，用 session_id 重新注册进程（方便按 session_id abort）
+                if let Some(ref sid) = captured_session_id {
+                    if *sid != captured_registry_key {
+                        unregister_active_process(&captured_registry_key);
+                        register_active_process(sid, Arc::clone(&child_arc));
+                        captured_registry_key = sid.clone();
+                    }
+                }
                 if stream_error.is_some() {
-                    let _ = child.kill();
+                    if let Ok(mut c) = child_arc.lock() { let _ = c.kill(); }
                     break;
                 }
             }
             Ok(Err(err)) => return Err(err),
             Err(RecvTimeoutError::Timeout) => {
-                if child.try_wait()?.is_some() {
+                let child_exited = child_arc.lock().ok()
+                    .and_then(|mut c| c.try_wait().ok().flatten())
+                    .is_some();
+                if child_exited {
                     stdout_finished = true;
                     continue;
                 }
@@ -1861,7 +1938,7 @@ fn spawn_claude_stream(
                 let elapsed = started.elapsed();
                 let idle = last_activity.elapsed();
                 if elapsed >= REQUEST_TIMEOUT || idle >= IDLE_TIMEOUT {
-                    let _ = child.kill();
+                    if let Ok(mut c) = child_arc.lock() { let _ = c.kill(); }
                     let timeout_msg = if elapsed >= REQUEST_TIMEOUT {
                         format!(
                             "请求超时：模型在 {} 秒内未完成响应",
@@ -1878,7 +1955,8 @@ fn spawn_claude_stream(
                         captured_session_id.as_deref(),
                         &timeout_msg,
                     );
-                    let _ = child.wait();
+                    if let Ok(mut c) = child_arc.lock() { let _ = c.wait(); }
+                    unregister_active_process(&captured_registry_key);
                     return Ok(StreamOutcome::Failed {
                         session_id: captured_session_id,
                         error: timeout_msg,
@@ -1912,8 +1990,18 @@ fn spawn_claude_stream(
         eprintln!("[claude stderr]\n{}", stderr_content);
     }
 
-    let status = child.wait()?;
+    let status = match child_arc.lock() {
+        Ok(mut c) => c.wait()?,
+        Err(poisoned) => {
+            eprintln!("[claude] mutex poisoned, recovering...");
+            let mut c = poisoned.into_inner();
+            c.wait()?
+        }
+    };
     eprintln!("[claude] 退出码: {}", status);
+
+    // 从注册表中移除
+    unregister_active_process(&captured_registry_key);
 
     if let Some(error) = stream_error {
         return Ok(StreamOutcome::Failed {
@@ -2430,6 +2518,7 @@ async fn execute_prompt(
                             };
                             eprintln!("[execute_prompt] emit {} for session {}", event_name, conv.id);
                             let _ = app.emit(event_name, &payload);
+                            let _ = app.emit("session-ended", Some(conv.id.clone()));
                             return;
                         }
                     }
@@ -2461,6 +2550,34 @@ async fn execute_prompt(
     });
 
     Ok(())
+}
+
+/// 终止正在运行的 Claude 会话（用户主动取消）
+#[tauri::command]
+async fn abort_session(conversation_id: Option<String>) -> Result<bool, String> {
+    if let Some(ref cid) = conversation_id {
+        if kill_active_process(cid) {
+            eprintln!("[abort] killed process for session: {}", cid);
+            return Ok(true);
+        }
+    }
+    // 尝试 kill 所有 pending-* 进程
+    let reg = ACTIVE_PROCESSES.lock().unwrap();
+    if let Some(map) = reg.as_ref() {
+        let pending_keys: Vec<String> = map.keys()
+            .filter(|k| k.starts_with("pending-"))
+            .cloned()
+            .collect();
+        drop(reg);
+        for key in pending_keys {
+            if kill_active_process(&key) {
+                eprintln!("[abort] killed pending process: {}", key);
+                return Ok(true);
+            }
+        }
+    }
+    eprintln!("[abort] no active process found for {:?}", conversation_id);
+    Ok(false)
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -2800,6 +2917,7 @@ pub fn run() {
             send_message,
             execute_cli_command,
             execute_prompt,
+            abort_session,
             get_conversation_list,
             get_conversation_messages,
             get_claude_api_config,
