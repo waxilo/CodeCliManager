@@ -63,10 +63,6 @@ html, body {
   padding-left: 72px;
 }
 
-.platform-macos .app-titlebar-leading .sidebar-toggle-btn {
-  transform: translateY(2px);
-}
-
 .platform-windows .app-titlebar-leading {
   padding-left: 12px;
 }
@@ -209,6 +205,11 @@ body.is-sidebar-resizing {
 
 .new-chat-btn:hover {
   background: var(--color-accent-hover);
+}
+
+.sidebar-header-actions {
+  display: flex;
+  gap: 6px;
 }
 
 .refresh-btn {

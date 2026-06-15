@@ -1668,7 +1668,10 @@ function render() {
       <div class="app-container${isSidebarCollapsed ? ' is-sidebar-collapsed' : ''}">
       <div class="sidebar">
         <div class="sidebar-header">
-          <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
+          <div class="sidebar-header-actions">
+            <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
+            <button type="button" class="refresh-btn" id="refresh-btn" title="扫描本地新会话" aria-label="刷新会话列表">↻</button>
+          </div>
         </div>
         <div class="conversation-list" id="conversation-list">
           ${renderConversationList()}
