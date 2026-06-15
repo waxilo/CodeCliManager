@@ -3,7 +3,7 @@
 # 一键：递增版本 → 提交 → 同步远程 → 推送 → 打 tag → 触发 Release
 # ──────────────────────────────────────────────────────────
 
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = 'Continue'
 
 # 定位到脚本所在目录（项目根目录）
 $ROOT = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -16,6 +16,16 @@ $REMOTE       = if ($env:REMOTE) { $env:REMOTE } else { 'origin' }
 $BRANCH       = (git rev-parse --abbrev-ref HEAD 2>&1).Trim()
 
 # ── helper functions ──────────────────────────────────────
+
+function Assert-GitOK {
+    param([string]$action)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "Error: ${action} failed (exit code $LASTEXITCODE)" -ForegroundColor Red
+        Pop-Location
+        Read-Host 'Press Enter to exit...'
+        exit 1
+    }
+}
 
 function Sync-RemoteBranch {
     Write-Host "Syncing ${REMOTE}/${BRANCH}..."
@@ -75,8 +85,8 @@ function Write-Version {
 
 function Test-RemoteTag {
     param([string]$tag)
-    $result = (git ls-remote --tags $REMOTE "refs/tags/$tag" 2>&1)
-    return ($result -and $result.ToString().Trim().Length -gt 0)
+    $result = git ls-remote --tags $REMOTE "refs/tags/$tag" 2>$null
+    return ($LASTEXITCODE -eq 0 -and $result -and $result.ToString().Trim().Length -gt 0)
 }
 
 # ── main ──────────────────────────────────────────────────
@@ -101,7 +111,7 @@ $COMMIT_MSG = "release: v${NEW} (${DATETIME})"
 git add .
 
 # Check if there are staged changes
-$diffCheck = git diff --cached --quiet 2>&1
+$null = git diff --cached --quiet 2>&1
 if ($LASTEXITCODE -eq 0) {
     Write-Host 'No changes to commit.'
     Pop-Location
@@ -110,10 +120,11 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 git commit -m $COMMIT_MSG
+Assert-GitOK "git commit"
 
 # Amend if there are still unstaged changes after commit
-$dirty1 = git diff --quiet 2>&1;          $d1 = $LASTEXITCODE
-$dirty2 = git diff --cached --quiet 2>&1;  $d2 = $LASTEXITCODE
+$null = git diff --quiet 2>&1;          $d1 = $LASTEXITCODE
+$null = git diff --cached --quiet 2>&1;  $d2 = $LASTEXITCODE
 if ($d1 -ne 0 -or $d2 -ne 0) {
     Write-Host 'Warning: unstaged changes remain, amending into this commit...'
     git add -A
@@ -125,10 +136,11 @@ Sync-RemoteBranch
 
 Write-Host "Pushing to ${REMOTE}/${BRANCH}..."
 git push $REMOTE $BRANCH
+Assert-GitOK "git push"
 
 # Create and push tag
 $TAG = "v${NEW}"
-$tagExists = git rev-parse $TAG 2>$null
+$null = git rev-parse $TAG 2>$null
 if ($LASTEXITCODE -eq 0) {
     Write-Host "Local tag ${TAG} already exists, recreating..."
     git tag -d $TAG
@@ -137,6 +149,7 @@ if ($LASTEXITCODE -eq 0) {
 git tag $TAG
 Write-Host "Pushing tag ${TAG}..."
 git push $REMOTE $TAG
+Assert-GitOK "git push tag"
 
 # ── summary ───────────────────────────────────────────────
 
