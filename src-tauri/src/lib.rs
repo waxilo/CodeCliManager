@@ -40,6 +40,70 @@ fn unregister_active_process(key: &str) {
     }
 }
 
+// ── 用户主动终止标记：区分 abort 和异常退出 ──────────────────────────
+static ABORTED_SESSIONS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+
+fn mark_session_aborted(key: &str) {
+    let mut set = ABORTED_SESSIONS.lock().unwrap();
+    if set.is_none() {
+        *set = Some(HashSet::new());
+    }
+    if let Some(s) = set.as_mut() {
+        s.insert(key.to_string());
+    }
+}
+
+fn is_session_aborted(key: &str) -> bool {
+    let set = ABORTED_SESSIONS.lock().unwrap();
+    set.as_ref().is_some_and(|s| s.contains(key))
+}
+
+fn clear_session_aborted(key: &str) {
+    let mut set = ABORTED_SESSIONS.lock().unwrap();
+    if let Some(s) = set.as_mut() {
+        s.remove(key);
+    }
+}
+
+/// 杀死进程及其子进程树
+/// Windows: 使用 taskkill /T /F /PID 杀死整个进程树
+/// Unix: 使用 SIGTERM 先尝试优雅退出，再 SIGKILL 强制杀死
+fn kill_process_tree(child: &mut Child) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let pid = child.id();
+        // taskkill /T = 杀死进程树, /F = 强制终止
+        let _ = std::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW: 不弹出 cmd 窗口
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        // 先尝试 SIGTERM（优雅退出）
+        #[cfg(unix)]
+        {
+            let pid = child.id();
+            // kill -TERM pid（负号表示进程组）
+            let _ = std::process::Command::new("kill")
+                .args(["-TERM", &pid.to_string()])
+                .status();
+            // 等待 2 秒看进程是否自行退出
+            for _ in 0..20 {
+                if let Ok(Some(_)) = child.try_wait() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+        // 最终强制杀死
+        let _ = child.kill();
+    }
+}
+
 fn kill_active_process(key: &str) -> bool {
     let reg = ACTIVE_PROCESSES.lock().unwrap();
     if let Some(map) = reg.as_ref() {
@@ -47,7 +111,7 @@ fn kill_active_process(key: &str) -> bool {
             let child_arc = Arc::clone(child_arc);
             drop(reg); // 释放锁再 kill，避免死锁
             if let Ok(mut child) = child_arc.lock() {
-                let _ = child.kill();
+                kill_process_tree(&mut child);
             }
             return true;
         }
@@ -1921,11 +1985,23 @@ fn spawn_claude_stream(
                     }
                 }
                 if stream_error.is_some() {
-                    if let Ok(mut c) = child_arc.lock() { let _ = c.kill(); }
+                    if let Ok(mut c) = child_arc.lock() { kill_process_tree(&mut c); }
                     break;
                 }
             }
-            Ok(Err(err)) => return Err(err),
+            Ok(Err(_err)) => {
+                // stdout 管道断裂（可能是进程被 abort kill），检查是否为用户终止
+                let was_aborted = is_session_aborted(&captured_registry_key)
+                    || captured_session_id.as_ref().is_some_and(|sid| is_session_aborted(sid));
+                if was_aborted {
+                    eprintln!("[claude] stdout 管道断裂（用户 abort），正常退出");
+                    stdout_finished = true;
+                    continue;
+                }
+                // 非 abort 情况，让后续 child.wait() 处理
+                stdout_finished = true;
+                continue;
+            }
             Err(RecvTimeoutError::Timeout) => {
                 let child_exited = child_arc.lock().ok()
                     .and_then(|mut c| c.try_wait().ok().flatten())
@@ -1938,7 +2014,7 @@ fn spawn_claude_stream(
                 let elapsed = started.elapsed();
                 let idle = last_activity.elapsed();
                 if elapsed >= REQUEST_TIMEOUT || idle >= IDLE_TIMEOUT {
-                    if let Ok(mut c) = child_arc.lock() { let _ = c.kill(); }
+                    if let Ok(mut c) = child_arc.lock() { kill_process_tree(&mut c); }
                     let timeout_msg = if elapsed >= REQUEST_TIMEOUT {
                         format!(
                             "请求超时：模型在 {} 秒内未完成响应",
@@ -2004,6 +2080,15 @@ fn spawn_claude_stream(
     unregister_active_process(&captured_registry_key);
 
     if let Some(error) = stream_error {
+        // 用户主动终止时，stream 解析错误不视为失败
+        let was_aborted = is_session_aborted(&captured_registry_key)
+            || captured_session_id.as_ref().is_some_and(|sid| is_session_aborted(sid));
+        if was_aborted {
+            clear_session_aborted(&captured_registry_key);
+            if let Some(ref sid) = captured_session_id { clear_session_aborted(sid); }
+            eprintln!("[claude] 用户主动终止，忽略 stream error: {}", error);
+            return Ok(StreamOutcome::Success(captured_session_id));
+        }
         return Ok(StreamOutcome::Failed {
             session_id: captured_session_id,
             error,
@@ -2011,10 +2096,24 @@ fn spawn_claude_stream(
     }
 
     if !status.success() {
+        // 检查是否是用户主动终止（abort），如果是则视为正常结束，不显示错误
+        let was_aborted = is_session_aborted(&captured_registry_key)
+            || captured_session_id.as_ref().is_some_and(|sid| is_session_aborted(sid));
+        // 清理 abort 标记
+        clear_session_aborted(&captured_registry_key);
+        if let Some(ref sid) = captured_session_id {
+            clear_session_aborted(sid);
+        }
+
+        if was_aborted {
+            eprintln!("[claude] 用户主动终止，不视为错误");
+            return Ok(StreamOutcome::Success(captured_session_id));
+        }
+
         let error_msg = if !stderr_content.trim().is_empty() {
             stderr_content.trim().to_string()
         } else {
-            format!("Claude 进程异常退出（状态码 {}）", status)
+            format!("Claude 通用异常退出（收到 exit code: {}）", status)
         };
         emit_session_error(
             &app,
@@ -2556,6 +2655,7 @@ async fn execute_prompt(
 #[tauri::command]
 async fn abort_session(conversation_id: Option<String>) -> Result<bool, String> {
     if let Some(ref cid) = conversation_id {
+        mark_session_aborted(cid);
         if kill_active_process(cid) {
             eprintln!("[abort] killed process for session: {}", cid);
             return Ok(true);
@@ -2570,6 +2670,7 @@ async fn abort_session(conversation_id: Option<String>) -> Result<bool, String> 
             .collect();
         drop(reg);
         for key in pending_keys {
+            mark_session_aborted(&key);
             if kill_active_process(&key) {
                 eprintln!("[abort] killed pending process: {}", key);
                 return Ok(true);

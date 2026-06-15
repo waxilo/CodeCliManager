@@ -129,6 +129,8 @@ let isSidebarCollapsed = false;
 
 const streamingBySession = new Map<string, StreamingState>();
 const pendingTextDelta = new Map<string, string>();
+/** 正在运行的会话 ID 集合（后台执行的任务也包含在内） */
+const runningSessions = new Set<string>();
 let streamRefreshTimer: number | null = null;
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -699,17 +701,22 @@ async function setupEventListeners() {
     handleMessageChunk(event.payload);
   });
 
-  // 监听会话创建事件
+  // 监听会话创建事件（后端在流完成后首次写入会话时触发）
   await listen<SessionEventPayload>('session-created', (event) => {
     const payload = normalizeSessionEventPayload(event.payload);
-    activeConversationId = payload.conversation_id;
+    runningSessions.delete(payload.conversation_id);
     transientSessionError = null;
 
-    if (pendingSessionModel) {
+    // 判断用户当前是否正在查看此会话（不要强制切换视图）
+    const isViewingThis = activeConversationId === payload.conversation_id;
+
+    if (pendingSessionModel && isViewingThis) {
       saveConversationModel(payload.conversation_id, pendingSessionModel);
       pendingSessionModel = null;
     }
-    pendingProjectDir = null;
+    if (isViewingThis) {
+      pendingProjectDir = null;
+    }
 
     updateOrAddConversation({
       id: payload.conversation_id,
@@ -721,9 +728,7 @@ async function setupEventListeners() {
       updated_at: payload.updated_at,
     });
 
-    // 只在会话数据已包含用户消息时才清空 pendingUserMessage，
-    // 否则保留以便 refreshChatContent 补充显示
-    // （Claude CLI 仅在完成响应后才写入会话文件，首条用户消息可能不在其中）
+    // 只在会话数据已包含用户消息时才清空 pendingUserMessage
     if (pendingUserMessage && payload.messages.some(
       (m: Message) => m.role === 'user' && m.content === pendingUserMessage
     )) {
@@ -731,11 +736,15 @@ async function setupEventListeners() {
     }
 
     clearStreamingState(payload.conversation_id);
-    hideSendingState();
 
-    render();
-
-    setTimeout(scrollMessageListToBottom, 100);
+    if (isViewingThis) {
+      hideSendingState();
+      render();
+      setTimeout(scrollMessageListToBottom, 100);
+    } else {
+      // 用户在看别的会话或新聊天页，只更新侧边栏
+      updateConversationListSpinner();
+    }
   });
   
   // 监听消息更新事件
@@ -762,15 +771,14 @@ async function setupEventListeners() {
     });
 
     clearStreamingState(payload.conversation_id);
-    hideSendingState();
 
-    const listEl = document.querySelector('#conversation-list');
-    if (listEl) {
-      listEl.innerHTML = renderConversationList();
-    }
+    const isViewingThis = activeConversationId === payload.conversation_id;
 
-    if (payload.conversation_id === activeConversationId) {
+    if (isViewingThis) {
+      hideSendingState();
       refreshChatContent();
+    } else {
+      updateConversationListSpinner();
     }
   });
   
@@ -780,9 +788,22 @@ async function setupEventListeners() {
   });
 
   // 监听会话结束事件
-  await listen<string | null>('session-ended', (_event) => {
-    hideSendingState();
-    pendingUserMessage = null;
+  await listen<string | null>('session-ended', (event) => {
+    const endedSessionId = event.payload;
+    // 从运行集合中移除
+    if (endedSessionId) {
+      runningSessions.delete(endedSessionId);
+    }
+    // 无论哪个会话结束，都清理 pending 键
+    runningSessions.delete('pending');
+    clearStreamingState(endedSessionId || '');
+
+    const isCurrentSession = !endedSessionId || endedSessionId === activeConversationId;
+
+    if (isCurrentSession) {
+      hideSendingState();
+      pendingUserMessage = null;
+    }
 
     const preservedErrors = conversations.flatMap((conversation) =>
       conversation.messages
@@ -803,11 +824,9 @@ async function setupEventListeners() {
         }
       });
 
-      const listEl = document.querySelector('#conversation-list');
-      if (listEl) {
-        listEl.innerHTML = renderConversationList();
-      }
-      if (activeConversationId || transientSessionError) {
+      updateConversationListSpinner();
+
+      if (isCurrentSession && (activeConversationId || transientSessionError)) {
         refreshChatContent();
       }
     });
@@ -843,7 +862,13 @@ function handleMessageChunk(payload: MessageChunkPayload) {
   if (!sid) return;
 
   if (kind === 'session_created') {
-    activeConversationId = sid;
+    // pending -> 真实 session ID 转换
+    runningSessions.delete('pending');
+    runningSessions.add(sid);
+    // 仅在尚未激活会话时设置 activeConversationId，避免打断用户已切换的视图
+    if (!activeConversationId) {
+      activeConversationId = sid;
+    }
     const now = Math.floor(Date.now() / 1000);
     const existing = conversations.find((c) => c.id === sid);
     updateOrAddConversation({
@@ -861,54 +886,55 @@ function handleMessageChunk(payload: MessageChunkPayload) {
     // 此时尚无会话数据，保留 pendingUserMessage 以确保用户消息可见
     updateProjectDirControl();
     ensureChatViewVisible();
+    updateConversationListSpinner();
+    // ensureChatViewVisible 可能调用了 render()，需要恢复按钮 loading 状态
+    if (sid === activeConversationId || (!activeConversationId && pendingUserMessage)) {
+      setSendButtonLoading(true);
+    }
     return;
   }
 
-  const isActive = sid === activeConversationId || (!activeConversationId && pendingUserMessage);
-  if (!isActive) return;
-
+  // 所有会话都累积流式数据（包括后台运行的会话）
   const state = getStreamingState(sid);
+  const isActive = sid === activeConversationId || (!activeConversationId && pendingUserMessage);
 
   switch (kind) {
     case 'thinking_start':
-      // 不清空已有思考内容——Claude 可能有多轮 thinking block，
-      // 每个 block 的 thinking_start 不应覆盖之前的累积文本
       state.thinkingDone = false;
-      refreshStreamingUI(sid);
+      if (isActive) refreshStreamingUI(sid);
       break;
     case 'thinking_delta':
       state.thinking += content;
-      scheduleStreamingRefresh(sid);
+      if (isActive) scheduleStreamingRefresh(sid);
       break;
     case 'thinking_end':
       state.thinkingDone = true;
-      refreshStreamingUI(sid);
+      if (isActive) refreshStreamingUI(sid);
       break;
     case 'text_start':
       break;
     case 'text_delta':
       pendingTextDelta.set(sid, (pendingTextDelta.get(sid) || '') + content);
-      scheduleStreamingRefresh(sid);
+      if (isActive) scheduleStreamingRefresh(sid);
       break;
     case 'text_end':
     case 'stream_end':
       flushPendingTextDelta(sid);
-      refreshStreamingUI(sid);
+      if (isActive) refreshStreamingUI(sid);
       break;
     case 'error':
       flushPendingTextDelta(sid);
       clearStreamingState(sid);
       break;
     case 'api_retry':
-      removePendingAssistantIndicator();
-      updatePendingStatus(content);
+      if (isActive) {
+        removePendingAssistantIndicator();
+        updatePendingStatus(content);
+      }
       break;
     case 'complete':
       flushPendingTextDelta(sid);
-      refreshStreamingUI(sid);
-      // 注意：不在这里调用 hideSendingState()
-      // 任务真正结束的信号是后端的 session-ended 事件，
-      // 它会确保 conversation 数据已加载完毕后再清理 UI 状态
+      if (isActive) refreshStreamingUI(sid);
       break;
     default:
       break;
@@ -1116,6 +1142,21 @@ function setSendButtonLoading(loading: boolean) {
   const stopIcon = sendBtn.querySelector('.stop-icon') as SVGElement | null;
   if (sendIcon) sendIcon.style.display = loading ? 'none' : '';
   if (stopIcon) stopIcon.style.display = loading ? '' : 'none';
+
+  // 流式输出时禁用输入框
+  const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  if (input) {
+    input.disabled = loading;
+    input.placeholder = loading
+      ? 'AI 正在回答中...'
+      : '输入你的问题，Enter 发送，Shift+Enter 换行...';
+  }
+
+  // 输入区域整体添加 loading 状态 class
+  const inputArea = document.querySelector('.input-composer');
+  if (inputArea) {
+    inputArea.classList.toggle('is-loading', loading);
+  }
 }
 
 function updateProjectDirControl() {
@@ -1462,12 +1503,13 @@ function renderConversationList(): string {
   return conversations.map(c => {
     const isActive = c.id === activeConversationId;
     const isEditing = editingConversationId === c.id;
+    const isRunning = runningSessions.has(c.id);
     const messageCount = c.messages.length;
     const platformName = platforms[c.platform]?.name || c.platform;
     const compactTime = formatCompactTime(c.updated_at);
     
     return `
-      <div class="conversation-item ${isActive ? 'active' : ''} ${isEditing ? 'editing' : ''}" data-id="${c.id}">
+      <div class="conversation-item ${isActive ? 'active' : ''} ${isEditing ? 'editing' : ''} ${isRunning ? 'running' : ''}" data-id="${c.id}">
         ${isActive && !isEditing ? '<div class="active-indicator"></div>' : ''}
         ${isEditing ? `
           <div class="conversation-edit-row">
@@ -1489,6 +1531,7 @@ function renderConversationList(): string {
         ` : `
           <div class="conversation-main">
             <div class="conversation-header">
+              ${isRunning ? '<span class="conversation-spinner" title="AI 正在回答中..."></span>' : ''}
               <div class="conversation-title">${escapeHtml(c.title)}</div>
             </div>
             <div class="conversation-meta">
@@ -1507,6 +1550,14 @@ function renderConversationList(): string {
       </div>
     `;
   }).join('');
+}
+
+/** 仅更新侧边栏会话列表（用于刷新转圈动画，不触发完整 render） */
+function updateConversationListSpinner() {
+  const listEl = document.querySelector('#conversation-list');
+  if (listEl) {
+    listEl.innerHTML = renderConversationList();
+  }
 }
 
 function initPlatformClass() {
@@ -3060,6 +3111,9 @@ function newChat() {
 
 // 发送消息：通过 invoke 到后端，后端启动 shell 并通过事件推送更新
 async function sendMessage() {
+  // 流式输出时禁止发送
+  if (isSendButtonLoading()) return;
+
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
 
@@ -3073,13 +3127,10 @@ async function sendMessage() {
   const content = input.value.trim();
   input.value = '';
 
-  if (sendBtn) {
-    setSendButtonLoading(true);
-  }
-
   pendingUserMessage = content;
 
   if (activeConversationId) {
+    runningSessions.add(activeConversationId);
     const conv = conversations.find((c) => c.id === activeConversationId);
     if (conv) {
       conv.messages.push({
@@ -3092,9 +3143,16 @@ async function sendMessage() {
     }
     clearStreamingState(activeConversationId);
     refreshChatContent();
+    updateConversationListSpinner();
   } else {
+    // 新会话，session ID 尚未确定，先标记为 pending
+    runningSessions.add('pending');
     render();
   }
+
+  // render() / refreshChatContent() 可能重建 DOM，需要在之后设置 loading 状态
+  setSendButtonLoading(true);
+  updateConversationListSpinner();
 
   try {
     const args: Record<string, string> = { prompt: content };
@@ -3116,7 +3174,9 @@ async function sendMessage() {
     console.error('Failed to send message:', e);
     alert('Failed to send message: ' + String(e));
     pendingUserMessage = null;
+    runningSessions.delete(activeConversationId || 'pending');
     hideSendingState();
+    updateConversationListSpinner();
   }
 }
 
@@ -3126,13 +3186,46 @@ async function abortSession() {
 
   try {
     const args: Record<string, string> = {};
-    if (activeConversationId) {
+
+    // 仅终止当前正在查看的会话（按 session ID）
+    if (activeConversationId && runningSessions.has(activeConversationId)) {
       args.conversationId = activeConversationId;
+    } else {
+      // 当前查看的会话没有在运行，无需终止
+      return;
     }
-    await invoke('abort_session', args);
-    // abort 后的清理由 session-ended 事件处理
+
+    const killed = await invoke<boolean>('abort_session', args);
+    console.log('[abort] result:', killed, 'sessionId:', activeConversationId);
+
+    // 点击停止后立即从运行集合中移除，让侧边栏转圈标志马上消失
+    runningSessions.delete(activeConversationId);
+    updateConversationListSpinner();
+
+    // 安全回退：如果 session-ended 在 3 秒内未到达，强制清理当前会话的 UI 状态
+    // 不再用 tauri://event 清理（该事件是通配符，任何事件都会触发导致提前取消）
+    // session-ended 到达时 hideSendingState 会重置按钮，此处 isSendButtonLoading 检查保证幂等
+    const abortSessionId = activeConversationId;
+    setTimeout(() => {
+      if (isSendButtonLoading() && !runningSessions.has(abortSessionId)) {
+        console.warn('[abort] session-ended 未及时到达，强制清理 UI 状态');
+        clearStreamingState(abortSessionId);
+        hideSendingState();
+        updateConversationListSpinner();
+      } else if (isSendButtonLoading() && runningSessions.has(abortSessionId)) {
+        // session-ended 完全未到达（进程可能还在），强制清理
+        console.warn('[abort] session-ended 完全未到达，强制终止并清理');
+        runningSessions.delete(abortSessionId);
+        clearStreamingState(abortSessionId);
+        hideSendingState();
+        updateConversationListSpinner();
+      }
+    }, 3000);
   } catch (e) {
     console.error('Failed to abort session:', e);
+    // 即使后端调用失败，也尝试清理 UI
+    hideSendingState();
+    updateConversationListSpinner();
   }
 }
 
@@ -3189,6 +3282,7 @@ function clearPendingRequestState() {
 
 function hideSendingState() {
   clearPendingRequestState();
+  // 直接重置按钮为非加载状态（此函数仅在当前查看的会话结束时调用）
   setSendButtonLoading(false);
   updateSendButtonState();
 }
@@ -3238,6 +3332,10 @@ function refreshChatContent() {
 }
 
 function handleKeydown(e: KeyboardEvent) {
+  // 流式输出时，Enter 不发送消息
+  if (isSendButtonLoading()) {
+    return;
+  }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
     sendMessage();
@@ -3258,15 +3356,27 @@ function escapeHtml(text: string): string {
 // 全局函数 - 用于 HTML 模板中调用
 function selectConversation(id: string) {
   activeConversationId = id;
+
   void refreshConversationFromBackend(id).then(() => {
     render();
+
+    // render() 重建整个 DOM 后，必须立即根据目标会话的运行状态恢复按钮
+    // 不能放在 setTimeout 中，否则中间可能有其他事件干扰
+    const thisSessionRunning = runningSessions.has(id);
+    setSendButtonLoading(thisSessionRunning);
+    updateConversationListSpinner();
 
     setTimeout(() => {
       const messageList = document.querySelector<HTMLDivElement>('#message-list');
       if (messageList) {
         messageList.scrollTop = messageList.scrollHeight;
       }
-    }, 100);
+      // 如果切换到的会话正在流式输出，恢复流式 UI
+      if (thisSessionRunning && streamingBySession.has(id)) {
+        showPendingAssistantIndicator();
+        refreshStreamingUI(id);
+      }
+    }, 50);
   });
 }
 

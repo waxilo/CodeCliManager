@@ -396,6 +396,25 @@ body.is-sidebar-resizing {
   min-width: 0;
 }
 
+.conversation-spinner {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  border: 2px solid var(--color-text-muted);
+  border-top-color: var(--color-accent, #4f8cff);
+  border-radius: 50%;
+  animation: conv-spin 0.7s linear infinite;
+}
+
+@keyframes conv-spin {
+  to { transform: rotate(360deg); }
+}
+
+.conversation-item.running .conversation-title {
+  color: var(--color-accent, #4f8cff);
+}
+
 .conversation-title {
   font-size: 13px;
   font-weight: 500;
@@ -964,6 +983,15 @@ body.is-sidebar-resizing {
   color: var(--color-text-muted);
 }
 
+.input-composer-textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.input-composer.is-loading {
+  border-color: var(--color-accent, #4f8cff);
+}
+
 .input-composer-toolbar {
   display: flex;
   align-items: center;
@@ -1355,6 +1383,22 @@ body.is-sidebar-resizing {
 
 .send-btn.is-loading:hover {
   background: var(--color-danger-hover, #c0392b);
+}
+
+/* 流式输出时输入框禁用状态 */
+.input-composer.is-loading {
+  opacity: 0.85;
+}
+
+.input-composer-textarea:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  background: var(--color-composer-disabled-bg, rgba(0, 0, 0, 0.02));
+}
+
+.input-composer-textarea:disabled::placeholder {
+  color: var(--color-text-muted);
+  font-style: italic;
 }
 
 .empty-chat {
