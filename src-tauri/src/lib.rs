@@ -820,14 +820,7 @@ fn import_cc_switch_profiles() -> Result<CcSwitchImportResult, String> {
         imported_count += 1;
     }
 
-    if imported_count == 0 {
-        return Err(if skipped_count > 0 {
-            "所有 CC Switch 配置均已存在，无需重复导入".to_string()
-        } else {
-            "没有可导入的有效 CC Switch 配置".to_string()
-        });
-    }
-
+    // 全部已存在 / 无新增不算失败，照常返回结果，由前端给出友好提示
     save_api_profiles_store(&store)?;
     Ok(CcSwitchImportResult {
         imported_count,

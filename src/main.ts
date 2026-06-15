@@ -2051,6 +2051,7 @@ async function openSettingsModal() {
         <aside class="settings-profiles">
           <div class="settings-profiles-header">
             <span>已保存配置</span>
+            <span class="settings-profiles-hint">左键查看 · 右键应用 / 删除</span>
           </div>
           <div class="settings-profile-list"></div>
         </aside>
@@ -2086,6 +2087,8 @@ async function openSettingsModal() {
           <button type="button" class="settings-import-cc-switch">从 CC Switch 导入</button>
         </div>
         <div class="settings-footer-actions">
+          <button type="button" class="settings-btn-secondary settings-apply-profile">应用</button>
+          <button type="button" class="settings-btn-secondary settings-close-footer">取消</button>
           <button type="button" class="settings-btn-primary save-only">保存</button>
         </div>
       </div>
@@ -2954,6 +2957,44 @@ async function openSettingsModal() {
     void saveApiProfile();
   });
 
+  overlay.querySelector('.settings-apply-profile')?.addEventListener('click', async () => {
+    const applyBtn = overlay.querySelector('.settings-apply-profile') as HTMLButtonElement | null;
+    const profileId = overlay.dataset.profileId || null;
+    if (!profileId) {
+      if (applyBtn) {
+        applyBtn.textContent = '请先选择配置';
+        window.setTimeout(() => {
+          if (applyBtn.textContent === '请先选择配置') applyBtn.textContent = '应用';
+        }, 1800);
+      }
+      return;
+    }
+    if (applyBtn) {
+      applyBtn.disabled = true;
+      applyBtn.textContent = '应用中...';
+    }
+    try {
+      await invoke('switch_api_profile', { profileId });
+      await refreshSettingsModal(overlay, profileId, handleProfileConfigLoaded);
+      if (livePathEl) {
+        const state = await invoke<ApiProfilesState>('get_api_profiles_state');
+        livePathEl.textContent = `配置文件：${state.current.configPath}`;
+      }
+      await loadChatModelOptions();
+      if (applyBtn) {
+        applyBtn.textContent = '已应用';
+        window.setTimeout(() => {
+          if (applyBtn.textContent === '已应用') applyBtn.textContent = '应用';
+        }, 1500);
+      }
+    } catch (e) {
+      alert('应用 API 配置失败: ' + String(e));
+      if (applyBtn) applyBtn.textContent = '应用';
+    } finally {
+      if (applyBtn) applyBtn.disabled = false;
+    }
+  });
+
   overlay.querySelector('.settings-add-profile')?.addEventListener('click', () => {
     fillSettingsForm(
       overlay,
@@ -2997,14 +3038,19 @@ async function openSettingsModal() {
         null;
       await refreshSettingsModal(overlay, selectedId, handleProfileConfigLoaded);
 
-      let message = `已从 CC Switch 导入 ${result.importedCount} 个配置`;
-      if (result.skippedCount > 0) {
-        message += `，跳过 ${result.skippedCount} 个重复或无效项`;
-        if (result.skippedNames.length > 0) {
-          message += `：${result.skippedNames.join('、')}`;
+      let message: string;
+      if (result.importedCount > 0) {
+        message = `已从 CC Switch 导入 ${result.importedCount} 个配置`;
+        if (result.skippedCount > 0) {
+          message += `，跳过 ${result.skippedCount} 个重复或无效项`;
+          if (result.skippedNames.length > 0) {
+            message += `：${result.skippedNames.join('、')}`;
+          }
         }
+        message += '。导入后不会自动切换生效配置。';
+      } else {
+        message = 'CC Switch 配置已全部添加，无需重复导入。';
       }
-      message += '。导入后不会自动切换生效配置。';
       alert(message);
     } catch (e) {
       alert('从 CC Switch 导入失败: ' + String(e));
