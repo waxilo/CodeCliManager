@@ -36,6 +36,8 @@ interface Conversation {
   source_path?: string | null;
   created_at: number;
   updated_at: number;
+  context_tokens?: number | null;
+  last_model?: string | null;
 }
 
 interface SessionErrorPayload {
@@ -52,6 +54,8 @@ interface SessionEventPayload {
   projectDir?: string | null;
   updated_at: number;
   updatedAt?: number;
+  context_tokens?: number | null;
+  last_model?: string | null;
 }
 
 interface PlatformConfig {
@@ -690,7 +694,12 @@ async function loadChatModelOptions(): Promise<void> {
         merged.push(modelId);
       }
     }
-    chatModelOptions = merged;
+    // 官方订阅模式（未配置第三方 API 且无模型列表）下，提供官方模型选项
+    if (merged.length === 0 && !config.baseUrl.trim()) {
+      chatModelOptions = ['default', 'opus', 'sonnet', 'haiku'];
+    } else {
+      chatModelOptions = merged;
+    }
   } catch {
     chatModelOptions = [];
   }
@@ -761,6 +770,8 @@ async function setupEventListeners() {
       project_dir: payload.project_dir,
       created_at: payload.updated_at,
       updated_at: payload.updated_at,
+      context_tokens: payload.context_tokens ?? null,
+      last_model: payload.last_model ?? null,
     });
 
     // 只在会话数据已包含用户消息时才清空 pendingUserMessage
@@ -803,6 +814,8 @@ async function setupEventListeners() {
       project_dir: payload.project_dir,
       created_at: payload.updated_at,
       updated_at: payload.updated_at,
+      context_tokens: payload.context_tokens ?? null,
+      last_model: payload.last_model ?? null,
     });
 
     clearStreamingState(payload.conversation_id);
@@ -812,6 +825,7 @@ async function setupEventListeners() {
     if (isViewingThis) {
       hideSendingState();
       refreshChatContent();
+      updateContextIndicator();
     } else {
       updateConversationListSpinner();
     }
@@ -1400,6 +1414,7 @@ function renderInputComposerHtml(): string {
           <div class="input-composer-toolbar-end">
             ${renderProjectDirToolbarHtml()}
             ${renderChatModelPickerHtml()}
+            ${renderContextIndicatorHtml()}
             ${renderSendButtonHtml()}
           </div>
         </div>
@@ -1463,6 +1478,8 @@ function normalizeSessionEventPayload(raw: SessionEventPayload): SessionEventPay
     messages: raw.messages,
     project_dir: projectDir?.trim() ? projectDir.trim() : null,
     updated_at: updatedAt,
+    context_tokens: raw.context_tokens ?? null,
+    last_model: raw.last_model ?? null,
   };
 }
 
@@ -1980,11 +1997,28 @@ function showProfileContextMenu(options: ProfileContextMenuOptions) {
 }
 
 function renderSettingsProfileList(profiles: ApiProfileItem[], selectedProfileId: string | null): string {
+  const officialActive = !profiles.some((p) => p.isActive);
+  const officialItem = `
+    <div
+      class="settings-profile-item settings-profile-official ${officialActive ? 'active' : ''}"
+      data-official="true"
+      role="button"
+      tabindex="0"
+      aria-label="使用官方默认（Claude 订阅）"
+    >
+      ${officialActive ? '<span class="settings-profile-badge">使用中</span>' : ''}
+      <div class="settings-profile-main">
+        <span class="settings-profile-name">官方默认</span>
+        <span class="settings-profile-meta">Claude 订阅 / 官方登录（清除自定义 API）</span>
+      </div>
+    </div>
+  `;
+
   if (profiles.length === 0) {
-    return '<div class="settings-profile-empty">暂无保存的配置</div>';
+    return officialItem;
   }
 
-  return profiles
+  return officialItem + profiles
     .map((profile) => {
       const isSelected = selectedProfileId === profile.id;
       const isActive = profile.isActive;
@@ -2838,8 +2872,27 @@ async function openSettingsModal() {
       }
     };
 
+    const applyOfficial = async () => {
+      try {
+        await invoke('use_official_api');
+        await refreshSettingsModal(overlay, null, handleProfileConfigLoaded);
+        if (livePathEl) {
+          const state = await invoke<ApiProfilesState>('get_api_profiles_state');
+          livePathEl.textContent = `配置文件：${state.current.configPath}`;
+        }
+        await loadChatModelOptions();
+      } catch (e) {
+        alert('切换到官方默认失败: ' + String(e));
+      }
+    };
+
     list.addEventListener('click', async (event) => {
       const target = event.target as HTMLElement;
+      if (target.closest('.settings-profile-official')) {
+        await applyOfficial();
+        return;
+      }
+
       const item = target.closest('.settings-profile-item') as HTMLElement | null;
       if (!item) return;
 
@@ -3218,6 +3271,57 @@ function renderMessageHtml(msg: Message): string {
   `;
 }
 
+function formatTokenCount(n: number): string {
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
+  if (n >= 1000) return Math.round(n / 1000) + 'K';
+  return String(n);
+}
+
+function getContextWindowFor(tokens: number): number {
+  // 用量超过 20 万即判定启用了 1M 上下文窗口，否则按标准 20 万
+  return tokens > 200_000 ? 1_000_000 : 200_000;
+}
+
+/** 右下角上下文环形指示器（参考 Claude 桌面端），悬停显示剩余空间 */
+function renderContextIndicatorInner(): string {
+  const conv = activeConversationId
+    ? conversations.find((c) => c.id === activeConversationId)
+    : undefined;
+  const tokens = conv?.context_tokens ?? 0;
+  if (!conv || tokens <= 0) return '';
+
+  const model = conv.last_model?.trim() || '';
+  const windowSize = getContextWindowFor(tokens);
+  const ratio = Math.min(1, tokens / windowSize);
+  const pct = Math.round(ratio * 100);
+  const remaining = Math.max(0, windowSize - tokens);
+  const circumference = 2 * Math.PI * 7;
+  const offset = circumference * (1 - ratio);
+  const level = pct >= 90 ? 'danger' : pct >= 75 ? 'warn' : 'ok';
+  const tip = `${model ? model + ' · ' : ''}上下文 ${formatTokenCount(tokens)} / ${formatTokenCount(windowSize)} · 剩余 ${formatTokenCount(remaining)}（已用 ${pct}%）`;
+
+  return `
+    <div class="context-indicator context-${level}" title="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}">
+      <svg class="context-ring" viewBox="0 0 18 18" width="16" height="16" aria-hidden="true">
+        <circle class="context-ring-bg" cx="9" cy="9" r="7" fill="none" stroke-width="2.5"></circle>
+        <circle class="context-ring-fg" cx="9" cy="9" r="7" fill="none" stroke-width="2.5"
+          stroke-dasharray="${circumference.toFixed(2)}" stroke-dashoffset="${offset.toFixed(2)}"
+          transform="rotate(-90 9 9)" stroke-linecap="round"></circle>
+      </svg>
+      <span class="context-indicator-pct">${pct}%</span>
+    </div>
+  `;
+}
+
+function renderContextIndicatorHtml(): string {
+  return `<div class="context-indicator-slot" id="context-indicator-slot">${renderContextIndicatorInner()}</div>`;
+}
+
+function updateContextIndicator(): void {
+  const slot = document.querySelector('#context-indicator-slot');
+  if (slot) slot.innerHTML = renderContextIndicatorInner();
+}
+
 function renderChatHeaderHtml(conversation: Conversation | undefined): string {
   const title = conversation?.title || 'New Chat';
   const platform = conversation?.platform || 'claude';
@@ -3306,8 +3410,10 @@ async function refreshModelInfo() {
     const profileName = activeProfile?.name || '';
     const baseUrl = activeProfile?.baseUrl || state.current?.baseUrl || '';
     // 当前模型与底部输入框保持一致：会话覆盖 → pending → 首个可用，再退回配置默认
+    // 'default' 表示订阅默认（非具体模型），按未指定处理，让卡片回到「官方默认」文案
+    const rawModel = getActiveChatModelForRender();
     const currentModel =
-      getActiveChatModelForRender() ||
+      (rawModel && rawModel !== 'default' ? rawModel : '') ||
       activeProfile?.defaultModel ||
       state.current?.defaultModel ||
       '';
@@ -3319,7 +3425,10 @@ async function refreshModelInfo() {
           ${profileName ? `<div class="model-info-row"><span class="model-info-key">配置方案</span><span class="model-info-value">${escapeHtml(profileName)}</span></div>` : ''}
           ${baseUrl ? `<div class="model-info-row"><span class="model-info-key">API 地址</span><span class="model-info-value model-info-url">${escapeHtml(baseUrl)}</span></div>` : ''}
         `
-      : `<div class="model-info-empty-text">尚未应用 API 配置，点击右上角「API 配置」选择并「应用」一套配置即可使用</div>`;
+      : `
+          <div class="model-info-row"><span class="model-info-key">当前模型</span><span class="model-info-value model-info-model">官方默认（Claude 订阅）</span></div>
+          <div class="model-info-empty-text">正在使用 Claude 官方登录 / 订阅。如需改用第三方 API，点击右上角「API 配置」选择并「应用」。</div>
+        `;
 
     container.innerHTML = `
       <div class="model-info-card">

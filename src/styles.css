@@ -752,6 +752,61 @@ body.is-sidebar-resizing {
   font-weight: 500;
 }
 
+/* 右下角上下文环形指示器 */
+.context-indicator-slot {
+  display: inline-flex;
+  align-items: center;
+}
+
+.context-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  cursor: default;
+  -webkit-app-region: no-drag;
+}
+
+.context-indicator:hover {
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+}
+
+.context-ring {
+  flex-shrink: 0;
+}
+
+.context-ring-bg {
+  stroke: var(--color-bg-surface-hover);
+}
+
+.context-ring-fg {
+  stroke: var(--color-accent, #4f8cff);
+  transition: stroke-dashoffset 0.3s ease;
+}
+
+.context-indicator-pct {
+  font-variant-numeric: tabular-nums;
+}
+
+.context-warn {
+  color: #e0a300;
+}
+.context-warn .context-ring-fg {
+  stroke: #e0a300;
+}
+
+.context-danger {
+  color: #e5484d;
+}
+.context-danger .context-ring-fg {
+  stroke: #e5484d;
+}
+
 .message-list {
   flex: 1;
   overflow-y: auto;
@@ -1081,7 +1136,7 @@ body.is-sidebar-resizing {
 
 .input-composer-toolbar-end {
   display: grid;
-  grid-template-columns: 118px 156px 36px;
+  grid-template-columns: 118px 156px auto 36px;
   column-gap: 6px;
   align-items: center;
   flex-shrink: 0;

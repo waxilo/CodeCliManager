@@ -155,6 +155,10 @@ struct Conversation {
     source_path: Option<String>,
     created_at: i64,
     updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_model: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -286,6 +290,16 @@ fn claude_api_key_from_env(env: &serde_json::Map<String, serde_json::Value>) -> 
         return auth_token;
     }
     env_string(env, "ANTHROPIC_API_KEY")
+}
+
+/// 是否配置了自定义 API（第三方中转）。官方订阅模式下 ANTHROPIC_BASE_URL 为空。
+fn has_custom_api_base() -> bool {
+    let settings = read_claude_settings_json();
+    settings
+        .get("env")
+        .and_then(|value| value.as_object())
+        .map(|env| !env_string(env, "ANTHROPIC_BASE_URL").is_empty())
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -565,6 +579,40 @@ fn switch_api_profile(profile_id: String) -> Result<ApiProfilesState, String> {
 
     apply_save_config_to_settings(&profile_to_save_config(&profile))?;
     store.active_profile_id = Some(profile_id);
+    save_api_profiles_store(&store)?;
+    Ok(build_api_profiles_state(&store))
+}
+
+/// 恢复官方默认：清除 settings.json 中自定义的 Anthropic API / 模型 env，
+/// 让 Claude Code 回退到官方订阅（OAuth 登录），并取消激活的自定义配置。
+#[tauri::command]
+fn use_official_api() -> Result<ApiProfilesState, String> {
+    const KEYS: &[&str] = &[
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+    ];
+
+    let mut settings = read_claude_settings_json();
+    if let Some(env) = settings
+        .get_mut("env")
+        .and_then(|value| value.as_object_mut())
+    {
+        for key in KEYS {
+            env.remove(*key);
+        }
+    }
+    write_claude_settings_json(&settings)?;
+
+    let mut store = load_api_profiles_store();
+    store.active_profile_id = None;
     save_api_profiles_store(&store)?;
     Ok(build_api_profiles_state(&store))
 }
@@ -1087,6 +1135,8 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     let mut updated_at: Option<i64> = None;
     let mut custom_title: Option<String> = None;
     let mut project_dir: Option<String> = None;
+    let mut last_context_tokens: Option<i64> = None;
+    let mut last_model: Option<String> = None;
 
     for line in content.lines() {
         if line.trim().is_empty() {
@@ -1154,6 +1204,23 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
         }
 
         let message = message.unwrap();
+
+        // 捕获最近一轮 assistant 的上下文用量与实际模型（用户消息无此字段，自动跳过）
+        if let Some(usage) = message.get("usage") {
+            let field = |k: &str| usage.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+            let ctx = field("input_tokens")
+                + field("cache_creation_input_tokens")
+                + field("cache_read_input_tokens");
+            if ctx > 0 {
+                last_context_tokens = Some(ctx);
+            }
+        }
+        if let Some(model) = message.get("model").and_then(|m| m.as_str()) {
+            if !model.trim().is_empty() {
+                last_model = Some(model.to_string());
+            }
+        }
+
         let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
         let (content, thinking) = extract_text_and_thinking(message.get("content"));
 
@@ -1221,6 +1288,8 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
         source_path: Some(path.to_string_lossy().to_string()),
         created_at: created_at.unwrap_or_default(),
         updated_at: updated_at.unwrap_or_default(),
+        context_tokens: last_context_tokens,
+        last_model,
     })
 }
 
@@ -1365,6 +1434,8 @@ fn get_default_state() -> AppState {
         source_path: None,
         created_at: two_hours_ago,
         updated_at: two_hours_ago + 1,
+        context_tokens: None,
+        last_model: None,
     });
     
     conversations.push(Conversation {
@@ -1391,6 +1462,8 @@ fn get_default_state() -> AppState {
         source_path: None,
         created_at: hour_ago,
         updated_at: hour_ago + 1,
+        context_tokens: None,
+        last_model: None,
     });
     
     conversations.push(Conversation {
@@ -1417,6 +1490,8 @@ fn get_default_state() -> AppState {
         source_path: None,
         created_at: now - 300,
         updated_at: now - 299,
+        context_tokens: None,
+        last_model: None,
     });
     
     AppState {
@@ -1461,6 +1536,10 @@ struct SessionEventPayload {
     messages: Vec<Message>,
     project_dir: Option<String>,
     updated_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    context_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_model: Option<String>,
 }
 
 /// 流式消息块，参考 claudecodeui 的 NormalizedMessage.kind
@@ -1918,8 +1997,11 @@ fn spawn_claude_stream(
         args.push("--resume".to_string());
         args.push(cid.clone());
     }
-    // 通过 --model 命令行参数确保模型覆盖生效
-    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+    // "default" 视为订阅默认（不显式指定模型）；其余通过原生 --model 传递
+    let effective_model = model
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && *value != "default");
+    if let Some(model) = effective_model {
         args.push("--model".to_string());
         args.push(model.to_string());
     }
@@ -1931,8 +2013,11 @@ fn spawn_claude_stream(
     let mut cmd = Command::new(&claude_bin);
     cmd.args(&args);
     apply_cli_runtime_env(&mut cmd);
-    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
-        apply_model_override_env(&mut cmd, model);
+    // env 覆盖仅用于第三方中转（强制各档模型一致）；官方订阅靠 --model，避免污染后台任务模型
+    if let Some(model) = effective_model {
+        if has_custom_api_base() {
+            apply_model_override_env(&mut cmd, model);
+        }
     }
     #[cfg(target_os = "windows")]
     {
@@ -2546,6 +2631,8 @@ fn update_conversation_title(
         source_path: session_path.map(|p| p.to_string_lossy().to_string()),
         created_at: chrono::Utc::now().timestamp(),
         updated_at: chrono::Utc::now().timestamp(),
+        context_tokens: None,
+        last_model: None,
     })
 }
 
@@ -2606,6 +2693,8 @@ async fn send_message(conversation_id: String, content: String) -> Result<Conver
             source_path: None,
             created_at: now,
             updated_at: now,
+            context_tokens: None,
+            last_model: None,
         };
         let id = new_conv.id.clone();
         state.conversations.push(new_conv);
@@ -2768,6 +2857,8 @@ async fn execute_prompt(
                                 messages: conv.messages.clone(),
                                 project_dir: conv.project_dir.clone(),
                                 updated_at: conv.updated_at,
+                                context_tokens: conv.context_tokens,
+                                last_model: conv.last_model.clone(),
                             };
                             eprintln!("[execute_prompt] emit {} for session {}", event_name, conv.id);
                             let _ = app.emit(event_name, &payload);
@@ -3181,6 +3272,7 @@ pub fn run() {
             get_api_profile_config,
             upsert_api_profile,
             switch_api_profile,
+            use_official_api,
             delete_api_profile,
             import_cc_switch_profiles,
             fetch_api_models,
