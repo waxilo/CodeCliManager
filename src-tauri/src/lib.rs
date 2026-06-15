@@ -2005,7 +2005,11 @@ fn spawn_claude_stream(
         args.push("--model".to_string());
         args.push(model.to_string());
     }
-    args.push(prompt.to_string());
+    // prompt 通过 stdin 传递，不作为命令行参数。
+    // Windows 上 claude.cmd 是批处理文件，通过 cmd.exe /c 执行，
+    // 如果 prompt 包含代码（引号、管道符、& 等特殊字符），
+    // cmd.exe 会解析这些字符导致 "batch file arguments are invalid" 错误。
+    // 使用 stdin 可以完全避免 shell 转义问题。
 
     let effective_cwd = project_dir.and_then(|cwd| resolve_or_create_dir(cwd));
 
@@ -2026,14 +2030,23 @@ fn spawn_claude_stream(
     if let Some(ref cwd) = effective_cwd {
         cmd.current_dir(cwd);
     }
-    cmd.stdin(Stdio::null())
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
-    eprintln!("[spawn_stream] {:?} {}", claude_bin, args.join(" "));
+    eprintln!("[spawn_stream] {:?} {} (prompt via stdin, {} bytes)", claude_bin, args.join(" "), prompt.len());
     eprintln!("[spawn_stream] cwd: {:?}", effective_cwd);
 
     let mut child = cmd.spawn()?;
+
+    // 通过 stdin 写入 prompt，然后立即关闭 stdin（Drop），告知 CLI 输入结束
+    if let Some(mut stdin) = child.stdin.take() {
+        use std::io::Write;
+        stdin.write_all(prompt.as_bytes()).ok();
+        stdin.flush().ok();
+        // stdin 在此 drop，子进程收到 EOF
+    }
+
     let stdout = child.stdout.take().expect("stdout should be piped");
     let stderr = child.stderr.take();
 
