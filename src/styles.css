@@ -1347,8 +1347,14 @@ body.is-sidebar-resizing {
 }
 
 .send-btn.is-loading {
-  opacity: 0.65;
-  cursor: wait;
+  opacity: 1;
+  cursor: pointer;
+  background: var(--color-danger, #e74c3c);
+  color: #fff;
+}
+
+.send-btn.is-loading:hover {
+  background: var(--color-danger-hover, #c0392b);
 }
 
 .empty-chat {

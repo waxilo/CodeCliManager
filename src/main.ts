@@ -703,7 +703,6 @@ async function setupEventListeners() {
   await listen<SessionEventPayload>('session-created', (event) => {
     const payload = normalizeSessionEventPayload(event.payload);
     activeConversationId = payload.conversation_id;
-    pendingUserMessage = null;
     transientSessionError = null;
 
     if (pendingSessionModel) {
@@ -722,6 +721,15 @@ async function setupEventListeners() {
       updated_at: payload.updated_at,
     });
 
+    // 只在会话数据已包含用户消息时才清空 pendingUserMessage，
+    // 否则保留以便 refreshChatContent 补充显示
+    // （Claude CLI 仅在完成响应后才写入会话文件，首条用户消息可能不在其中）
+    if (pendingUserMessage && payload.messages.some(
+      (m: Message) => m.role === 'user' && m.content === pendingUserMessage
+    )) {
+      pendingUserMessage = null;
+    }
+
     clearStreamingState(payload.conversation_id);
     hideSendingState();
 
@@ -733,7 +741,14 @@ async function setupEventListeners() {
   // 监听消息更新事件
   await listen<SessionEventPayload>('messages-updated', (event) => {
     const payload = normalizeSessionEventPayload(event.payload);
-    pendingUserMessage = null;
+    // 只在会话数据已包含用户消息时才清空 pendingUserMessage，
+    // 否则保留以便 refreshChatContent 补充显示
+    // （Claude CLI 仅在完成响应后才写入会话文件，首条用户消息可能不在其中）
+    if (pendingUserMessage && payload.messages.some(
+      (m: Message) => m.role === 'user' && m.content === pendingUserMessage
+    )) {
+      pendingUserMessage = null;
+    }
     transientSessionError = null;
 
     updateOrAddConversation({
@@ -797,6 +812,17 @@ async function setupEventListeners() {
       }
     });
   });
+
+  // ESC 键取消正在运行的任务（参考 claudecodeui）
+  document.addEventListener('keydown', (e: KeyboardEvent) => {
+    if (e.key === 'Escape' && !e.repeat) {
+      const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+      if (sendBtn?.dataset.loading === 'true') {
+        e.preventDefault();
+        void abortSession();
+      }
+    }
+  });
 }
 
 function getStreamingState(sessionId: string): StreamingState {
@@ -818,7 +844,6 @@ function handleMessageChunk(payload: MessageChunkPayload) {
 
   if (kind === 'session_created') {
     activeConversationId = sid;
-    pendingUserMessage = null;
     const now = Math.floor(Date.now() / 1000);
     const existing = conversations.find((c) => c.id === sid);
     updateOrAddConversation({
@@ -833,6 +858,7 @@ function handleMessageChunk(payload: MessageChunkPayload) {
       created_at: existing?.created_at ?? now,
       updated_at: now,
     });
+    // 此时尚无会话数据，保留 pendingUserMessage 以确保用户消息可见
     updateProjectDirControl();
     ensureChatViewVisible();
     return;
@@ -845,7 +871,8 @@ function handleMessageChunk(payload: MessageChunkPayload) {
 
   switch (kind) {
     case 'thinking_start':
-      state.thinking = '';
+      // 不清空已有思考内容——Claude 可能有多轮 thinking block，
+      // 每个 block 的 thinking_start 不应覆盖之前的累积文本
       state.thinkingDone = false;
       refreshStreamingUI(sid);
       break;
@@ -879,7 +906,9 @@ function handleMessageChunk(payload: MessageChunkPayload) {
     case 'complete':
       flushPendingTextDelta(sid);
       refreshStreamingUI(sid);
-      hideSendingState();
+      // 注意：不在这里调用 hideSendingState()
+      // 任务真正结束的信号是后端的 session-ended 事件，
+      // 它会确保 conversation 数据已加载完毕后再清理 UI 状态
       break;
     default:
       break;
@@ -978,7 +1007,8 @@ function refreshStreamingUI(sessionId: string) {
 
   const state = getStreamingState(sessionId);
 
-  if (state.thinking && !state.content) {
+  // 只要有思考内容就显示（不再受 state.content 限制）
+  if (state.thinking) {
     const thinkingEl = document.createElement('div');
     thinkingEl.id = 'streaming-thinking';
     thinkingEl.className = 'message assistant thinking-msg streaming';
@@ -1008,7 +1038,9 @@ function refreshStreamingUI(sessionId: string) {
     messageList.appendChild(answerEl);
   }
 
-  scrollMessageListToBottom();
+  if (isNearBottom()) {
+    scrollMessageListToBottom();
+  }
 }
 
 function scrollMessageListToBottom() {
@@ -1016,6 +1048,14 @@ function scrollMessageListToBottom() {
   if (messageList) {
     messageList.scrollTop = messageList.scrollHeight;
   }
+}
+
+/** 判断用户是否处于消息列表底部附近（阈值 80px），用于流式输出时的智能滚动 */
+function isNearBottom(): boolean {
+  const messageList = document.querySelector<HTMLDivElement>('#message-list');
+  if (!messageList) return true;
+  const threshold = 80;
+  return messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight < threshold;
 }
 
 function isNewChatSession(): boolean {
@@ -1067,8 +1107,15 @@ function setSendButtonLoading(loading: boolean) {
   }
   sendBtn.dataset.loading = loading ? 'true' : 'false';
   sendBtn.classList.toggle('is-loading', loading);
-  sendBtn.disabled = loading || !canSendMessage();
-  sendBtn.setAttribute('aria-label', loading ? '发送中' : '发送');
+  // loading 时按钮变为停止按钮，始终可点击；非 loading 时根据输入内容决定
+  sendBtn.disabled = loading ? false : !canSendMessage();
+  sendBtn.setAttribute('aria-label', loading ? '停止' : '发送');
+
+  // 切换图标
+  const sendIcon = sendBtn.querySelector('.send-icon') as SVGElement | null;
+  const stopIcon = sendBtn.querySelector('.stop-icon') as SVGElement | null;
+  if (sendIcon) sendIcon.style.display = loading ? 'none' : '';
+  if (stopIcon) stopIcon.style.display = loading ? '' : 'none';
 }
 
 function updateProjectDirControl() {
@@ -1198,9 +1245,12 @@ function renderSendButtonHtml(): string {
   const disabled = canSendMessage() ? '' : ' disabled';
   return `
     <button class="send-btn" id="send-btn" type="button" aria-label="发送"${disabled}>
-      <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <svg class="send-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M12 19V5"/>
         <path d="m5 12 7-7 7 7"/>
+      </svg>
+      <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true" style="display:none">
+        <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>
       </svg>
     </button>
   `;
@@ -1559,7 +1609,7 @@ function attachEventListeners() {
     textarea.addEventListener('input', updateSendButtonState);
   }
 
-  document.querySelector('#send-btn')?.addEventListener('click', sendMessage);
+  document.querySelector('#send-btn')?.addEventListener('click', handleSendButtonClick);
 
   const projectDirControl = document.querySelector('#project-dir-control');
   if (projectDirControl) {
@@ -2842,7 +2892,19 @@ async function openSettingsModal() {
 
 function filterVisibleMessages(messages: Message[]): Message[] {
   return messages.filter((msg, index) => {
+    // 过滤内部系统消息
+    const trimmed = msg.content.trim();
+    if (
+      trimmed.startsWith('<system-reminder>')
+      || trimmed.startsWith('<local-command-caveat>')
+      || trimmed.startsWith('<command-name>')
+      || trimmed.startsWith('<local-command-stdout>')
+    ) {
+      return false;
+    }
+
     if (msg.role !== 'thinking') return true;
+    // thinking 消息：如果后面紧跟有内容的 assistant 消息则去重隐藏
     for (let i = index + 1; i < messages.length; i++) {
       const next = messages[i];
       if (next.role === 'thinking') continue;
@@ -3055,6 +3117,33 @@ async function sendMessage() {
     alert('Failed to send message: ' + String(e));
     pendingUserMessage = null;
     hideSendingState();
+  }
+}
+
+async function abortSession() {
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+  if (!sendBtn || sendBtn.dataset.loading !== 'true') return;
+
+  try {
+    const args: Record<string, string> = {};
+    if (activeConversationId) {
+      args.conversationId = activeConversationId;
+    }
+    await invoke('abort_session', args);
+    // abort 后的清理由 session-ended 事件处理
+  } catch (e) {
+    console.error('Failed to abort session:', e);
+  }
+}
+
+function handleSendButtonClick() {
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+  if (!sendBtn) return;
+
+  if (sendBtn.dataset.loading === 'true') {
+    void abortSession();
+  } else {
+    void sendMessage();
   }
 }
 
