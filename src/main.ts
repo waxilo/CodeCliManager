@@ -656,6 +656,9 @@ async function applyChatModelSelection(model: string): Promise<void> {
 
   applySessionModelSelection(trimmed);
   updateChatModelPicker();
+  if (!activeConversationId) {
+    void refreshModelInfo();
+  }
 }
 
 async function loadChatModelOptions(): Promise<void> {
@@ -3239,29 +3242,37 @@ async function refreshModelInfo() {
   try {
     const state = await invoke<ApiProfilesState>('get_api_profiles_state');
     const activeProfile = state.profiles.find((p) => p.id === state.activeProfileId);
-    const modelName = activeProfile?.defaultModel || state.current?.defaultModel || '';
     const profileName = activeProfile?.name || '';
     const baseUrl = activeProfile?.baseUrl || state.current?.baseUrl || '';
+    // 当前模型与底部输入框保持一致：会话覆盖 → pending → 首个可用，再退回配置默认
+    const currentModel =
+      getActiveChatModelForRender() ||
+      activeProfile?.defaultModel ||
+      state.current?.defaultModel ||
+      '';
 
-    if (modelName || profileName) {
-      container.innerHTML = `
-        <div class="model-info-card">
-          <div class="model-info-header">
-            <svg class="model-info-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-              <path d="M2 17l10 5 10-5"/>
-              <path d="M2 12l10 5 10-5"/>
-            </svg>
-            <span class="model-info-label">当前模型配置</span>
-          </div>
-          <div class="model-info-body">
-            ${profileName ? `<div class="model-info-row"><span class="model-info-key">配置方案</span><span class="model-info-value">${escapeHtml(profileName)}</span></div>` : ''}
-            ${baseUrl ? `<div class="model-info-row"><span class="model-info-key">API 地址</span><span class="model-info-value model-info-url">${escapeHtml(baseUrl)}</span></div>` : ''}
-            ${modelName ? `<div class="model-info-row"><span class="model-info-key">默认模型</span><span class="model-info-value model-info-model">${escapeHtml(modelName)}</span></div>` : ''}
-          </div>
+    const hasInfo = Boolean(currentModel || profileName || baseUrl);
+    const body = hasInfo
+      ? `
+          <div class="model-info-row"><span class="model-info-key">当前模型</span><span class="model-info-value model-info-model">${escapeHtml(currentModel || '未配置模型')}</span></div>
+          ${profileName ? `<div class="model-info-row"><span class="model-info-key">配置方案</span><span class="model-info-value">${escapeHtml(profileName)}</span></div>` : ''}
+          ${baseUrl ? `<div class="model-info-row"><span class="model-info-key">API 地址</span><span class="model-info-value model-info-url">${escapeHtml(baseUrl)}</span></div>` : ''}
+        `
+      : `<div class="model-info-empty-text">尚未应用 API 配置，点击右上角「API 配置」选择并「应用」一套配置即可使用</div>`;
+
+    container.innerHTML = `
+      <div class="model-info-card">
+        <div class="model-info-header">
+          <svg class="model-info-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+            <path d="M2 17l10 5 10-5"/>
+            <path d="M2 12l10 5 10-5"/>
+          </svg>
+          <span class="model-info-label">当前模型配置</span>
         </div>
-      `;
-    }
+        <div class="model-info-body">${body}</div>
+      </div>
+    `;
   } catch {
     // 静默处理错误，不阻塞页面渲染
   }

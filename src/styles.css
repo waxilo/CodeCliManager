@@ -1555,6 +1555,12 @@ body.is-sidebar-resizing {
   gap: 12px;
 }
 
+.model-info-empty-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text-muted);
+}
+
 .model-info-key {
   font-size: 13px;
   color: var(--color-text-muted);
