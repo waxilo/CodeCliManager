@@ -142,6 +142,8 @@ let activeConversationId = '';
 let editingConversationId: string | null = null;
 let currentTime = new Date();
 let pendingUserMessage: string | null = null;
+/** pendingUserMessage 所属的会话 ID（确保消息不串会话） */
+let pendingUserMessageConvId: string | null = null;
 let transientSessionError: string | null = null;
 let chatModelOptions: string[] = [];
 let conversationModels: Record<string, string> = loadConversationModels();
@@ -782,10 +784,12 @@ async function setupEventListeners() {
     });
 
     // 只在会话数据已包含用户消息时才清空 pendingUserMessage
-    if (pendingUserMessage && payload.messages.some(
+    // 同时确保只清除属于当前会话的 pending 消息（防止串会话）
+    if (pendingUserMessage && pendingUserMessageConvId === payload.conversation_id && payload.messages.some(
       (m: Message) => m.role === 'user' && m.content === pendingUserMessage
     )) {
       pendingUserMessage = null;
+      pendingUserMessageConvId = null;
     }
 
     clearStreamingState(payload.conversation_id);
@@ -806,10 +810,12 @@ async function setupEventListeners() {
     // 只在会话数据已包含用户消息时才清空 pendingUserMessage，
     // 否则保留以便 refreshChatContent 补充显示
     // （Claude CLI 仅在完成响应后才写入会话文件，首条用户消息可能不在其中）
-    if (pendingUserMessage && payload.messages.some(
+    // 同时确保只清除属于当前会话的 pending 消息（防止串会话）
+    if (pendingUserMessage && pendingUserMessageConvId === payload.conversation_id && payload.messages.some(
       (m: Message) => m.role === 'user' && m.content === pendingUserMessage
     )) {
       pendingUserMessage = null;
+      pendingUserMessageConvId = null;
     }
     transientSessionError = null;
 
@@ -862,6 +868,7 @@ async function setupEventListeners() {
     if (isCurrentSession) {
       hideSendingState();
       pendingUserMessage = null;
+      pendingUserMessageConvId = null;
     }
 
     const preservedErrors = conversations.flatMap((conversation) =>
@@ -931,11 +938,14 @@ function handleMessageChunk(payload: MessageChunkPayload) {
     }
     const now = Math.floor(Date.now() / 1000);
     const existing = conversations.find((c) => c.id === sid);
+    // 只有当 pendingUserMessage 属于此会话时才使用（防止串会话）
+    const pendingMatchesThisSession = pendingUserMessage &&
+      (!pendingUserMessageConvId || pendingUserMessageConvId === sid);
     updateOrAddConversation({
       id: sid,
       title: existing?.title || 'New Chat',
-      messages: existing?.messages ?? (pendingUserMessage
-        ? [{ id: `user-${Date.now()}`, role: 'user', content: pendingUserMessage, timestamp: now }]
+      messages: existing?.messages ?? (pendingMatchesThisSession
+        ? [{ id: `user-${Date.now()}`, role: 'user', content: pendingUserMessage!, timestamp: now }]
         : []),
       platform: 'claude',
       project_dir: content?.trim() || existing?.project_dir || null,
@@ -948,7 +958,8 @@ function handleMessageChunk(payload: MessageChunkPayload) {
     ensureChatViewVisible();
     updateConversationListSpinner();
     // ensureChatViewVisible 可能调用了 render()，需要恢复按钮 loading 状态
-    if (sid === activeConversationId || (!activeConversationId && pendingUserMessage)) {
+    // 只有当 pending 消息属于此会话时才设置 loading（防止串会话）
+    if (sid === activeConversationId || (!activeConversationId && pendingUserMessage && !pendingUserMessageConvId)) {
       setSendButtonLoading(true);
     }
     return;
@@ -956,7 +967,7 @@ function handleMessageChunk(payload: MessageChunkPayload) {
 
   // 所有会话都累积流式数据（包括后台运行的会话）
   const state = getStreamingState(sid);
-  const isActive = sid === activeConversationId || (!activeConversationId && pendingUserMessage);
+  const isActive = sid === activeConversationId || (!activeConversationId && pendingUserMessage && !pendingUserMessageConvId);
 
   switch (kind) {
     case 'thinking_start':
@@ -1059,6 +1070,7 @@ function handleSessionError(payload: SessionErrorPayload) {
     }
     activeConversationId = sid;
     pendingUserMessage = null;
+    pendingUserMessageConvId = null;
   } else {
     transientSessionError = errorText;
   }
@@ -1083,7 +1095,8 @@ function removeStreamingElements() {
 }
 
 function refreshStreamingUI(sessionId: string) {
-  if (sessionId !== activeConversationId && !(pendingUserMessage && !activeConversationId)) return;
+  // 只有当 sessionId 匹配当前会话，或者是新聊天场景（无 activeConversationId 且 pending 消息属于无会话状态）时才更新
+  if (sessionId !== activeConversationId && !(pendingUserMessage && !activeConversationId && !pendingUserMessageConvId)) return;
 
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   if (!messageList) return;
@@ -3595,7 +3608,10 @@ function renderChatContent(): string {
     : undefined;
 
   const messages = [...(conversation?.messages ?? [])];
-  if (pendingUserMessage && !messages.some((m) => m.role === 'user' && m.content === pendingUserMessage)) {
+  // 只有当 pendingUserMessage 属于当前会话时才显示（防止串会话）
+  const pendingBelongsToThisConv = pendingUserMessage &&
+    (pendingUserMessageConvId === activeConversationId || (!pendingUserMessageConvId && !activeConversationId));
+  if (pendingBelongsToThisConv && pendingUserMessage && !messages.some((m) => m.role === 'user' && m.content === pendingUserMessage)) {
     messages.push({
       id: `pending-user-${Date.now()}`,
       role: 'user',
@@ -3683,6 +3699,7 @@ function newChat() {
   activeConversationId = '';
   invalidateFileCache();
   pendingUserMessage = null;
+  pendingUserMessageConvId = null;
   transientSessionError = null;
   pendingSessionModel = null;
   pendingProjectDir = null;
@@ -3788,6 +3805,7 @@ async function sendMessage() {
     console.error('Failed to send message:', e);
     alert('Failed to send message: ' + String(e));
     pendingUserMessage = null;
+    pendingUserMessageConvId = null;
     runningSessions.delete(activeConversationId || 'pending');
     hideSendingState();
     updateConversationListSpinner();
@@ -3919,7 +3937,10 @@ function refreshChatContent() {
   updateProjectDirControl();
   if (messageList) {
     const messages = [...(conversation?.messages ?? [])];
-    if (pendingUserMessage && !messages.some((m) => m.role === 'user' && m.content === pendingUserMessage)) {
+    // 只有当 pendingUserMessage 属于当前会话时才显示（防止串会话）
+    const pendingBelongsToThisConv = pendingUserMessage &&
+      (pendingUserMessageConvId === activeConversationId || (!pendingUserMessageConvId && !activeConversationId));
+    if (pendingBelongsToThisConv && pendingUserMessage && !messages.some((m) => m.role === 'user' && m.content === pendingUserMessage)) {
       messages.push({
         id: `pending-user-${Date.now()}`,
         role: 'user',
@@ -4034,6 +4055,7 @@ async function deleteConversation(id: string) {
 
     clearStreamingState(id);
     pendingUserMessage = null;
+    pendingUserMessageConvId = null;
     removeConversationModel(id);
     conversations = conversations.filter((c) => c.id !== id);
 
