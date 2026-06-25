@@ -2788,8 +2788,8 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
         for entry in entries.flatten() {
             let path = entry.path();
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            // 跳过隐藏文件和常见忽略目录
-            if file_name.starts_with('.') {
+            // 跳过隐藏文件和常见忽略目录（.imports 除外，它是导入文件存放目录）
+            if file_name.starts_with('.') && file_name != ".imports" {
                 continue;
             }
             if file_name == "node_modules" || file_name == "target" || file_name == "dist"
@@ -2860,6 +2860,95 @@ fn read_file_base64(file_path: String) -> Result<String, String> {
     }
     let bytes = fs::read(path).map_err(|e| format!("读取文件失败: {}", e))?;
     Ok(STANDARD.encode(&bytes))
+}
+
+/// 递归复制目录
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
+    if !src.is_dir() {
+        return Err(format!("源路径不是目录: {}", src.display()));
+    }
+    fs::create_dir_all(dst).map_err(|e| format!("创建目录失败: {}", e))?;
+    for entry in fs::read_dir(src).map_err(|e| format!("读取目录失败: {}", e))? {
+        let entry = entry.map_err(|e| format!("读取目录项失败: {}", e))?;
+        let entry_path = entry.path();
+        let dest_path = dst.join(entry.file_name());
+        if entry_path.is_dir() {
+            copy_dir_recursive(&entry_path, &dest_path)?;
+        } else {
+            fs::copy(&entry_path, &dest_path)
+                .map_err(|e| format!("复制文件失败 '{}': {}", entry_path.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+/// 处理同名冲突：如果目标已存在，追加 _1, _2 ... 后缀
+fn resolve_name_conflict(dest: &Path) -> PathBuf {
+    if !dest.exists() {
+        return dest.to_path_buf();
+    }
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    let stem = dest
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let ext = dest
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    let mut counter = 1u32;
+    loop {
+        let candidate = parent.join(format!("{}_{}{}", stem, counter, ext));
+        if !candidate.exists() {
+            return candidate;
+        }
+        counter += 1;
+    }
+}
+
+/// 将项目外部的文件或文件夹复制到 <projectDir>/.imports/ 目录下
+#[derive(Serialize)]
+struct ImportResult {
+    relative_path: String,
+    is_dir: bool,
+}
+
+#[tauri::command]
+fn import_external_path(source: String, project_dir: String) -> Result<ImportResult, String> {
+    let imports_dir = PathBuf::from(&project_dir).join(".imports");
+    fs::create_dir_all(&imports_dir)
+        .map_err(|e| format!("创建 .imports 目录失败: {}", e))?;
+
+    let source_path = PathBuf::from(&source);
+    if !source_path.exists() {
+        return Err(format!("源路径不存在: {}", source));
+    }
+
+    let is_dir = source_path.is_dir();
+    let file_name = source_path
+        .file_name()
+        .ok_or_else(|| format!("无法获取文件名: {}", source))?
+        .to_string_lossy();
+    let raw_dest = imports_dir.join(file_name.as_ref());
+    let dest = resolve_name_conflict(&raw_dest);
+
+    if is_dir {
+        copy_dir_recursive(&source_path, &dest)?;
+    } else {
+        fs::copy(&source_path, &dest)
+            .map_err(|e| format!("复制文件失败: {}", e))?;
+    }
+
+    let relative = format!(
+        ".imports/{}",
+        dest.file_name().unwrap().to_string_lossy()
+    );
+    eprintln!(
+        "[import_external_path] imported '{}' -> '{}' (is_dir={})",
+        source, relative, is_dir
+    );
+    Ok(ImportResult { relative_path: relative, is_dir })
 }
 
 #[tauri::command]
@@ -3384,6 +3473,7 @@ pub fn run() {
             read_file_content,
             write_file_bytes,
             read_file_base64,
+            import_external_path,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")

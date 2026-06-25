@@ -1150,6 +1150,18 @@ body.is-sidebar-resizing {
 .input-composer-toolbar-start {
   min-width: 0;
   flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.import-btn {
+  opacity: 0.55;
+  transition: opacity 0.2s, background 0.2s, color 0.2s;
+}
+
+.import-btn:hover {
+  opacity: 1;
 }
 
 .input-composer-toolbar-end {
@@ -2992,7 +3004,7 @@ body.drag-over::after {
 }
 
 body.drag-over::before {
-  content: '释放文件以引用';
+  content: '释放文件以引用或导入';
   position: fixed;
   top: 50%;
   left: 50%;

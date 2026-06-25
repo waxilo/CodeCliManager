@@ -3,6 +3,12 @@ import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { renderMarkdown as _renderMarkdown } from './markdown';
 
+/** 后端 import_external_path 返回值 */
+interface ImportResult {
+  relative_path: string;
+  is_dir: boolean;
+}
+
 // Markdown 渲染缓存：避免对相同内容重复调用 marked.parse + DOMPurify
 const _mdCache = new Map<string, string>();
 const _MD_CACHE_MAX = 3000;
@@ -1444,7 +1450,33 @@ function renderInputComposerHtml(): string {
         ></textarea>
         <div id="file-suggestions" class="file-suggestions" style="display:none"></div>
         <div class="input-composer-toolbar">
-          <div class="input-composer-toolbar-start"></div>
+          <div class="input-composer-toolbar-start">
+            <button
+              id="btn-import-file"
+              class="toolbar-icon-btn import-btn"
+              type="button"
+              title="导入外部文件"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="12" y1="18" x2="12" y2="12"/>
+                <line x1="9" y1="15" x2="15" y2="15"/>
+              </svg>
+            </button>
+            <button
+              id="btn-import-folder"
+              class="toolbar-icon-btn import-btn"
+              type="button"
+              title="导入外部文件夹"
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                <line x1="12" y1="11" x2="12" y2="17"/>
+                <line x1="9" y1="14" x2="15" y2="14"/>
+              </svg>
+            </button>
+          </div>
           <div class="input-composer-toolbar-end">
             ${renderProjectDirToolbarHtml()}
             ${renderChatModelPickerHtml()}
@@ -1859,6 +1891,14 @@ function attachEventListeners() {
 
   // 拖拽文件自动引用
   bindDragDropFileRefs();
+
+  // 导入外部文件/文件夹按钮
+  document.querySelector('#btn-import-file')?.addEventListener('click', () => {
+    void handleImportExternalFile();
+  });
+  document.querySelector('#btn-import-folder')?.addEventListener('click', () => {
+    void handleImportExternalFolder();
+  });
 
   // 图片引用芯片点击大图预览（事件委托）
   document.querySelector('#message-list')?.addEventListener('click', (e) => {
@@ -4468,6 +4508,94 @@ function handleFileSuggestionKeydown(e: KeyboardEvent) {
   }
 }
 
+// ── 导入外部文件/文件夹 ─────────────────────────────────────────────
+async function handleImportExternalFile(): Promise<void> {
+  const projectDir = getEffectiveProjectDir();
+  if (!projectDir) {
+    showCopyToastMsg('请先选择工作目录');
+    return;
+  }
+
+  const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
+  if (!textarea) return;
+
+  try {
+    const selected = await open({
+      directory: false,
+      multiple: true,
+      title: '选择要导入的文件',
+    });
+    if (!selected) return;
+
+    const paths = Array.isArray(selected) ? selected : [selected];
+    const importedRefs: string[] = [];
+
+    for (const filePath of paths) {
+      try {
+        const result = await invoke<ImportResult>('import_external_path', {
+          source: filePath,
+          projectDir,
+        });
+        const ref = result.is_dir ? `${result.relative_path}/` : result.relative_path;
+        importedRefs.push(ref);
+      } catch (err) {
+        console.error('[import] 导入文件失败:', filePath, err);
+      }
+    }
+
+    if (importedRefs.length > 0) {
+      const currentValue = textarea.value.trimEnd();
+      const refStr = importedRefs.map((r) => `@${r}`).join(' ');
+      textarea.value = currentValue ? `${currentValue} ${refStr} ` : `${refStr} `;
+      textarea.focus();
+      const newPos = textarea.value.length;
+      textarea.setSelectionRange(newPos, newPos);
+      updateSendButtonState();
+      showCopyToastMsg(`已导入 ${importedRefs.length} 个文件`);
+    }
+  } catch (err) {
+    console.error('[import] 选择文件失败:', err);
+  }
+}
+
+async function handleImportExternalFolder(): Promise<void> {
+  const projectDir = getEffectiveProjectDir();
+  if (!projectDir) {
+    showCopyToastMsg('请先选择工作目录');
+    return;
+  }
+
+  const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
+  if (!textarea) return;
+
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: '选择要导入的文件夹',
+    });
+    if (!selected || typeof selected !== 'string') return;
+
+    const result = await invoke<ImportResult>('import_external_path', {
+      source: selected,
+      projectDir,
+    });
+
+    // 文件夹引用追加 / 后缀
+    const ref = `${result.relative_path}/`;
+    const currentValue = textarea.value.trimEnd();
+    textarea.value = currentValue ? `${currentValue} @${ref} ` : `@${ref} `;
+    textarea.focus();
+    const newPos = textarea.value.length;
+    textarea.setSelectionRange(newPos, newPos);
+    updateSendButtonState();
+    showCopyToastMsg('已导入文件夹');
+  } catch (err) {
+    console.error('[import] 导入文件夹失败:', err);
+    showCopyToastMsg('导入文件夹失败');
+  }
+}
+
 // ── 拖拽文件自动引用 ────────────────────────────────────────────────
 let _dragCounter = 0;
 
@@ -4521,8 +4649,13 @@ function bindDragDropFileRefs() {
     if (!textarea) return;
 
     const insertedRefs: string[] = [];
+    const importedRefs: string[] = [];
+
     for (let i = 0; i < files.length; i++) {
       const fileName = files[i].name;
+      // 获取文件完整路径（Tauri WebView 会暴露 path 属性）
+      const fullPath = (files[i] as any).path as string | undefined;
+
       // 按文件名精确匹配项目文件列表
       const matches = projectFiles.filter((f) => {
         const parts = f.split('/');
@@ -4540,19 +4673,45 @@ function bindDragDropFileRefs() {
         if (!insertedRefs.includes(shortest)) {
           insertedRefs.push(shortest);
         }
+      } else if (fullPath) {
+        // 不在项目文件列表中 — 检查是否是项目外的路径
+        const normalizedPath = fullPath.split('\\').join('/');
+        const normalizedProjectDir = projectDir.split('\\').join('/');
+        const isInsideProject = normalizedPath.startsWith(normalizedProjectDir);
+
+        if (!isInsideProject) {
+          // 外部文件/文件夹，复制到 .imports/
+          try {
+            const result = await invoke<ImportResult>(
+              'import_external_path',
+              { source: fullPath, projectDir }
+            );
+            // 后端返回 is_dir，可靠判断是否为文件夹
+            const ref = result.is_dir
+              ? `${result.relative_path}/`
+              : result.relative_path;
+            importedRefs.push(ref);
+          } catch (err) {
+            console.error('[drop] 导入外部文件失败:', err);
+          }
+        }
       }
-      // 不在项目文件列表中则忽略
     }
 
-    if (insertedRefs.length > 0) {
+    const allRefs = [...insertedRefs, ...importedRefs];
+    if (allRefs.length > 0) {
       const currentValue = textarea.value.trimEnd();
-      const refStr = insertedRefs.map((r) => `@${r}`).join(' ');
+      const refStr = allRefs.map((r) => `@${r}`).join(' ');
       textarea.value = currentValue ? `${currentValue} ${refStr} ` : `${refStr} `;
       textarea.focus();
       const newCursorPos = textarea.value.length;
       textarea.setSelectionRange(newCursorPos, newCursorPos);
       updateSendButtonState();
-      showCopyToastMsg(`已引用 ${insertedRefs.length} 个文件`);
+      if (importedRefs.length > 0) {
+        showCopyToastMsg(`已导入 ${importedRefs.length} 个外部文件/文件夹`);
+      } else {
+        showCopyToastMsg(`已引用 ${insertedRefs.length} 个文件`);
+      }
     }
   });
 }
