@@ -1989,9 +1989,17 @@ fn spawn_claude_stream(
     conversation_id: Option<&String>,
     project_dir: Option<&String>,
     model: Option<&str>,
+    // 斜杠命令（如 /compact）必须通过 streaming input 模式发送，
+    // 否则在 -p 单次模式下会被当作纯文本，不会真正执行。
+    streaming_input: bool,
 ) -> std::io::Result<StreamOutcome> {
     const REQUEST_TIMEOUT: Duration = Duration::from_secs(7200); // 2 小时（Claude Code 复杂任务可能非常久，参考 claudecodeui 不设总超时）
-    const IDLE_TIMEOUT: Duration = Duration::from_secs(600);      // 10 分钟（工具执行期间可能长时间无输出）
+    // 斜杠命令通常很快返回，单独用较短的空闲超时，避免无输出时长时间卡住。
+    let idle_timeout = if streaming_input {
+        Duration::from_secs(120)
+    } else {
+        Duration::from_secs(600) // 10 分钟（工具执行期间可能长时间无输出）
+    };
 
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
@@ -2004,6 +2012,12 @@ fn spawn_claude_stream(
         "--include-partial-messages".to_string(),
         "--dangerously-skip-permissions".to_string(),
     ];
+
+    // streaming input 模式：通过 stdin 发送 JSON 消息流（--input-format 仅在 --print 下生效）
+    if streaming_input {
+        args.push("--input-format".to_string());
+        args.push("stream-json".to_string());
+    }
 
     if let Some(cid) = conversation_id.filter(|c| !c.is_empty()) {
         args.push("--resume".to_string());
@@ -2051,10 +2065,21 @@ fn spawn_claude_stream(
 
     let mut child = cmd.spawn()?;
 
-    // 通过 stdin 写入 prompt，然后立即关闭 stdin（Drop），告知 CLI 输入结束
+    // 通过 stdin 写入输入，然后关闭 stdin（Drop），告知 CLI 输入结束
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        stdin.write_all(prompt.as_bytes()).ok();
+        if streaming_input {
+            // streaming input 模式：写入一行 NDJSON 用户消息，让 CLI 解析斜杠命令
+            let msg = serde_json::json!({
+                "type": "user",
+                "message": { "role": "user", "content": prompt },
+            });
+            let line = serde_json::to_string(&msg).unwrap_or_default();
+            stdin.write_all(line.as_bytes()).ok();
+            stdin.write_all(b"\n").ok();
+        } else {
+            stdin.write_all(prompt.as_bytes()).ok();
+        }
         stdin.flush().ok();
         // stdin 在此 drop，子进程收到 EOF
     }
@@ -2162,7 +2187,7 @@ fn spawn_claude_stream(
 
                 let elapsed = started.elapsed();
                 let idle = last_activity.elapsed();
-                if elapsed >= REQUEST_TIMEOUT || idle >= IDLE_TIMEOUT {
+                if elapsed >= REQUEST_TIMEOUT || idle >= idle_timeout {
                     if let Ok(mut c) = child_arc.lock() { kill_process_tree(&mut c); }
                     let timeout_msg = if elapsed >= REQUEST_TIMEOUT {
                         format!(
@@ -2172,7 +2197,7 @@ fn spawn_claude_stream(
                     } else {
                         format!(
                             "请求超时：{} 秒内未收到任何响应，请检查 API 地址、密钥和网络连接",
-                            IDLE_TIMEOUT.as_secs()
+                            idle_timeout.as_secs()
                         )
                     };
                     emit_session_error(
@@ -2958,13 +2983,16 @@ async fn execute_prompt(
     conversation_id: Option<String>,
     model: Option<String>,
     project_dir: Option<String>,
+    // 是否使用 streaming input 模式（斜杠命令如 /compact 需要）
+    streaming_input: Option<bool>,
 ) -> Result<(), String> {
     let active_cid = conversation_id.clone();
     let active_model = model.filter(|value| !value.trim().is_empty());
     let explicit_project_dir = project_dir.filter(|value| !value.trim().is_empty());
+    let use_streaming_input = streaming_input.unwrap_or(false);
     eprintln!(
-        "[execute_prompt] received: prompt='{}', conversation_id={:?}, model={:?}, project_dir={:?}",
-        prompt, active_cid, active_model, explicit_project_dir
+        "[execute_prompt] received: prompt='{}', conversation_id={:?}, model={:?}, project_dir={:?}, streaming_input={}",
+        prompt, active_cid, active_model, explicit_project_dir, use_streaming_input
     );
 
     tauri::async_runtime::spawn(async move {
@@ -3018,6 +3046,7 @@ async fn execute_prompt(
                 cid_clone.as_ref(),
                 project_dir.as_ref(),
                 model_clone.as_deref(),
+                use_streaming_input,
             )
         })
         .await;

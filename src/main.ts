@@ -1283,12 +1283,12 @@ function updateProjectDirControl() {
   control.dataset.empty = dir ? 'false' : 'true';
   control.disabled = !canPick && !dir;
   control.classList.toggle('is-readonly', !canPick && Boolean(dir));
-  control.classList.toggle('is-copyable', Boolean(dir) && !canPick);
+  control.classList.toggle('is-openable', Boolean(dir) && !canPick);
 
   control.querySelector('.project-dir-toolbar-chevron')?.remove();
-  control.querySelector('.project-dir-toolbar-copy')?.remove();
+  control.querySelector('.project-dir-toolbar-open')?.remove();
   if (dir && !canPick) {
-    control.insertAdjacentHTML('beforeend', renderProjectDirCopyIconHtml().trim());
+    control.insertAdjacentHTML('beforeend', renderProjectDirOpenIconHtml().trim());
   } else if (canPick) {
     control.insertAdjacentHTML(
       'beforeend',
@@ -1327,7 +1327,7 @@ function getProjectDirHoverTitle(dir: string, canPick = canPickProjectDirectory(
   if (canPick) {
     return `工作目录: ${trimmed}（点击更换）`;
   }
-  return `工作目录: ${trimmed}（点击复制）`;
+  return `工作目录: ${trimmed}（点击打开）`;
 }
 
 function renderCopyIconHtml(className = 'toolbar-copy-icon'): string {
@@ -1341,8 +1341,16 @@ function renderCopyIconHtml(className = 'toolbar-copy-icon'): string {
   `;
 }
 
-function renderProjectDirCopyIconHtml(): string {
-  return renderCopyIconHtml('project-dir-toolbar-copy');
+function renderProjectDirOpenIconHtml(): string {
+  return `
+    <span class="project-dir-toolbar-open" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
+        <polyline points="15 3 21 3 21 9"/>
+        <line x1="10" y1="14" x2="21" y2="3"/>
+      </svg>
+    </span>
+  `;
 }
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
@@ -1369,9 +1377,16 @@ function handleProjectDirClick() {
   }
   const dir = getEffectiveProjectDir().trim();
   if (dir) {
-    copyTextToClipboard(dir).then((ok) => {
-      if (ok) showCopyToast();
-    });
+    void openPathInFileManager(dir);
+  }
+}
+
+async function openPathInFileManager(path: string): Promise<void> {
+  try {
+    await invoke('plugin:opener|open_path', { path });
+  } catch (e) {
+    console.error('[opener] 打开路径失败:', path, e);
+    showCopyToastMsg('打开失败');
   }
 }
 
@@ -1419,7 +1434,7 @@ function renderProjectDirToolbarHtml(): string {
   return `
     <button
       type="button"
-      class="project-dir-toolbar ${canPick ? '' : 'is-readonly'}${dir && !canPick ? ' is-copyable' : ''}"
+      class="project-dir-toolbar ${canPick ? '' : 'is-readonly'}${dir && !canPick ? ' is-openable' : ''}"
       id="project-dir-control"
       data-empty="${dir ? 'false' : 'true'}"
       title="${escapeHtml(title)}"
@@ -1432,7 +1447,7 @@ function renderProjectDirToolbarHtml(): string {
         </svg>
       </span>
       <span class="project-dir-toolbar-label project-dir-label" title="${escapeHtml(title)}">${escapeHtml(label)}</span>
-      ${dir && !canPick ? renderProjectDirCopyIconHtml() : canPick ? '<span class="project-dir-toolbar-chevron" aria-hidden="true">▾</span>' : ''}
+      ${dir && !canPick ? renderProjectDirOpenIconHtml() : canPick ? '<span class="project-dir-toolbar-chevron" aria-hidden="true">▾</span>' : ''}
     </button>
   `;
 }
@@ -1452,28 +1467,15 @@ function renderInputComposerHtml(): string {
         <div class="input-composer-toolbar">
           <div class="input-composer-toolbar-start">
             <button
-              id="btn-import-file"
+              id="btn-import"
               class="toolbar-icon-btn import-btn"
               type="button"
-              title="导入外部文件"
+              title="导入外部文件 / 文件夹"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                <polyline points="14 2 14 8 20 8"/>
-                <line x1="12" y1="18" x2="12" y2="12"/>
-                <line x1="9" y1="15" x2="15" y2="15"/>
-              </svg>
-            </button>
-            <button
-              id="btn-import-folder"
-              class="toolbar-icon-btn import-btn"
-              type="button"
-              title="导入外部文件夹"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
-                <line x1="12" y1="11" x2="12" y2="17"/>
-                <line x1="9" y1="14" x2="15" y2="14"/>
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
               </svg>
             </button>
           </div>
@@ -1892,12 +1894,10 @@ function attachEventListeners() {
   // 拖拽文件自动引用
   bindDragDropFileRefs();
 
-  // 导入外部文件/文件夹按钮
-  document.querySelector('#btn-import-file')?.addEventListener('click', () => {
-    void handleImportExternalFile();
-  });
-  document.querySelector('#btn-import-folder')?.addEventListener('click', () => {
-    void handleImportExternalFolder();
+  // 导入外部文件/文件夹按钮（点击弹出选择菜单）
+  document.querySelector('#btn-import')?.addEventListener('click', (e) => {
+    const target = e.currentTarget as HTMLElement;
+    showImportMenu(target);
   });
 
   // 图片引用芯片点击大图预览（事件委托）
@@ -3594,8 +3594,13 @@ async function compactActiveContext(): Promise<void> {
   updateConversationListSpinner();
 
   try {
-    // /compact 是 Claude Code 内置命令，经 --resume 在该会话内执行
-    await invoke('execute_prompt', { conversationId: id, prompt: '/compact' });
+    // /compact 是 Claude Code 内置斜杠命令，必须经 streaming input 模式发送，
+    // 否则在 -p 单次模式下会被当作纯文本，不会真正执行压缩。
+    await invoke('execute_prompt', {
+      conversationId: id,
+      prompt: '/compact',
+      streamingInput: true,
+    });
   } catch (e) {
     console.error('压缩上下文失败:', e);
     compactingConversationId = null;
@@ -4509,6 +4514,57 @@ function handleFileSuggestionKeydown(e: KeyboardEvent) {
 }
 
 // ── 导入外部文件/文件夹 ─────────────────────────────────────────────
+function showImportMenu(anchor: HTMLElement): void {
+  // 关闭已存在的菜单
+  document.querySelector('.import-menu-overlay')?.remove();
+
+  const rect = anchor.getBoundingClientRect();
+  const overlay = document.createElement('div');
+  overlay.className = 'profile-context-menu-overlay import-menu-overlay';
+  overlay.innerHTML = `
+    <div class="profile-context-menu" role="menu">
+      <button type="button" class="profile-context-menu-item" data-action="file">导入文件</button>
+      <button type="button" class="profile-context-menu-item" data-action="folder">导入文件夹</button>
+    </div>
+  `;
+
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKeyDown);
+  };
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') close();
+  };
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) close();
+  });
+  overlay.querySelector('[data-action="file"]')?.addEventListener('click', () => {
+    close();
+    void handleImportExternalFile();
+  });
+  overlay.querySelector('[data-action="folder"]')?.addEventListener('click', () => {
+    close();
+    void handleImportExternalFolder();
+  });
+
+  document.addEventListener('keydown', onKeyDown);
+  document.body.appendChild(overlay);
+
+  // 默认弹在按钮上方；空间不够则改为下方
+  const menu = overlay.querySelector('.profile-context-menu') as HTMLElement | null;
+  if (menu) {
+    const menuRect = menu.getBoundingClientRect();
+    let top = rect.top - menuRect.height - 6;
+    let left = rect.left;
+    if (top < 8) top = rect.bottom + 6;
+    if (left + menuRect.width > window.innerWidth) {
+      left = Math.max(8, window.innerWidth - menuRect.width - 8);
+    }
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
+}
+
 async function handleImportExternalFile(): Promise<void> {
   const projectDir = getEffectiveProjectDir();
   if (!projectDir) {

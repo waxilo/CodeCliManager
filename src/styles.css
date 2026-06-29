@@ -1210,20 +1210,20 @@ body.is-sidebar-resizing {
   cursor: default;
 }
 
-.project-dir-toolbar.is-copyable {
+.project-dir-toolbar.is-openable {
   cursor: pointer;
 }
 
-.project-dir-toolbar:not(.is-readonly):not(.is-copyable) {
+.project-dir-toolbar:not(.is-readonly):not(.is-openable) {
   cursor: pointer;
 }
 
-.project-dir-toolbar.is-copyable:hover {
+.project-dir-toolbar.is-openable:hover {
   color: var(--color-text);
   background: var(--color-bg-surface-hover);
 }
 
-.project-dir-toolbar-copy {
+.project-dir-toolbar-open {
   position: absolute;
   right: 4px;
   top: 50%;
@@ -1237,12 +1237,12 @@ body.is-sidebar-resizing {
   color: var(--color-text-muted);
 }
 
-.project-dir-toolbar-copy svg {
+.project-dir-toolbar-open svg {
   width: 15px;
   height: 15px;
 }
 
-.project-dir-toolbar.is-copyable:hover .project-dir-toolbar-copy {
+.project-dir-toolbar.is-openable:hover .project-dir-toolbar-open {
   display: flex;
   color: var(--color-text-secondary);
 }
