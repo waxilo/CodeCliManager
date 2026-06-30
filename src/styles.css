@@ -648,6 +648,9 @@ body.is-sidebar-resizing {
   display: flex;
   flex-direction: column;
   background: var(--color-bg-base);
+  /* 防止超宽内容（代码块 / 表格）把整列撑大，导致输入框被挤出可视区 */
+  min-width: 0;
+  overflow: hidden;
 }
 
 .chat-header-left {
@@ -828,16 +831,19 @@ body.is-sidebar-resizing {
 .message-list {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 24px;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  min-width: 0;
 }
 
 .message {
   display: flex;
   gap: 12px;
   max-width: 100%;
+  min-width: 0;
 }
 
 .message.user {
@@ -883,6 +889,7 @@ body.is-sidebar-resizing {
 
 .message-content {
   max-width: 70%;
+  min-width: 0;
   padding: 12px 16px;
   border-radius: 12px;
   background: var(--color-bubble-assistant-bg);
@@ -913,6 +920,8 @@ body.is-sidebar-resizing {
   color: var(--color-text);
   word-wrap: break-word;
   overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .markdown-body > :first-child {
@@ -1013,6 +1022,10 @@ body.is-sidebar-resizing {
   width: 100%;
   border-collapse: collapse;
   font-size: 13px;
+  /* 让宽表格在自身内部横向滚动，而不是把外层容器撑宽 */
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .markdown-body th,
@@ -2229,6 +2242,118 @@ body.is-sidebar-resizing {
 .settings-field input:disabled {
   opacity: 0.55;
   cursor: not-allowed;
+}
+
+/* API Key 单框：和普通 input 等高、同样的边框，内部并排放显示文本 / 输入框 / 按钮 */
+.settings-apikey-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  box-sizing: border-box;
+  padding: 0 6px 0 12px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  transition: border-color 0.15s ease;
+}
+
+.settings-apikey-box:focus-within {
+  border-color: var(--color-accent);
+}
+
+.settings-apikey-display {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.settings-apikey-display[hidden] {
+  display: none;
+}
+
+.settings-apikey-display-label {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+
+.settings-apikey-display-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  color: var(--color-text);
+  user-select: all;
+}
+
+/* 嵌套在统一边框内的输入框：自身不再有边框、背景、padding */
+.settings-apikey-box .settings-apikey-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.settings-apikey-box .settings-apikey-input:focus {
+  outline: none;
+  border-color: transparent;
+}
+
+.settings-apikey-box .settings-apikey-input[hidden] {
+  display: none;
+}
+
+.settings-apikey-box .settings-apikey-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.settings-apikey-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings-apikey-btn {
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.settings-apikey-btn[hidden] {
+  display: none;
+}
+
+.settings-apikey-btn:hover {
+  background: var(--color-bg-surface);
+  border-color: var(--color-accent);
+}
+
+.settings-apikey-btn:active {
+  background: var(--color-bg-surface-hover);
 }
 
 .settings-model-config-summary.is-disabled {

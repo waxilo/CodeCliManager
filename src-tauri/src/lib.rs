@@ -892,6 +892,57 @@ fn get_api_profile_config(profile_id: String) -> Result<ClaudeCodeApiConfig, Str
     Ok(config_from_profile(profile))
 }
 
+/// 返回指定配置的原始 API Key，用于前端的「复制」与「显示首尾」预览。
+/// 注意：仅在用户主动点击复制 / 显示时调用，避免将密钥放入常规列表数据中。
+#[tauri::command]
+fn get_api_profile_key(profile_id: String) -> Result<String, String> {
+    let store = load_api_profiles_store();
+    let profile = store
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "API profile not found".to_string())?;
+    Ok(profile.api_key.clone())
+}
+
+/// 立即把当前选中的默认模型写入配置文件：
+/// 1. Claude Code 的 settings.json（env.ANTHROPIC_MODEL）
+/// 2. 当前活跃 API profile 的 default_model 字段（若存在）
+/// 返回最新的 ClaudeCodeApiConfig，便于前端做后续刷新。
+#[tauri::command]
+fn set_active_default_model(model: String) -> Result<ClaudeCodeApiConfig, String> {
+    let trimmed = model.trim().to_string();
+
+    // 1) 写入 Claude Code settings.json
+    let mut settings = read_claude_settings_json();
+    let env_value = settings
+        .as_object_mut()
+        .map(|obj| {
+            if !obj.contains_key("env") {
+                obj.insert("env".to_string(), serde_json::json!({}));
+            }
+            obj.get_mut("env").unwrap()
+        })
+        .ok_or_else(|| "Invalid settings.json structure".to_string())?;
+    let env = env_value
+        .as_object_mut()
+        .ok_or_else(|| "Invalid env section in settings.json".to_string())?;
+    set_env_string(env, "ANTHROPIC_MODEL", &trimmed);
+    write_claude_settings_json(&settings)?;
+
+    // 2) 同步活跃 profile 的 default_model（如果有）
+    let mut store = load_api_profiles_store();
+    if let Some(active_id) = store.active_profile_id.clone() {
+        if let Some(profile) = store.profiles.iter_mut().find(|p| p.id == active_id) {
+            profile.default_model = trimmed.clone();
+            profile.updated_at = chrono::Utc::now().timestamp();
+            save_api_profiles_store(&store)?;
+        }
+    }
+
+    Ok(get_claude_api_config())
+}
+
 fn resolve_api_key_for_fetch(api_key: Option<String>, profile_id: Option<String>) -> Result<String, String> {
     if let Some(key) = api_key.filter(|value| !value.trim().is_empty()) {
         return Ok(key.trim().to_string());
@@ -3492,6 +3543,8 @@ pub fn run() {
             save_claude_api_config,
             get_api_profiles_state,
             get_api_profile_config,
+            get_api_profile_key,
+            set_active_default_model,
             upsert_api_profile,
             switch_api_profile,
             use_official_api,

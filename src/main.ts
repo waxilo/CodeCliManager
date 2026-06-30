@@ -126,7 +126,6 @@ interface FetchedModel {
 type ThemeMode = 'light' | 'dark';
 
 const THEME_STORAGE_KEY = 'codemanager-theme';
-const CONVERSATION_MODELS_KEY = 'codemanager-conversation-models';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'codemanager-sidebar-width';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codemanager-sidebar-collapsed';
 const DEFAULT_SIDEBAR_WIDTH = 184;
@@ -152,9 +151,8 @@ let pendingUserMessage: string | null = null;
 let pendingUserMessageConvId: string | null = null;
 let transientSessionError: string | null = null;
 let chatModelOptions: string[] = [];
-let conversationModels: Record<string, string> = loadConversationModels();
-/** 新会话尚未创建 ID 时，用户在聊天区临时选择的模型 */
-let pendingSessionModel: string | null = null;
+/** 从配置文件（ANTHROPIC_MODEL / 活跃 profile.default_model）读取的当前默认模型 */
+let currentDefaultModel: string = '';
 let compactingConversationId: string | null = null;
 /** 新会话尚未创建 ID 时，用户选择的工作目录 */
 let pendingProjectDir: string | null = null;
@@ -344,65 +342,11 @@ function toggleTheme() {
   applyTheme(getCurrentTheme() === 'dark' ? 'light' : 'dark');
 }
 
-function loadConversationModels(): Record<string, string> {
-  try {
-    const raw = localStorage.getItem(CONVERSATION_MODELS_KEY);
-    if (raw) {
-      return JSON.parse(raw) as Record<string, string>;
-    }
-  } catch {
-    // ignore invalid storage
-  }
-  return {};
-}
-
-function saveConversationModel(conversationId: string, model: string) {
-  const trimmed = model.trim();
-  if (!conversationId || !trimmed) return;
-  conversationModels[conversationId] = trimmed;
-  localStorage.setItem(CONVERSATION_MODELS_KEY, JSON.stringify(conversationModels));
-}
-
-function removeConversationModel(conversationId: string) {
-  if (!conversationModels[conversationId]) {
-    return;
-  }
-  delete conversationModels[conversationId];
-  localStorage.setItem(CONVERSATION_MODELS_KEY, JSON.stringify(conversationModels));
-}
-
-function getConversationModelOverride(conversationId: string): string | null {
-  const saved = conversationModels[conversationId];
-  if (saved && chatModelOptions.includes(saved)) {
-    return saved;
-  }
-  return null;
-}
-
-function applySessionModelSelection(model: string) {
-  const trimmed = model.trim();
-  if (!trimmed) {
-    return;
-  }
-
-  if (activeConversationId) {
-    saveConversationModel(activeConversationId, trimmed);
-    return;
-  }
-
-  pendingSessionModel = trimmed;
-}
-
 function getActiveChatModelForRender(): string {
-  if (activeConversationId) {
-    const override = getConversationModelOverride(activeConversationId);
-    if (override) {
-      return override;
-    }
-  } else if (pendingSessionModel && chatModelOptions.includes(pendingSessionModel)) {
-    return pendingSessionModel;
+  // 始终以配置文件读取到的当前默认模型为准
+  if (currentDefaultModel && chatModelOptions.includes(currentDefaultModel)) {
+    return currentDefaultModel;
   }
-
   return chatModelOptions[0] || '';
 }
 
@@ -675,7 +619,14 @@ async function applyChatModelSelection(model: string): Promise<void> {
     return;
   }
 
-  applySessionModelSelection(trimmed);
+  // 立即写入配置文件（Claude Code settings.json + 活跃 profile.default_model）
+  try {
+    await invoke<ClaudeCodeApiConfig>('set_active_default_model', { model: trimmed });
+    currentDefaultModel = trimmed;
+  } catch (err) {
+    console.error('[model] 写入默认模型失败:', err);
+  }
+
   updateChatModelPicker();
   if (!activeConversationId) {
     void refreshModelInfo();
@@ -685,6 +636,7 @@ async function applyChatModelSelection(model: string): Promise<void> {
 async function loadChatModelOptions(): Promise<void> {
   try {
     const config = await invoke<ClaudeCodeApiConfig>('get_claude_api_config');
+    currentDefaultModel = (config.defaultModel || '').trim();
     const customModels = config.customModels || [];
     let apiModels: string[] = [];
 
@@ -715,8 +667,14 @@ async function loadChatModelOptions(): Promise<void> {
     } else {
       chatModelOptions = merged;
     }
+
+    // 若配置文件里的当前默认模型不在候选列表，附加到首位以便展示与切换
+    if (currentDefaultModel && !chatModelOptions.includes(currentDefaultModel)) {
+      chatModelOptions = [currentDefaultModel, ...chatModelOptions];
+    }
   } catch {
     chatModelOptions = [];
+    currentDefaultModel = '';
   }
   updateChatModelPicker();
 }
@@ -769,10 +727,6 @@ async function setupEventListeners() {
     // 判断用户当前是否正在查看此会话（不要强制切换视图）
     const isViewingThis = activeConversationId === payload.conversation_id;
 
-    if (pendingSessionModel && isViewingThis) {
-      saveConversationModel(payload.conversation_id, pendingSessionModel);
-      pendingSessionModel = null;
-    }
     if (isViewingThis) {
       pendingProjectDir = null;
     }
@@ -2170,9 +2124,81 @@ function fillOfficialView(overlay: HTMLElement) {
   const keyInput = overlay.querySelector('input[name="apiKey"]') as HTMLInputElement;
   keyInput.value = '';
   keyInput.placeholder = '官方登录，无需 API Key';
+  resetApiKeyBox(overlay);
   const modelInput = overlay.querySelector('.settings-model-config-summary') as HTMLInputElement | null;
   if (modelInput) modelInput.value = '由订阅 / 官方登录决定';
   setSettingsFormEditable(overlay, false);
+}
+
+/** 将完整 API Key 转换为首尾可见的脱敏字符串，例如 `sk-a••••••••••wxyz`。 */
+function maskApiKey(key: string): string {
+  const trimmed = (key || '').trim();
+  if (!trimmed) return '';
+  if (trimmed.length <= 8) return '•'.repeat(trimmed.length);
+  const head = trimmed.slice(0, 4);
+  const tail = trimmed.slice(-4);
+  const dots = Math.max(6, Math.min(12, trimmed.length - 8));
+  return `${head}${'•'.repeat(dots)}${tail}`;
+}
+
+/** API Key 输入框三种模式：
+ *  - empty：未保存密钥，纯输入框
+ *  - view ：已保存密钥，显示脱敏 + [编辑][复制]
+ *  - edit ：编辑中，显示输入框 + [取消]
+ */
+type ApiKeyBoxMode = 'empty' | 'view' | 'edit';
+
+function setApiKeyBoxMode(overlay: HTMLElement, mode: ApiKeyBoxMode) {
+  const box = overlay.querySelector('.settings-apikey-box') as HTMLElement | null;
+  if (!box) return;
+  box.dataset.mode = mode;
+  const input = box.querySelector('input[name="apiKey"]') as HTMLInputElement | null;
+  const display = box.querySelector('.settings-apikey-display') as HTMLElement | null;
+  const editBtn = box.querySelector('[data-action="edit"]') as HTMLButtonElement | null;
+  const copyBtn = box.querySelector('[data-action="copy"]') as HTMLButtonElement | null;
+  const cancelBtn = box.querySelector('[data-action="cancel"]') as HTMLButtonElement | null;
+
+  if (display) display.hidden = mode !== 'view';
+  if (input) input.hidden = mode === 'view';
+  if (editBtn) editBtn.hidden = mode !== 'view';
+  if (copyBtn) copyBtn.hidden = mode !== 'view';
+  if (cancelBtn) cancelBtn.hidden = mode !== 'edit';
+}
+
+/** 重置 API Key 输入框（清空输入与缓存的明文），常用于切换 profile 时。 */
+function resetApiKeyBox(overlay: HTMLElement) {
+  const box = overlay.querySelector('.settings-apikey-box') as HTMLElement | null;
+  if (!box) return;
+  const valueEl = box.querySelector('.settings-apikey-display-value') as HTMLElement | null;
+  if (valueEl) {
+    valueEl.textContent = '';
+    delete valueEl.dataset.full;
+    delete valueEl.dataset.masked;
+  }
+  const input = box.querySelector('input[name="apiKey"]') as HTMLInputElement | null;
+  if (input) input.value = '';
+  setApiKeyBoxMode(overlay, 'empty');
+}
+
+/** 根据 profile 拉取明文密钥并展示首尾脱敏。无密钥则保持「输入」模式。 */
+async function loadApiKeyPreview(overlay: HTMLElement, profileId: string | null) {
+  resetApiKeyBox(overlay);
+  if (!profileId || profileId === OFFICIAL_PROFILE_ID) return;
+  try {
+    const key = await invoke<string>('get_api_profile_key', { profileId });
+    const trimmed = (key || '').trim();
+    if (!trimmed) return;
+    // 异步加载期间用户可能已经切换到别的 profile，丢弃陈旧结果。
+    if (overlay.dataset.profileId !== profileId) return;
+    const valueEl = overlay.querySelector('.settings-apikey-display-value') as HTMLElement | null;
+    if (!valueEl) return;
+    valueEl.dataset.full = trimmed;
+    valueEl.dataset.masked = maskApiKey(trimmed);
+    valueEl.textContent = valueEl.dataset.masked;
+    setApiKeyBoxMode(overlay, 'view');
+  } catch {
+    /* keep empty mode */
+  }
 }
 
 function fillSettingsForm(
@@ -2191,6 +2217,12 @@ function fillSettingsForm(
   const apiKeyInput = overlay.querySelector('input[name="apiKey"]') as HTMLInputElement;
   apiKeyInput.value = '';
   apiKeyInput.placeholder = config.hasApiKey ? '已配置，留空则不修改' : 'sk-...';
+
+  if (profileId && config.hasApiKey) {
+    void loadApiKeyPreview(overlay, profileId);
+  } else {
+    resetApiKeyBox(overlay);
+  }
 }
 
 async function refreshSettingsModal(
@@ -2273,10 +2305,21 @@ async function openSettingsModal() {
             <span>API Base URL</span>
             <input type="url" name="baseUrl" placeholder="https://api.anthropic.com" />
           </label>
-          <label class="settings-field">
+          <div class="settings-field">
             <span>API Key</span>
-            <input type="password" name="apiKey" placeholder="sk-..." autocomplete="off" />
-          </label>
+            <div class="settings-apikey-box" data-mode="empty">
+              <span class="settings-apikey-display">
+                <span class="settings-apikey-display-label">当前：</span>
+                <code class="settings-apikey-display-value"></code>
+              </span>
+              <input type="password" name="apiKey" class="settings-apikey-input" placeholder="sk-..." autocomplete="off" />
+              <div class="settings-apikey-actions">
+                <button type="button" class="settings-apikey-btn" data-action="edit" title="编辑密钥">编辑</button>
+                <button type="button" class="settings-apikey-btn" data-action="copy" title="复制完整密钥">复制</button>
+                <button type="button" class="settings-apikey-btn" data-action="cancel" title="取消编辑" hidden>取消</button>
+              </div>
+            </div>
+          </div>
           <label class="settings-field">
             <span>模型配置</span>
             <input
@@ -3141,6 +3184,34 @@ async function openSettingsModal() {
     if (event.target === overlay) close();
   });
 
+  // API Key 单框：编辑 / 取消 / 复制
+  const apiKeyBox = overlay.querySelector('.settings-apikey-box') as HTMLElement | null;
+  apiKeyBox?.addEventListener('click', async (event) => {
+    const target = (event.target as HTMLElement | null)?.closest('[data-action]') as HTMLButtonElement | null;
+    if (!target) return;
+    event.preventDefault();
+    const action = target.dataset.action;
+    const input = apiKeyBox.querySelector('input[name="apiKey"]') as HTMLInputElement | null;
+    const valueEl = apiKeyBox.querySelector('.settings-apikey-display-value') as HTMLElement | null;
+    const fullKey = valueEl?.dataset.full || '';
+
+    if (action === 'edit') {
+      setApiKeyBoxMode(overlay, 'edit');
+      if (input) {
+        input.value = '';
+        input.placeholder = fullKey ? '已配置，留空则不修改' : 'sk-...';
+        input.focus();
+      }
+    } else if (action === 'cancel') {
+      if (input) input.value = '';
+      setApiKeyBoxMode(overlay, fullKey ? 'view' : 'empty');
+    } else if (action === 'copy') {
+      if (!fullKey) return;
+      const ok = await copyTextToClipboard(fullKey);
+      showCopyToastMsg(ok ? '已复制密钥' : '复制失败');
+    }
+  });
+
   const saveApiProfile = async () => {
     const form = overlay.querySelector('#settings-form') as HTMLFormElement | null;
     if (!form) return;
@@ -3701,7 +3772,7 @@ async function refreshModelInfo() {
     const activeProfile = state.profiles.find((p) => p.id === state.activeProfileId);
     const profileName = activeProfile?.name || '';
     const baseUrl = activeProfile?.baseUrl || state.current?.baseUrl || '';
-    // 当前模型与底部输入框保持一致：会话覆盖 → pending → 首个可用，再退回配置默认
+    // 当前模型直接读自配置文件
     // 'default' 表示订阅默认（非具体模型），按未指定处理，让卡片回到「官方默认」文案
     const rawModel = getActiveChatModelForRender();
     const currentModel =
@@ -3746,7 +3817,6 @@ function newChat() {
   pendingUserMessage = null;
   pendingUserMessageConvId = null;
   transientSessionError = null;
-  pendingSessionModel = null;
   pendingProjectDir = null;
   render();
   void refreshModelInfo();
@@ -4101,7 +4171,6 @@ async function deleteConversation(id: string) {
     clearStreamingState(id);
     pendingUserMessage = null;
     pendingUserMessageConvId = null;
-    removeConversationModel(id);
     conversations = conversations.filter((c) => c.id !== id);
 
     if (activeConversationId === id) {
