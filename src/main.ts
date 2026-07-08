@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { renderMarkdown as _renderMarkdown, initCodeCopyButtons } from './markdown';
+import { renderMarkdown as _renderMarkdown, initCodeCopyButtons, copyToClipboard as _copyToClipboard } from './markdown';
 
 /** 后端 import_external_path 返回值 */
 interface ImportResult {
@@ -404,7 +404,7 @@ function renderChatModelPickerListItems(filter: string): string {
           data-model="${escapeHtml(model)}"
           title="${escapeHtml(model)}"
         >
-          <span class="chat-model-picker-option-label" title="${escapeHtml(model)}">${escapeHtml(model)}</span>
+          <span class="chat-model-picker-option-label">${escapeHtml(model)}</span>
           ${isActive ? '<span class="chat-model-picker-option-check" aria-hidden="true">✓</span>' : ''}
         </button>
       `;
@@ -1406,19 +1406,8 @@ function renderProjectDirOpenIconHtml(): string {
 
 async function copyTextToClipboard(text: string): Promise<boolean> {
   const trimmed = text.trim();
-  if (!trimmed) {
-    return false;
-  }
-  try {
-    await navigator.clipboard.writeText(trimmed);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function showCopyToast(): void {
-  showCopyToastMsg('已复制');
+  if (!trimmed) return false;
+  return _copyToClipboard(trimmed);
 }
 
 function handleProjectDirClick() {
@@ -1452,7 +1441,7 @@ async function handleSessionIdClick() {
   if (!projectDir) {
     // 无工作目录：降级为复制 Session ID
     copyTextToClipboard(sessionId).then((ok) => {
-      if (ok) showCopyToast();
+      if (ok) showCopyToastMsg('已复制');
     });
     return;
   }
@@ -1466,7 +1455,7 @@ async function handleSessionIdClick() {
     console.error('打开终端失败:', e);
     // 失败时降级复制
     copyTextToClipboard(sessionId).then((ok) => {
-      if (ok) showCopyToast();
+      if (ok) showCopyToastMsg('已复制');
     });
   }
 }
@@ -4170,11 +4159,7 @@ function renderChatHeaderHtml(conversation: Conversation | undefined): string {
   `;
 }
 
-function renderChatContent(): string {
-  const conversation = activeConversationId
-    ? conversations.find((c) => c.id === activeConversationId)
-    : undefined;
-
+function buildDisplayMessages(conversation: Conversation | undefined): Message[] {
   const messages = [...(conversation?.messages ?? [])];
   // 只有当 pendingUserMessage 属于当前会话时才显示（防止串会话）
   const pendingBelongsToThisConv = pendingUserMessage &&
@@ -4187,7 +4172,6 @@ function renderChatContent(): string {
       timestamp: Math.floor(Date.now() / 1000),
     });
   }
-
   if (transientSessionError) {
     messages.push({
       id: `transient-error-${Date.now()}`,
@@ -4196,6 +4180,15 @@ function renderChatContent(): string {
       timestamp: Math.floor(Date.now() / 1000),
     });
   }
+  return messages;
+}
+
+function renderChatContent(): string {
+  const conversation = activeConversationId
+    ? conversations.find((c) => c.id === activeConversationId)
+    : undefined;
+
+  const messages = buildDisplayMessages(conversation);
 
   return `
     <div class="message-list" id="message-list">
@@ -4518,44 +4511,32 @@ function setupMessageListPostRender(container: HTMLElement): void {
     btn.addEventListener('click', async () => {
       const content = (btn as HTMLElement).dataset.copyContent || '';
       const copyAsMarkdown = (btn as HTMLElement).dataset.copyMarkdown === '1';
-      try {
-        if (copyAsMarkdown) {
-          // 复制为 Markdown：去掉 HTML 标签
-          const tempDiv = document.createElement('div');
-          tempDiv.innerHTML = content;
-          // 将代码块转回 markdown 格式
-          tempDiv.querySelectorAll('.code-block-wrapper').forEach((wrapper) => {
-            const code = (wrapper.querySelector('.code-copy-btn') as HTMLElement)?.dataset.code || '';
-            const lang = wrapper.querySelector('.code-lang-badge')?.textContent || '';
-            const fence = '```' + (lang && lang !== 'text' ? lang : '');
-            wrapper.outerHTML = fence + '\n' + code + '\n```';
-          });
-          await navigator.clipboard.writeText(tempDiv.textContent || '');
-        } else {
-          await navigator.clipboard.writeText(content);
-        }
-        const icon = btn.querySelector('.msg-copy-icon-svg') as HTMLElement | null;
-        if (icon) {
-          icon.innerHTML = '<polyline points="20 6 9 17 4 12"></polyline>';
-        }
-        btn.classList.add('copied');
-        setTimeout(() => {
-          if (icon) {
-            icon.innerHTML = '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>';
-          }
-          btn.classList.remove('copied');
-        }, 2000);
-      } catch {
-        // 降级复制
-        const textarea = document.createElement('textarea');
-        textarea.value = content;
-        textarea.style.position = 'fixed';
-        textarea.style.opacity = '0';
-        document.body.appendChild(textarea);
-        textarea.select();
-        document.execCommand('copy');
-        document.body.removeChild(textarea);
+      let textToCopy = content;
+      if (copyAsMarkdown) {
+        // 复制为 Markdown：去掉 HTML 标签，将代码块转回 markdown 格式
+        const tempDiv = document.createElement('div');
+        tempDiv.innerHTML = content;
+        tempDiv.querySelectorAll('.code-block-wrapper').forEach((wrapper) => {
+          const code = (wrapper.querySelector('.code-copy-btn') as HTMLElement)?.dataset.code || '';
+          const lang = wrapper.querySelector('.code-lang-badge')?.textContent || '';
+          const fence = '```' + (lang && lang !== 'text' ? lang : '');
+          wrapper.outerHTML = fence + '\n' + code + '\n```';
+        });
+        textToCopy = tempDiv.textContent || '';
       }
+      const ok = await _copyToClipboard(textToCopy);
+      if (!ok) return;
+      const icon = btn.querySelector('.msg-copy-icon-svg') as HTMLElement | null;
+      if (icon) {
+        icon.innerHTML = '<polyline points="20 6 9 17 4 12"></polyline>';
+      }
+      btn.classList.add('copied');
+      setTimeout(() => {
+        if (icon) {
+          icon.innerHTML = '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>';
+        }
+        btn.classList.remove('copied');
+      }, 2000);
     });
   });
 }
@@ -4577,26 +4558,7 @@ function refreshChatContent() {
 
   updateProjectDirControl();
   if (messageList) {
-    const messages = [...(conversation?.messages ?? [])];
-    // 只有当 pendingUserMessage 属于当前会话时才显示（防止串会话）
-    const pendingBelongsToThisConv = pendingUserMessage &&
-      (pendingUserMessageConvId === activeConversationId || (!pendingUserMessageConvId && !activeConversationId));
-    if (pendingBelongsToThisConv && pendingUserMessage && !messages.some((m) => m.role === 'user' && m.content === pendingUserMessage)) {
-      messages.push({
-        id: `pending-user-${Date.now()}`,
-        role: 'user',
-        content: pendingUserMessage,
-        timestamp: Math.floor(Date.now() / 1000),
-      });
-    }
-    if (transientSessionError) {
-      messages.push({
-        id: `transient-error-${Date.now()}`,
-        role: 'error',
-        content: transientSessionError,
-        timestamp: Math.floor(Date.now() / 1000),
-      });
-    }
+    const messages = buildDisplayMessages(conversation);
     messageList.innerHTML = renderMessageListHtml(messages);
     // 后处理：代码复制按钮、思考块折叠事件、消息复制控件
     setupMessageListPostRender(messageList);

@@ -67,6 +67,20 @@ fn clear_session_aborted(key: &str) {
     }
 }
 
+/// 检查流任务是否已被用户终止（registry_key 或 session_id 任一被标记即为是）
+fn is_stream_aborted(registry_key: &str, session_id: &Option<String>) -> bool {
+    is_session_aborted(registry_key)
+        || session_id.as_ref().is_some_and(|sid| is_session_aborted(sid))
+}
+
+/// 清理流任务的终止标记
+fn clear_stream_aborted(registry_key: &str, session_id: &Option<String>) {
+    clear_session_aborted(registry_key);
+    if let Some(sid) = session_id {
+        clear_session_aborted(sid);
+    }
+}
+
 /// 杀死进程及其子进程树
 /// Windows: 使用 taskkill /T /F /PID 杀死整个进程树
 /// Unix: 使用 SIGTERM 先尝试优雅退出，再 SIGKILL 强制杀死
@@ -2236,9 +2250,7 @@ fn spawn_claude_stream(
             }
             Ok(Err(_err)) => {
                 // stdout 管道断裂（可能是进程被 abort kill），检查是否为用户终止
-                let was_aborted = is_session_aborted(&captured_registry_key)
-                    || captured_session_id.as_ref().is_some_and(|sid| is_session_aborted(sid));
-                if was_aborted {
+                if is_stream_aborted(&captured_registry_key, &captured_session_id) {
                     eprintln!("[claude] stdout 管道断裂（用户 abort），正常退出");
                     stdout_finished = true;
                     continue;
@@ -2326,11 +2338,8 @@ fn spawn_claude_stream(
 
     if let Some(error) = stream_error {
         // 用户主动终止时，stream 解析错误不视为失败
-        let was_aborted = is_session_aborted(&captured_registry_key)
-            || captured_session_id.as_ref().is_some_and(|sid| is_session_aborted(sid));
-        if was_aborted {
-            clear_session_aborted(&captured_registry_key);
-            if let Some(ref sid) = captured_session_id { clear_session_aborted(sid); }
+        if is_stream_aborted(&captured_registry_key, &captured_session_id) {
+            clear_stream_aborted(&captured_registry_key, &captured_session_id);
             eprintln!("[claude] 用户主动终止，忽略 stream error: {}", error);
             return Ok(StreamOutcome::Success(captured_session_id));
         }
@@ -2342,13 +2351,8 @@ fn spawn_claude_stream(
 
     if !status.success() {
         // 检查是否是用户主动终止（abort），如果是则视为正常结束，不显示错误
-        let was_aborted = is_session_aborted(&captured_registry_key)
-            || captured_session_id.as_ref().is_some_and(|sid| is_session_aborted(sid));
-        // 清理 abort 标记
-        clear_session_aborted(&captured_registry_key);
-        if let Some(ref sid) = captured_session_id {
-            clear_session_aborted(sid);
-        }
+        let was_aborted = is_stream_aborted(&captured_registry_key, &captured_session_id);
+        clear_stream_aborted(&captured_registry_key, &captured_session_id);
 
         if was_aborted {
             eprintln!("[claude] 用户主动终止，不视为错误");
@@ -3374,52 +3378,32 @@ async fn execute_cli_command(platform_id: String, input: String) -> Result<Comma
 }
 
 async fn run_claude_command(input: &str) -> CommandResult {
-    #[cfg(target_os = "windows")]
-    use std::os::windows::process::CommandExt;
-
-    let claude_bin = resolve_claude_executable();
-
-    #[cfg(target_os = "windows")]
-    {
-        let mut cmd = Command::new(&claude_bin);
-        cmd.creation_flags(0x08000000);
-        
-        run_command_with_input(cmd, input).await
-    }
-    
-    #[cfg(not(target_os = "windows"))]
-    {
-        let mut cmd = Command::new(&claude_bin);
-        apply_cli_runtime_env(&mut cmd);
-
-        run_command_with_input(cmd, input).await
-    }
+    run_claude_command_impl(input, None).await
 }
 
-#[allow(dead_code)]
-async fn run_claude_command_with_resume(input: &str, conversation_id: &str) -> CommandResult {
+fn build_claude_command(resume_id: Option<&str>) -> Command {
     #[cfg(target_os = "windows")]
     use std::os::windows::process::CommandExt;
 
     let claude_bin = resolve_claude_executable();
+    let mut cmd = Command::new(&claude_bin);
+
+    if let Some(cid) = resume_id {
+        cmd.args(["--resume", cid]);
+    }
 
     #[cfg(target_os = "windows")]
-    {
-        let mut cmd = Command::new(&claude_bin);
-        cmd.args(["--resume", conversation_id]);
-        cmd.creation_flags(0x08000000);
-        
-        run_command_with_input(cmd, input).await
-    }
-    
-    #[cfg(not(target_os = "windows"))]
-    {
-        let mut cmd = Command::new(&claude_bin);
-        cmd.args(["--resume", conversation_id]);
-        apply_cli_runtime_env(&mut cmd);
+    { cmd.creation_flags(0x08000000); }
 
-        run_command_with_input(cmd, input).await
-    }
+    #[cfg(not(target_os = "windows"))]
+    { apply_cli_runtime_env(&mut cmd); }
+
+    cmd
+}
+
+async fn run_claude_command_impl(input: &str, resume_id: Option<&str>) -> CommandResult {
+    let cmd = build_claude_command(resume_id);
+    run_command_with_input(cmd, input).await
 }
 
 async fn run_command_with_input(mut cmd: Command, input: &str) -> CommandResult {
