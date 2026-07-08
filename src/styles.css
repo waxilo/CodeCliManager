@@ -732,6 +732,30 @@ body.is-sidebar-resizing {
   color: var(--color-text-secondary);
 }
 
+/* Session ID 终端打开图标（有工作目录时显示终端图标替代复制图标） */
+.session-id-action-icon {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-accent-soft);
+}
+
+.session-id-copy:hover .session-id-action-icon {
+  display: flex;
+}
+
+/* 有终端图标的 session-id 按钮，悬停时高亮 */
+.session-id-copy.has-terminal {
+  cursor: pointer;
+}
+
+.session-id-copy.has-terminal:hover {
+  border-color: var(--color-accent-soft);
+}
+
 .session-id {
   color: var(--color-text-secondary);
 }
@@ -837,34 +861,147 @@ body.is-sidebar-resizing {
   flex-direction: column;
   gap: 16px;
   min-width: 0;
+  /* 为滚动到底部按钮留空间 */
+  scroll-behavior: smooth;
+}
+
+/* 滚动到底部浮动按钮 */
+.scroll-to-bottom-btn {
+  position: sticky;
+  bottom: 8px;
+  align-self: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 50%;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+  opacity: 0;
+  transform: translateY(10px);
+  transition: opacity 0.2s, transform 0.2s;
+  z-index: 10;
+  margin-top: -44px;
+  pointer-events: none;
+}
+
+.scroll-to-bottom-btn.visible {
+  opacity: 1;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.scroll-to-bottom-btn:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
 }
 
 .message {
   display: flex;
-  gap: 12px;
+  gap: 10px;
   max-width: 100%;
   min-width: 0;
 }
 
+/* ---- 用户消息：右侧蓝色气泡（匹配 claudecodeui）---- */
 .message.user {
   flex-direction: row-reverse;
+  justify-content: flex-start;
+  padding: 0 12px;
 }
 
 .message.user .message-content {
-  background: var(--color-bubble-user-bg);
-  color: var(--color-bubble-user-text);
-  border: 1px solid var(--color-bubble-user-border);
+  max-width: 85%;
+  min-width: 0;
+  padding: 10px 16px;
+  background: #2563eb;
+  color: #fff;
+  border: none;
+  border-radius: 18px 18px 4px 18px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  line-height: 1.55;
 }
 
-.message.user .message-content pre {
-  color: var(--color-bubble-user-text);
+.message.user .message-content .markdown-body {
+  color: #fff;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.message.user .message-content .markdown-body h1,
+.message.user .message-content .markdown-body h2,
+.message.user .message-content .markdown-body h3,
+.message.user .message-content .markdown-body h4,
+.message.user .message-content .markdown-body h5,
+.message.user .message-content .markdown-body h6 {
+  color: #fff;
+}
+
+.message.user .message-content .markdown-body a {
+  color: #bfdbfe;
+  text-decoration: underline;
+}
+
+.message.user .message-content .markdown-body blockquote {
+  border-left-color: rgba(255, 255, 255, 0.4);
+  color: rgba(255, 255, 255, 0.85);
+}
+
+.message.user .message-content .markdown-body code {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+.message.user .message-content .markdown-body pre,
+.message.user .message-content .code-block-wrapper {
+  background: rgba(0, 0, 0, 0.2);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
 .message.user .message-time {
-  color: var(--color-bubble-user-text);
-  opacity: 0.72;
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 11px;
 }
 
+.message.user .msg-copy-btn {
+  color: rgba(255, 255, 255, 0.5);
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.message.user .msg-copy-btn:hover {
+  color: rgba(255, 255, 255, 0.9);
+  border-color: rgba(255, 255, 255, 0.3);
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* ---- 助手消息：全宽无背景气泡（匹配 claudecodeui）---- */
+.message.assistant {
+  flex-direction: column;
+  gap: 4px;
+  padding: 0 12px;
+}
+
+.message.assistant .message-content {
+  max-width: 100%;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+.message.assistant .message-content .markdown-body {
+  color: var(--color-text);
+  font-size: 14px;
+  line-height: 1.65;
+}
+
+/* ---- 头像通用样式 ---- */
 .message-avatar {
   width: 36px;
   height: 36px;
@@ -872,36 +1009,21 @@ body.is-sidebar-resizing {
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: 700;
   flex-shrink: 0;
 }
 
 .message.user .message-avatar {
-  background: var(--color-bubble-user-avatar-bg);
-  color: var(--color-bubble-user-text);
+  width: 32px;
+  height: 32px;
+  background: #2563eb;
+  color: #fff;
 }
 
-.message.assistant .message-avatar {
-  background: var(--color-bg-surface);
-  color: var(--color-text);
-}
-
-.message-content {
-  max-width: 70%;
-  min-width: 0;
-  padding: 12px 16px;
-  border-radius: 12px;
-  background: var(--color-bubble-assistant-bg);
-  border: 1px solid var(--color-bubble-assistant-border);
-}
-
-.message.user .message-content {
-  border-radius: 12px 4px 12px 12px;
-}
-
-.message.assistant .message-content {
-  border-radius: 4px 12px 12px 12px;
+/* 分组消息：隐藏头像 */
+.message.user.grouped .message-avatar {
+  visibility: hidden;
 }
 
 .message-content pre {
@@ -999,7 +1121,106 @@ body.is-sidebar-resizing {
   border-radius: 4px;
 }
 
-.markdown-body pre {
+/* ---- Code Block Wrapper (highlight.js + copy button) ---- */
+.code-block-wrapper {
+  position: relative;
+  margin: 0.75em 0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #0d1117; /* GitHub dark bg */
+  border: 1px solid var(--color-bg-surface-hover);
+}
+
+.code-block-wrapper .code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+}
+
+.code-lang-badge {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: #8b949e;
+  letter-spacing: 0.5px;
+}
+
+.code-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #21262d;
+  color: #c9d1d9;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s;
+  white-space: nowrap;
+}
+
+.code-block-wrapper:hover .code-copy-btn,
+.code-copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.code-copy-btn:hover {
+  background: #30363d;
+}
+
+.code-copy-btn.copied {
+  border-color: #238636;
+  color: #3fb950;
+}
+
+.code-block-wrapper pre {
+  margin: 0;
+  padding: 12px;
+  overflow-x: auto;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  white-space: pre;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.code-block-wrapper pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  color: #c9d1d9;
+  font-size: inherit;
+}
+
+/* JSON 自动检测块 */
+.json-block .code-block-header {
+  background: #1a1a2e;
+  border-bottom-color: #2d2d4a;
+}
+.json-block .code-lang-badge {
+  color: #7b8cff;
+}
+
+/* 消息中的代码块样式覆盖 */
+.markdown-body .code-block-wrapper {
+  margin: 0.5em 0;
+}
+
+.markdown-body .code-block-wrapper pre {
+  margin: 0;
+  padding: 12px;
+}
+
+/* ---- 旧版 pre 兼容（非 highlight.js 生成） ---- */
+.markdown-body > pre,
+.message-content > pre {
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-bg-surface-hover);
   border-radius: 8px;
@@ -1011,11 +1232,19 @@ body.is-sidebar-resizing {
   line-height: 1.5;
 }
 
+.markdown-body > pre > code,
+.message-content > pre > code,
 .markdown-body pre code {
   background: transparent;
   padding: 0;
   border-radius: 0;
   color: var(--color-text);
+}
+
+/* 兼容 highlighted code（marked 默认不生成 wrapper 时） */
+.markdown-body pre code.hljs {
+  background: transparent;
+  padding: 0;
 }
 
 .markdown-body table {
@@ -1096,11 +1325,58 @@ body.is-sidebar-resizing {
   border-top-color: var(--color-md-border);
 }
 
+.message-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+}
+
 .message-time {
   font-size: 11px;
   color: var(--color-text-muted);
-  margin-top: 4px;
   text-align: right;
+}
+
+/* ---- 消息复制控件 ---- */
+.msg-copy-control {
+  display: flex;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.message:hover .msg-copy-control,
+.message-content:hover .msg-copy-control,
+.msg-copy-btn:focus-visible {
+  opacity: 1;
+}
+
+.msg-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.msg-copy-btn:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent-soft);
+}
+
+.msg-copy-btn.copied {
+  color: #3fb950;
+  border-color: #238636;
 }
 
 .input-area {
@@ -1717,51 +1993,138 @@ body.is-sidebar-resizing {
   background: var(--color-bg-surface-active);
 }
 
-/* 思考过程块 */
+/* ============================================================
+   思考过程手风琴（Reasoning Accordion — 参考 claudecodeui）
+   ============================================================ */
+
 .thinking-block {
-  margin-bottom: 8px;
+  margin: 0;
   border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 6px;
+  border-radius: 8px;
   overflow: hidden;
+  background: var(--color-bg-surface);
 }
 
+/* ---- 触发器（点击展开/收起）---- */
 .thinking-summary {
-  padding: 6px 10px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
   font-size: 12px;
+  font-weight: 500;
   color: var(--color-text-secondary);
   background: var(--color-bg-thinking);
   cursor: pointer;
   user-select: none;
-  font-weight: 500;
+  list-style: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.thinking-summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-block .thinking-brain-icon {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  color: var(--color-accent-soft);
+}
+
+.thinking-block .thinking-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.thinking-block .thinking-duration {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.thinking-block .thinking-chevron {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s ease;
+  color: var(--color-text-muted);
+}
+
+.thinking-block[open] > .thinking-summary .thinking-chevron {
+  transform: rotate(180deg);
 }
 
 .thinking-summary:hover {
   color: var(--color-text);
+  background: var(--color-bg-surface-hover);
 }
 
-.thinking-content {
-  padding: 8px 10px;
-  background: var(--color-bg-base);
-  max-height: 200px;
+/* ---- 思考内容的展开/收起动画（CSS grid 技巧）---- */
+.thinking-content-wrapper {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s ease;
+}
+
+.thinking-block[open] > .thinking-content-wrapper {
+  grid-template-rows: 1fr;
+}
+
+.thinking-content-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.thinking-content-scroll {
+  max-height: 320px;
   overflow-y: auto;
 }
 
+.thinking-content {
+  padding: 10px 14px;
+  background: var(--color-bg-base);
+}
+
 .thinking-content pre {
+  margin: 0;
   font-size: 13px;
-  line-height: 1.5;
+  line-height: 1.65;
   color: var(--color-text-muted);
   font-style: italic;
   white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
-/* 纯 thinking 消息样式 */
-.message.thinking-msg .message-avatar {
-  background: var(--color-bg-surface);
-  font-size: 14px;
+/* ---- 流式思考中的闪烁动画标签 ---- */
+.thinking-block.streaming-active .thinking-label-text {
+  background: linear-gradient(90deg, var(--color-accent) 0%, var(--color-accent-soft) 50%, var(--color-accent) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: thinking-shimmer 2s linear infinite;
 }
 
-.message.thinking-msg.streaming .thinking-summary {
-  color: var(--color-code);
+@keyframes thinking-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+/* 纯 thinking 消息样式：紧凑间距 */
+.message.thinking-msg {
+  margin-top: -10px;
+  margin-bottom: -10px;
+}
+
+.message.thinking-msg + .message.thinking-msg {
+  margin-top: -12px;
+}
+
+.message.thinking-msg .message-content {
+  max-width: 100%;
+  padding: 0;
 }
 
 .message.streaming .message-content .markdown-body {
@@ -1769,15 +2132,17 @@ body.is-sidebar-resizing {
   padding-left: 10px;
 }
 
-.message.error .message-avatar {
-  background: var(--color-danger-bg-soft);
-  color: var(--color-danger);
+/* ---- 错误消息 ---- */
+.message.error {
+  padding: 0 12px;
 }
 
 .message.error .message-content,
 .message-error-content {
+  padding: 12px 16px;
   background: var(--color-error-bg);
   border: 1px solid var(--color-error-border);
+  border-radius: 8px;
 }
 
 .message-error-title {
@@ -1796,17 +2161,32 @@ body.is-sidebar-resizing {
   color: var(--color-code);
 }
 
+/* ---- 待处理消息（等待回复）---- */
+.message.pending {
+  padding: 0 12px;
+}
+
 .message.pending .message-content,
 .message-pending-content {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 44px;
+  gap: 10px;
+  min-height: 36px;
+  padding: 0;
   color: var(--color-text-secondary);
+  background: transparent;
+  border: none;
+}
+
+.pending-animation {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .pending-text {
   font-size: 13px;
+  color: var(--color-text-muted);
 }
 
 .pending-dot {
@@ -3246,6 +3626,232 @@ body.drag-over::before {
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
+}
+
+/* ============================================================
+   工具卡片样式（Tool Cards）
+   ============================================================ */
+
+.tool-card {
+  margin: 0.25em 0;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-left: 3px solid #8b949e;
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+  font-size: 13px;
+}
+
+.tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--color-bg-surface);
+  border-bottom: 1px solid var(--color-bg-surface-hover);
+  cursor: default;
+  user-select: none;
+}
+
+.tool-collapsible-summary {
+  cursor: pointer;
+}
+
+.tool-collapsible-summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-collapsible-summary::marker {
+  display: none;
+}
+
+.tool-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+}
+
+.tool-label {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--color-text);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.tool-title-text {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-chevron {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  transition: transform 0.15s;
+}
+
+.tool-collapsible[open] .tool-chevron {
+  transform: rotate(180deg);
+}
+
+.tool-secondary {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+/* 工具状态标签 */
+.tool-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 10px;
+  line-height: 1.5;
+}
+
+.tool-status-running {
+  background: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+}
+
+.tool-status-done {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+}
+
+.tool-status-error {
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+}
+
+/* 工具卡片正文 */
+.tool-card-body {
+  padding: 8px 12px;
+}
+
+/* 单行 - 终端风格 */
+.tool-oneline-terminal .tool-cmd-prefix {
+  color: #3fb950;
+  font-weight: 600;
+  margin-right: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.tool-oneline-terminal .tool-cmd-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  color: var(--color-text);
+  word-break: break-all;
+}
+
+/* 单行 - 文件打开风格 */
+.tool-oneline-file-open .tool-file-link {
+  color: var(--color-accent-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tool-oneline-file-open .tool-file-link:hover {
+  text-decoration: underline;
+}
+
+/* 单行 - 搜索风格 */
+.tool-oneline-search .tool-search-pattern {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  color: var(--color-text);
+  background: var(--color-bg-surface);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* 工具输入预览 */
+.tool-input-preview {
+  margin: 0 0 8px 0;
+  padding: 8px;
+  background: var(--color-bg-surface);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--color-text-muted);
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.tool-input-preview code {
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+}
+
+/* 工具结果区 */
+.tool-card-result {
+  padding: 8px 12px;
+  border-top: 1px solid var(--color-bg-surface-hover);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.tool-card-result .markdown-body {
+  font-size: 13px;
+}
+
+.tool-card-result .markdown-body pre {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* 运行中指示器 */
+.tool-running-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+}
+
+.tool-running-indicator .pending-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: dotBounce 1.2s infinite ease-in-out;
+}
+
+.tool-running-indicator .pending-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.tool-running-indicator .pending-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* 工具卡片在消息流中的定位 */
+.message.tool {
+  max-width: 100%;
+}
+
+.message.tool .message-content {
+  max-width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0;
+  box-shadow: none;
 }
 
 

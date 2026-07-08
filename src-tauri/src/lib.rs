@@ -1155,7 +1155,7 @@ fn load_claude_history() -> Vec<Conversation> {
         }
     }
 
-    conversations.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    conversations.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     conversations
 }
 
@@ -1285,43 +1285,35 @@ fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
         }
 
         let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
-        let (content, thinking) = extract_text_and_thinking(message.get("content"));
 
-        // 空消息跳过（但保留纯 thinking 的消息）
-        if content.trim().is_empty() && thinking.is_none() {
-            continue;
-        }
+        // 将 content 数组展开为独立消息，保留 thinking/text 穿插顺序
+        // 参考 claudecodeui: 每个 content part 生成独立的 NormalizedMessage
+        let id_prefix = format!("msg_{}", messages.len());
+        let expanded = expand_content_parts(&role, message.get("content"), &id_prefix, ts.unwrap_or_default());
 
-        // 跳过内部消息（系统提醒、本地命令输出等）
-        let trimmed = content.trim();
-        if trimmed.starts_with("<system-reminder>")
-            || trimmed.starts_with("<local-command-caveat>")
-            || trimmed.starts_with("<command-name>")
-            || trimmed.starts_with("<local-command-stdout>")
-        {
-            continue;
-        }
-
-        // 如果只有 thinking 没有文本，归类为 thinking 角色
-        let effective_role = if content.trim().is_empty() && thinking.is_some() {
-            "thinking".to_string()
-        } else {
-            role.clone()
-        };
-
+        // 记录第一条用户消息（用于会话标题）
         if first_user_message.is_none() && role == "user" {
-            if !content.contains("<local-command-caveat>") && !content.starts_with("<command-name>") {
-                first_user_message = Some(content.clone());
+            for msg in &expanded {
+                if msg.role == "user" && !msg.content.trim().is_empty() {
+                    first_user_message = Some(msg.content.clone());
+                    break;
+                }
             }
         }
 
-        messages.push(Message {
-            id: uuid::Uuid::new_v4().to_string(),
-            role: effective_role,
-            content,
-            thinking,
-            timestamp: ts.unwrap_or_default(),
-        });
+        // 过滤并添加展开的消息
+        for msg in expanded {
+            let trimmed = msg.content.trim();
+            // 跳过内部系统消息
+            if trimmed.starts_with("<system-reminder>")
+                || trimmed.starts_with("<local-command-caveat>")
+                || trimmed.starts_with("<command-name>")
+                || trimmed.starts_with("<local-command-stdout>")
+            {
+                continue;
+            }
+            messages.push(msg);
+        }
     }
     
     let session_id = session_id.or_else(|| {
@@ -1380,45 +1372,73 @@ fn decode_project_dir_from_jsonl_path(path: &PathBuf) -> Option<String> {
 // 从 content 中提取文本和思考内容
 // tool_use 和 tool_result 不提取为可见文本（它们是内部工具调用细节）
 // 返回 (纯文本, 思考内容)
-fn extract_text_and_thinking(content: Option<&serde_json::Value>) -> (String, Option<String>) {
+/// 将 content（字符串或数组）展开为多条消息，保留 thinking/text 穿插顺序
+/// 参考 claudecodeui: 每个 content part 生成独立的 NormalizedMessage
+fn expand_content_parts(role: &str, content: Option<&serde_json::Value>, id_prefix: &str, timestamp: i64) -> Vec<Message> {
+    let content = match content {
+        Some(c) => c,
+        None => return vec![],
+    };
+
     match content {
-        Some(serde_json::Value::String(s)) => (s.clone(), None),
-        Some(serde_json::Value::Array(items)) => {
-            let mut texts = Vec::new();
-            let mut thinking_parts = Vec::new();
+        // 纯文本：单条消息
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                return vec![];
+            }
+            vec![Message {
+                id: format!("{}_{}", id_prefix, 0),
+                role: role.to_string(),
+                content: s.clone(),
+                thinking: None,
+                timestamp,
+            }]
+        }
+        // 内容数组：每个 part 生成独立消息，保持原始顺序
+        serde_json::Value::Array(items) => {
+            let mut msgs = Vec::new();
+            let mut part_idx = 0u32;
             for item in items {
                 let t = item.get("type").and_then(|t| t.as_str());
                 match t {
                     Some("text") => {
                         if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
-                            texts.push(text.to_string());
+                            let trimmed = text.trim();
+                            if !trimmed.is_empty() {
+                                msgs.push(Message {
+                                    id: format!("{}_{}", id_prefix, part_idx),
+                                    role: role.to_string(),
+                                    content: text.to_string(),
+                                    thinking: None,
+                                    timestamp,
+                                });
+                            }
                         }
                     }
                     Some("thinking") => {
                         if let Some(th) = item.get("thinking").and_then(|t| t.as_str()) {
-                            thinking_parts.push(th.to_string());
+                            let trimmed = th.trim();
+                            if !trimmed.is_empty() {
+                                msgs.push(Message {
+                                    id: format!("{}_{}", id_prefix, part_idx),
+                                    role: "thinking".to_string(),
+                                    content: th.to_string(),
+                                    thinking: None,
+                                    timestamp,
+                                });
+                            }
                         }
                     }
-                    // tool_use 和 tool_result 跳过——不对用户显示内部工具调用细节
+                    // tool_use 和 tool_result 跳过，前端会自行处理
                     _ => {}
                 }
+                part_idx += 1;
             }
-            let text = texts.join("\n");
-            let thinking = if thinking_parts.is_empty() {
-                None
-            } else {
-                Some(thinking_parts.join("\n"))
-            };
-            (text, thinking)
+            msgs
         }
-        _ => (String::new(), None),
+        _ => vec![],
     }
-}
-
-// 兼容旧代码：只提取纯文本
-#[allow(dead_code)]
-fn extract_text(content: Option<&serde_json::Value>) -> String {
-    extract_text_and_thinking(content).0
 }
 
 fn parse_timestamp(iso_string: &str) -> Option<i64> {
@@ -3234,6 +3254,115 @@ struct CommandResult {
     error: Option<String>,
 }
 
+/// 在新终端窗口中 cd 到项目目录并执行 claude --resume <session_id>
+#[tauri::command]
+fn open_terminal_resume(project_dir: String, session_id: String) -> Result<(), String> {
+    let dir = project_dir.trim();
+    let sid = session_id.trim();
+
+    if dir.is_empty() {
+        return Err("项目目录为空".to_string());
+    }
+    if sid.is_empty() {
+        return Err("Session ID 为空".to_string());
+    }
+
+    // 使用实际解析的 claude 路径，确保终端能正确执行
+    let claude_path = resolve_claude_executable();
+    let claude_cmd = if claude_path.exists() {
+        #[cfg(target_os = "windows")]
+        { format!("\"{}\"", claude_path.display()) }
+        #[cfg(not(target_os = "windows"))]
+        { format!("{}", claude_path.display()) }
+    } else {
+        "claude".to_string()
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        use std::io::Write;
+        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+
+        // 将命令写入临时 .bat 文件，避免命令行参数转义问题
+        let bat_content = format!(
+            "@echo off\r\ncd /d \"{}\"\r\nif errorlevel 1 (\r\n  echo [错误] 无法切换到目录: {}\r\n  pause\r\n  exit /b 1\r\n)\r\necho [工作目录] %CD%\r\necho [执行] {} --resume {}\r\necho.\r\n{} --resume {}\r\n",
+            dir, dir, claude_cmd, sid, claude_cmd, sid
+        );
+        let tmp_dir = std::env::temp_dir();
+        let bat_path = tmp_dir.join(format!("ccm_resume_{}.bat", sid));
+        let mut file = std::fs::File::create(&bat_path)
+            .map_err(|e| format!("创建临时脚本失败: {}", e))?;
+        file.write_all(bat_content.as_bytes())
+            .map_err(|e| format!("写入临时脚本失败: {}", e))?;
+        // 确保数据落盘后再执行
+        file.flush().map_err(|e| format!("写入临时脚本失败: {}", e))?;
+        drop(file);
+
+        let bat_path_str = bat_path.to_string_lossy().to_string();
+        std::process::Command::new("cmd")
+            .arg("/k")
+            .arg(&bat_path_str)
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map_err(|e| format!("启动终端失败: {}", e))?;
+
+        // 延迟清理临时脚本（终端已启动，不再需要该文件）
+        let _cleanup_path = bat_path.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let _ = std::fs::remove_file(&_cleanup_path);
+        });
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "tell app \"Terminal\" to do script \"cd '{}' && {} --resume {}\"",
+            dir.replace('\'', "'\\''"),
+            claude_cmd,
+            sid
+        );
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+            .map_err(|e| format!("启动终端失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let cmd_str = format!(
+            "cd \"{}\" && {} --resume {}; exec bash",
+            dir, claude_cmd, sid
+        );
+        // 尝试多种终端模拟器
+        let terminals = [
+            ("gnome-terminal", vec!["--", "bash", "-c", &cmd_str]),
+            ("konsole", vec!["-e", "bash", "-c", &cmd_str]),
+            ("xfce4-terminal", vec!["-e", &format!("bash -c '{}'", cmd_str)]),
+            ("x-terminal-emulator", vec!["-e", "bash", "-c", &cmd_str]),
+            ("xterm", vec!["-e", "bash", "-c", &cmd_str]),
+        ];
+
+        let mut launched = false;
+        for (term, args) in &terminals {
+            if let Ok(_child) = std::process::Command::new(term)
+                .args(args)
+                .spawn()
+            {
+                launched = true;
+                break;
+            }
+        }
+
+        if !launched {
+            return Err("未找到可用的终端模拟器（gnome-terminal/konsole/xfce4-terminal/xterm）".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 #[tauri::command]
 async fn execute_cli_command(platform_id: String, input: String) -> Result<CommandResult, String> {
     let _state = load_app_state();
@@ -3556,6 +3685,7 @@ pub fn run() {
             write_file_bytes,
             read_file_base64,
             import_external_path,
+            open_terminal_resume,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")

@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { renderMarkdown as _renderMarkdown } from './markdown';
+import { renderMarkdown as _renderMarkdown, initCodeCopyButtons } from './markdown';
 
 /** 后端 import_external_path 返回值 */
 interface ImportResult {
@@ -32,6 +32,22 @@ interface Message {
   thinking?: string;
   timestamp: number;
   refs?: FileRef[];
+  toolData?: ToolMessageData;
+}
+
+interface ToolMessageData {
+  toolName: string;
+  toolInput: Record<string, unknown>;
+  toolResult?: string;
+  isError?: boolean;
+  displayMode: 'one-line' | 'collapsible';
+  colorScheme: ToolColorScheme;
+}
+
+interface ToolColorScheme {
+  border: string;
+  icon: string;
+  primary: string;
 }
 
 interface FileRef {
@@ -134,10 +150,16 @@ const MIN_SIDEBAR_WIDTH = 160;
 const MIN_MAIN_CONTENT_WIDTH = 300;
 const SIDEBAR_RESIZER_WIDTH = 4;
 
-interface StreamingState {
-  thinking: string;
+interface StreamBlock {
+  type: 'thinking' | 'text';
   content: string;
+}
+
+interface StreamingState {
+  blocks: StreamBlock[];
   thinkingDone: boolean;
+  /** 当前正在追加内容的块索引 */
+  currentBlockIdx: number;
 }
 
 let conversations: Conversation[] = [];
@@ -157,8 +179,10 @@ let compactingConversationId: string | null = null;
 /** 新会话尚未创建 ID 时，用户选择的工作目录 */
 let pendingProjectDir: string | null = null;
 let chatModelPickerHighlightIndex = -1;
-/** 跟踪用户折叠了哪些思考块（key: session ID 或 message ID） */
-const collapsedThinkingBlocks = new Set<string>();
+/** 跟踪用户手动展开了哪些思考块（默认全部折叠，参考 claudecodeui defaultOpen=false） */
+const expandedThinkingBlocks = new Set<string>();
+/** 思考过程始终展示 */
+
 let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
 let isSidebarCollapsed = false;
 
@@ -873,7 +897,7 @@ async function setupEventListeners() {
 
 function getStreamingState(sessionId: string): StreamingState {
   if (!streamingBySession.has(sessionId)) {
-    streamingBySession.set(sessionId, { thinking: '', content: '', thinkingDone: false });
+    streamingBySession.set(sessionId, { blocks: [], thinkingDone: false, currentBlockIdx: -1 });
   }
   return streamingBySession.get(sessionId)!;
 }
@@ -882,6 +906,18 @@ function clearStreamingState(sessionId: string) {
   streamingBySession.delete(sessionId);
   pendingTextDelta.delete(sessionId);
   removeStreamingElements();
+}
+
+/** 将当前缓冲的文本追加到当前 text 块的 content */
+function flushPendingTextDelta(sessionId: string) {
+  const pending = pendingTextDelta.get(sessionId);
+  if (!pending) return;
+  const state = getStreamingState(sessionId);
+  const block = state.blocks[state.currentBlockIdx];
+  if (block && block.type === 'text') {
+    block.content += pending;
+  }
+  pendingTextDelta.set(sessionId, '');
 }
 
 function handleMessageChunk(payload: MessageChunkPayload) {
@@ -932,10 +968,18 @@ function handleMessageChunk(payload: MessageChunkPayload) {
   switch (kind) {
     case 'thinking_start':
       state.thinkingDone = false;
+      // 创建新的 thinking 块
+      state.blocks.push({ type: 'thinking', content: '' });
+      state.currentBlockIdx = state.blocks.length - 1;
       if (isActive) refreshStreamingUI(sid);
       break;
     case 'thinking_delta':
-      state.thinking += content;
+      {
+        const block = state.blocks[state.currentBlockIdx];
+        if (block && block.type === 'thinking') {
+          block.content += content;
+        }
+      }
       if (isActive) scheduleStreamingRefresh(sid);
       break;
     case 'thinking_end':
@@ -943,6 +987,9 @@ function handleMessageChunk(payload: MessageChunkPayload) {
       if (isActive) refreshStreamingUI(sid);
       break;
     case 'text_start':
+      // 创建新的 text 块
+      state.blocks.push({ type: 'text', content: '' });
+      state.currentBlockIdx = state.blocks.length - 1;
       break;
     case 'text_delta':
       pendingTextDelta.set(sid, (pendingTextDelta.get(sid) || '') + content);
@@ -970,14 +1017,6 @@ function handleMessageChunk(payload: MessageChunkPayload) {
     default:
       break;
   }
-}
-
-function flushPendingTextDelta(sessionId: string) {
-  const pending = pendingTextDelta.get(sessionId);
-  if (!pending) return;
-  const state = getStreamingState(sessionId);
-  state.content += pending;
-  pendingTextDelta.set(sessionId, '');
 }
 
 function scheduleStreamingRefresh(sessionId: string) {
@@ -1050,12 +1089,11 @@ function ensureChatViewVisible() {
 }
 
 function removeStreamingElements() {
-  document.querySelector('#streaming-thinking')?.remove();
-  document.querySelector('#streaming-answer')?.remove();
+  document.querySelectorAll('[id^="streaming-"]').forEach((el) => el.remove());
 }
 
 function refreshStreamingUI(sessionId: string) {
-  // 只有当 sessionId 匹配当前会话，或者是新聊天场景（无 activeConversationId 且 pending 消息属于无会话状态）时才更新
+  // 只有当 sessionId 匹配当前会话时才更新
   if (sessionId !== activeConversationId && !(pendingUserMessage && !activeConversationId && !pendingUserMessageConvId)) return;
 
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
@@ -1065,63 +1103,92 @@ function refreshStreamingUI(sessionId: string) {
 
   const state = getStreamingState(sessionId);
 
-  // 思考元素：就地更新，保留用户折叠状态
-  let thinkingEl = document.getElementById('streaming-thinking');
-  if (state.thinking) {
-    if (!thinkingEl) {
-      thinkingEl = document.createElement('div');
-      thinkingEl.id = 'streaming-thinking';
-      thinkingEl.className = 'message assistant thinking-msg streaming';
-      thinkingEl.innerHTML = `<div class="message-avatar">🧠</div><div class="message-content"></div>`;
-      messageList.appendChild(thinkingEl);
+  // 先合并相邻的同类型块（thinking-thinking, text-text）
+  const merged: StreamBlock[] = [];
+  for (const block of state.blocks) {
+    const last = merged[merged.length - 1];
+    if (last && last.type === block.type && block.type === 'thinking') {
+      last.content = last.content + '\n' + block.content;
+    } else if (last && last.type === block.type && block.type === 'text') {
+      last.content = last.content + '\n\n' + block.content;
+    } else {
+      merged.push({ type: block.type, content: block.content });
     }
-    const contentEl = thinkingEl.querySelector('.message-content');
-    if (contentEl) {
-      const isCollapsed = collapsedThinkingBlocks.has(sessionId);
+  }
+
+  // 收集现有流式块元素，按索引索引
+  const existingEls = new Map<number, HTMLElement>();
+  messageList.querySelectorAll<HTMLElement>('[id^="streaming-block-"]').forEach((el) => {
+    const idx = parseInt(el.id.replace('streaming-block-', ''), 10);
+    if (!isNaN(idx)) existingEls.set(idx, el);
+  });
+  const usedIndices = new Set<number>();
+
+  // 按合并后的块序列更新（就地更新已存在的元素，创建新元素）
+  merged.forEach((block, idx) => {
+    usedIndices.add(idx);
+    const blockId = `streaming-block-${idx}`;
+    const existingEl = existingEls.get(idx);
+
+    if (block.type === 'thinking') {
       const label = state.thinkingDone ? '思考过程' : '思考中...';
-      // 尝试只更新 <pre> 文本（保留 <details> 折叠状态）
-      const existingPre = contentEl.querySelector('.thinking-content pre');
-      const existingSummary = contentEl.querySelector('.thinking-summary');
-      if (existingPre && existingSummary) {
-        existingPre.textContent = state.thinking;
-        existingSummary.textContent = label;
+      const isStreaming = !state.thinkingDone;
+      const expanded = isStreaming || expandedThinkingBlocks.has(sessionId);
+
+      if (existingEl && existingEl.classList.contains('thinking-msg')) {
+        // 就地更新：只更新 <pre> 文本和 <summary> 标签
+        const pre = existingEl.querySelector('.thinking-content pre');
+        const summary = existingEl.querySelector('.thinking-summary .thinking-label-text');
+        if (pre) pre.textContent = block.content;
+        if (summary) summary.textContent = label;
+        // 更新流式状态类
+        if (isStreaming) {
+          existingEl.querySelector('.thinking-block')?.classList.add('streaming-active');
+        } else {
+          existingEl.querySelector('.thinking-block')?.classList.remove('streaming-active');
+        }
       } else {
-        // 首次创建 <details> 元素
-        contentEl.innerHTML = renderThinkingDetails(state.thinking, label, !isCollapsed);
-        // 监听折叠事件，跟踪用户操作
-        const detailsEl = contentEl.querySelector('.thinking-block');
+        // 删除旧元素（类型不匹配或不存在）
+        existingEl?.remove();
+        const el = document.createElement('div');
+        el.id = blockId;
+        el.className = 'message assistant thinking-msg streaming';
+        el.innerHTML = `<div class="message-content">${renderThinkingDetails(block.content, label, expanded, undefined, isStreaming)}</div>`;
+        messageList.appendChild(el);
+        const detailsEl = el.querySelector('.thinking-block');
         if (detailsEl) {
           detailsEl.addEventListener('toggle', () => {
-            if (!(detailsEl as HTMLDetailsElement).open) {
-              collapsedThinkingBlocks.add(sessionId);
+            if ((detailsEl as HTMLDetailsElement).open) {
+              expandedThinkingBlocks.add(sessionId);
             } else {
-              collapsedThinkingBlocks.delete(sessionId);
+              expandedThinkingBlocks.delete(sessionId);
             }
           });
         }
+        existingEls.set(idx, el);
+      }
+    } else if (block.type === 'text') {
+      if (existingEl && !existingEl.classList.contains('thinking-msg')) {
+        // 就地更新：只更新 markdown-body 内容
+        const mdBody = existingEl.querySelector('.markdown-body');
+        if (mdBody) mdBody.innerHTML = renderMarkdown(block.content);
+      } else {
+        existingEl?.remove();
+        const el = document.createElement('div');
+        el.id = blockId;
+        el.className = 'message assistant streaming';
+        el.innerHTML = `<div class="message-content"><div class="markdown-body">${renderMarkdown(block.content)}</div></div>`;
+        messageList.appendChild(el);
+        initCodeCopyButtons(el);
+        existingEls.set(idx, el);
       }
     }
-  } else if (thinkingEl) {
-    thinkingEl.remove();
-  }
+  });
 
-  // 回答元素：就地更新而非删除重建
-  let answerEl = document.getElementById('streaming-answer');
-  if (state.content) {
-    if (!answerEl) {
-      answerEl = document.createElement('div');
-      answerEl.id = 'streaming-answer';
-      answerEl.className = 'message assistant streaming';
-      answerEl.innerHTML = `<div class="message-avatar">AI</div><div class="message-content"><div class="markdown-body"></div></div>`;
-      messageList.appendChild(answerEl);
-    }
-    const mdBody = answerEl.querySelector('.markdown-body');
-    if (mdBody) {
-      mdBody.innerHTML = renderMarkdown(state.content);
-    }
-  } else if (answerEl) {
-    answerEl.remove();
-  }
+  // 移除不再需要的旧流式元素（块数量减少时）
+  existingEls.forEach((el, idx) => {
+    if (!usedIndices.has(idx)) el.remove();
+  });
 
   if (isNearBottom()) {
     scrollMessageListToBottom();
@@ -1131,8 +1198,38 @@ function refreshStreamingUI(sessionId: string) {
 function scrollMessageListToBottom() {
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   if (messageList) {
+    // 流式输出时临时禁用 smooth 滚动，避免动画追逐效应
+    const prevBehavior = messageList.style.scrollBehavior;
+    messageList.style.scrollBehavior = 'auto';
     messageList.scrollTop = messageList.scrollHeight;
+    messageList.style.scrollBehavior = prevBehavior;
   }
+}
+
+/** 初始化滚动到底部浮动按钮 */
+function initScrollToBottomButton(container: HTMLElement): void {
+  // 移除旧按钮
+  container.querySelector('.scroll-to-bottom-btn')?.remove();
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'scroll-to-bottom-btn';
+  btn.title = '滚动到底部';
+  btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+  btn.addEventListener('click', () => scrollMessageListToBottom());
+  container.appendChild(btn);
+
+  const handleScroll = () => {
+    if (isNearBottom()) {
+      btn.classList.remove('visible');
+    } else {
+      btn.classList.add('visible');
+    }
+  };
+
+  container.addEventListener('scroll', handleScroll, { passive: true });
+  // 初始状态
+  handleScroll();
 }
 
 /** 判断用户是否处于消息列表底部附近（阈值 80px），用于流式输出时的智能滚动 */
@@ -1344,15 +1441,34 @@ async function openPathInFileManager(path: string): Promise<void> {
   }
 }
 
-function handleSessionIdClick() {
+async function handleSessionIdClick() {
   const control = document.querySelector<HTMLButtonElement>('#session-id-copy');
   const sessionId = control?.dataset.sessionId?.trim();
   if (!sessionId || sessionId === '—') {
     return;
   }
-  copyTextToClipboard(sessionId).then((ok) => {
-    if (ok) showCopyToast();
-  });
+
+  const projectDir = getEffectiveProjectDir();
+  if (!projectDir) {
+    // 无工作目录：降级为复制 Session ID
+    copyTextToClipboard(sessionId).then((ok) => {
+      if (ok) showCopyToast();
+    });
+    return;
+  }
+
+  try {
+    await invoke('open_terminal_resume', {
+      projectDir,
+      sessionId,
+    });
+  } catch (e) {
+    console.error('打开终端失败:', e);
+    // 失败时降级复制
+    copyTextToClipboard(sessionId).then((ok) => {
+      if (ok) showCopyToast();
+    });
+  }
 }
 
 function bindSessionIdCopyEvents() {
@@ -1551,7 +1667,7 @@ function updateOrAddConversation(conv: Conversation) {
   } else {
     conversations.unshift(normalized);
   }
-  conversations.sort((a, b) => b.updated_at - a.updated_at);
+  conversations.sort((a, b) => b.created_at - a.created_at);
 }
 
 async function refreshConversationFromBackend(conversationId: string) {
@@ -1876,6 +1992,10 @@ function attachEventListeners() {
       }
     }, 50);
   }
+
+  // 初始化代码复制按钮和消息复制控件
+  const msgList = document.querySelector<HTMLDivElement>('#message-list');
+  if (msgList) setupMessageListPostRender(msgList);
 }
 
 function handleConversationListClick(e: Event) {
@@ -3422,43 +3542,169 @@ async function openSettingsModal() {
   }
 }
 
-/** 将独立的 thinking 消息内容合并到后续 assistant 消息的 thinking 属性中 */
-function mergeThinkingIntoAssistant(messages: Message[]): Message[] {
-  const hiddenRoles = new Set(['tool_use', 'tool_result']);
-  const result: Message[] = [];
+// ============================================================
+// 工具消息渲染系统
+// ============================================================
 
-  for (let i = 0; i < messages.length; i++) {
+/** 工具显示配置 */
+interface ToolConfig {
+  displayMode: 'one-line' | 'collapsible';
+  icon: string;
+  label: string;
+  getValue?: (input: Record<string, unknown>) => string;
+  getSecondary?: (input: Record<string, unknown>) => string | undefined;
+  style?: 'terminal' | 'file-open' | 'search' | 'default';
+  borderColor: string;
+  iconColor: string;
+}
+
+const TOOL_CONFIG_MAP: Record<string, ToolConfig> = {
+  Bash: { displayMode: 'one-line', icon: '>_', label: 'Bash', getValue: (i) => String(i.command || ''), getSecondary: (i) => i.description ? String(i.description) : undefined, style: 'terminal', borderColor: '#3fb950', iconColor: '#3fb950' },
+  Read: { displayMode: 'one-line', icon: '📄', label: 'Read', getValue: (i) => String(i.file_path || ''), style: 'file-open', borderColor: '#8b949e', iconColor: '#8b949e' },
+  Edit: { displayMode: 'collapsible', icon: '✏️', label: 'Edit', getValue: (i) => String(i.file_path || ''), borderColor: '#d29922', iconColor: '#d29922' },
+  Write: { displayMode: 'collapsible', icon: '📝', label: 'Write', getValue: (i) => String(i.file_path || ''), borderColor: '#d29922', iconColor: '#d29922' },
+  Grep: { displayMode: 'one-line', icon: '🔍', label: 'Grep', getValue: (i) => String(i.pattern || ''), style: 'search', borderColor: '#8b949e', iconColor: '#8b949e' },
+  Glob: { displayMode: 'one-line', icon: '🔍', label: 'Glob', getValue: (i) => String(i.pattern || ''), style: 'search', borderColor: '#8b949e', iconColor: '#8b949e' },
+  Task: { displayMode: 'collapsible', icon: '🤖', label: 'Subagent', getValue: (i) => String(i.description || i.prompt || '').substring(0, 80), borderColor: '#a371f7', iconColor: '#a371f7' },
+  TodoWrite: { displayMode: 'collapsible', icon: '✅', label: 'TodoWrite', borderColor: '#a371f7', iconColor: '#a371f7' },
+  TaskCreate: { displayMode: 'one-line', icon: '📋', label: 'Task', getValue: (i) => String(i.subject || ''), borderColor: '#a371f7', iconColor: '#a371f7' },
+  TaskUpdate: { displayMode: 'one-line', icon: '📋', label: 'Task', getValue: (i) => String(i.subject || ''), borderColor: '#a371f7', iconColor: '#a371f7' },
+  AskUserQuestion: { displayMode: 'collapsible', icon: '❓', label: 'Question', borderColor: '#58a6ff', iconColor: '#58a6ff' },
+  exit_plan_mode: { displayMode: 'collapsible', icon: '📐', label: 'Plan', borderColor: '#7b8cff', iconColor: '#7b8cff' },
+  ExitPlanMode: { displayMode: 'collapsible', icon: '📐', label: 'Plan', borderColor: '#7b8cff', iconColor: '#7b8cff' },
+};
+
+function getDefaultToolConfig(): ToolConfig {
+  return { displayMode: 'one-line', icon: '🔧', label: 'Tool', borderColor: '#8b949e', iconColor: '#8b949e' };
+}
+
+/** 解析 JSON，失败返回 null */
+function tryParseJson(text: string): Record<string, unknown> | null {
+  try {
+    const trimmed = text.trim();
+    if (!trimmed.startsWith('{')) return null;
+    return JSON.parse(trimmed);
+  } catch {
+    return null;
+  }
+}
+
+/** 提取工具名称 */
+function extractToolName(content: string): string {
+  const json = tryParseJson(content);
+  return json ? String(json.tool_name || json.tool || json.name || '') : '';
+}
+
+/** 提取工具输入 */
+function extractToolInput(content: string): Record<string, unknown> {
+  const json = tryParseJson(content);
+  if (!json) return {};
+  return (json.tool_input || json.input || json.arguments || {}) as Record<string, unknown>;
+}
+
+/** 提取工具结果文本 */
+function extractToolResult(content: string): { text: string; isError: boolean } {
+  const json = tryParseJson(content);
+  if (!json) return { text: content, isError: false };
+  const text = String(json.content ?? json.output ?? json.result ?? '');
+  const isError = Boolean(json.is_error || json.isError);
+  return { text, isError };
+}
+
+/** 合并相邻的同类型消息（连续 assistant 文本或连续 thinking） */
+function mergeAdjacentSameRole(messages: Message[]): Message[] {
+  if (messages.length === 0) return [];
+  const result: Message[] = [messages[0]];
+
+  for (let i = 1; i < messages.length; i++) {
+    const prev = result[result.length - 1];
+    const curr = messages[i];
+
+    // 相邻同角色 assistant（无 thinking 字段的纯文本消息）→ 合并
+    if (
+      prev.role === 'assistant' && curr.role === 'assistant'
+      && !prev.thinking && !curr.thinking
+    ) {
+      prev.content = prev.content + '\n\n' + curr.content;
+      continue;
+    }
+
+    // 相邻 thinking 消息 → 合并
+    if (prev.role === 'thinking' && curr.role === 'thinking') {
+      prev.content = prev.content + '\n' + curr.content;
+      continue;
+    }
+
+    result.push(curr);
+  }
+
+  return result;
+}
+
+/** 将 tool_use 和 tool_result 配对处理，生成内嵌工具消息 */
+function processToolMessages(messages: Message[]): Message[] {
+  const result: Message[] = [];
+  let i = 0;
+
+  while (i < messages.length) {
     const msg = messages[i];
 
-    if (msg.role === 'thinking' && msg.content.trim()) {
-      // 向后查找对应的 assistant 消息
-      let targetIdx = -1;
-      for (let j = i + 1; j < messages.length; j++) {
-        const next = messages[j];
-        if (next.role === 'thinking' || hiddenRoles.has(next.role)) continue;
-        if (next.role === 'assistant' && next.content.trim()) targetIdx = j;
-        break;
+    if (msg.role === 'tool_use') {
+      const toolName = extractToolName(msg.content);
+      const toolInput = extractToolInput(msg.content);
+      const config = TOOL_CONFIG_MAP[toolName] || getDefaultToolConfig();
+
+      // 查找对应的 tool_result
+      let toolResult: string | undefined;
+      let isError = false;
+      if (i + 1 < messages.length && messages[i + 1].role === 'tool_result') {
+        const resData = extractToolResult(messages[i + 1].content);
+        toolResult = resData.text;
+        isError = resData.isError;
+        i++; // 跳过 tool_result
       }
-      if (targetIdx >= 0) {
-        // 将思考内容合并到目标 assistant 消息（浅拷贝避免修改原数据）
-        const target = messages[targetIdx];
-        const merged = { ...target, thinking: ((target.thinking || '') + '\n' + msg.content).trim() };
-        messages[targetIdx] = merged;
-        continue; // 跳过此 thinking 消息
-      }
+
+      // 创建内嵌工具消息
+      const toolMsg: Message = {
+        id: msg.id,
+        role: 'tool',
+        content: toolInput ? JSON.stringify(toolInput) : msg.content,
+        timestamp: msg.timestamp,
+        toolData: {
+          toolName,
+          toolInput,
+          toolResult,
+          isError,
+          displayMode: config.displayMode,
+          colorScheme: {
+            border: config.borderColor,
+            icon: config.iconColor,
+            primary: config.borderColor,
+          },
+        },
+      };
+      result.push(toolMsg);
+      i++;
+      continue;
+    }
+
+    if (msg.role === 'tool_result') {
+      // 孤立的 tool_result（没有前置 tool_use），跳过
+      i++;
+      continue;
     }
 
     result.push(msg);
+    i++;
   }
 
   return result;
 }
 
 function filterVisibleMessages(messages: Message[]): Message[] {
-  // 收集所有需要隐藏的内部角色
-  const hiddenRoles = new Set(['tool_use', 'tool_result']);
+  // tool_use/tool_result 已在 processToolMessages 中合并为内嵌工具消息，此处不再处理
 
-  return messages.filter((msg, index) => {
+  return messages.filter((msg) => {
     // 过滤内部系统消息
     const trimmed = msg.content.trim();
     if (
@@ -3470,56 +3716,189 @@ function filterVisibleMessages(messages: Message[]): Message[] {
       return false;
     }
 
-    // 隐藏 tool_use 和 tool_result 消息
-    if (hiddenRoles.has(msg.role)) return false;
+    // thinking 消息始终显示（参考 claudecodeui: isThinking 消息作为独立 Reasoning accordion 渲染）
+    if (msg.role === 'thinking') return true;
 
-    if (msg.role !== 'thinking') return true;
-    // thinking 消息：如果后续（跳过其他 thinking / tool_use / tool_result）有内容的 assistant 消息则隐藏
-    for (let i = index + 1; i < messages.length; i++) {
-      const next = messages[i];
-      if (next.role === 'thinking' || hiddenRoles.has(next.role)) continue;
-      return !(next.role === 'assistant' && next.content.trim());
-    }
     return true;
   });
 }
 
-function renderThinkingDetails(thinking: string, label: string, expanded: boolean, dataId?: string): string {
+/** 大脑图标 SVG */
+function renderBrainIconHtml(): string {
+  return `<svg class="thinking-brain-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 5a3 3 0 1 0-5.997.125 4 4 0 0 0-2.526 5.77 4 4 0 0 0 .556 6.588A4 4 0 1 0 12 18Z"/>
+    <path d="M12 5a3 3 0 1 1 5.997.125 4 4 0 0 1 2.526 5.77 4 4 0 0 1-.556 6.588A4 4 0 1 1 12 18Z"/>
+    <path d="M15 13a4.5 4.5 0 0 1-3-4 4.5 4.5 0 0 1-3 4"/>
+    <path d="M17.599 6.5a3 3 0 0 0 .399-1.375"/>
+    <path d="M6.003 5.125A3 3 0 0 0 6.401 6.5"/>
+    <path d="M3.477 10.896a4 4 0 0 1 .585-.396"/>
+    <path d="M19.938 10.5a4 4 0 0 1 .585.396"/>
+    <path d="M6 18a4 4 0 0 1-1.967-.516"/>
+    <path d="M19.967 17.484A4 4 0 0 1 18 18"/>
+  </svg>`;
+}
+
+/** 下箭头 SVG */
+function renderChevronDownIconHtml(): string {
+  return `<svg class="thinking-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="6 9 12 15 18 9"></polyline>
+  </svg>`;
+}
+
+function renderThinkingDetails(thinking: string, label: string, expanded: boolean, dataId?: string, isStreaming: boolean = false): string {
   const openAttr = expanded ? ' open' : '';
   const dataAttr = dataId ? ` data-thinking-id="${escapeHtml(dataId)}"` : '';
+  const streamClass = isStreaming ? ' streaming-active' : '';
+  const durationText = isStreaming ? '' : '<span class="thinking-duration">思考完成</span>';
   return `
-    <details class="thinking-block"${openAttr}${dataAttr}>
-      <summary class="thinking-summary">${escapeHtml(label)}</summary>
-      <div class="thinking-content"><pre>${escapeHtml(thinking)}</pre></div>
+    <details class="thinking-block${streamClass}"${openAttr}${dataAttr}>
+      <summary class="thinking-summary">
+        ${renderBrainIconHtml()}
+        <span class="thinking-label"><span class="thinking-label-text">${escapeHtml(label)}</span></span>
+        ${durationText}
+        ${renderChevronDownIconHtml()}
+      </summary>
+      <div class="thinking-content-wrapper">
+        <div class="thinking-content-inner">
+          <div class="thinking-content-scroll">
+            <div class="thinking-content"><pre>${escapeHtml(thinking)}</pre></div>
+          </div>
+        </div>
+      </div>
     </details>
   `;
 }
-function renderMessageHtml(msg: Message): string {
+
+/** 渲染工具消息 HTML */
+function renderToolMessageHtml(msg: Message): string {
+  const td = msg.toolData;
+  if (!td) return '';
+
+  const { toolName, toolInput, toolResult, isError, displayMode, colorScheme } = td;
+  const isRunning = toolResult === undefined;
+  const hasResult = toolResult !== undefined && toolResult !== '';
+  const statusBadge = isRunning
+    ? '<span class="tool-status tool-status-running">运行中</span>'
+    : isError
+      ? '<span class="tool-status tool-status-error">错误</span>'
+      : '<span class="tool-status tool-status-done">完成</span>';
+
+  // One-line 显示（Bash、Read、Grep、Glob 等简单工具）
+  if (displayMode === 'one-line') {
+    const config = TOOL_CONFIG_MAP[toolName] || getDefaultToolConfig();
+    const value = config.getValue ? config.getValue(toolInput) : toolName;
+    const secondary = config.getSecondary ? config.getSecondary(toolInput) : undefined;
+    const styleClass = config.style ? `tool-oneline-${config.style}` : 'tool-oneline-default';
+
+    let oneLineHtml = '';
+    if (config.style === 'terminal') {
+      oneLineHtml = `<span class="tool-cmd-prefix">$</span> <code class="tool-cmd-text">${escapeHtml(value)}</code>`;
+    } else if (config.style === 'file-open') {
+      oneLineHtml = `<span class="tool-file-link">📄 ${escapeHtml(value)}</span>`;
+    } else if (config.style === 'search') {
+      oneLineHtml = `<span class="tool-search-pattern">${escapeHtml(value)}</span>`;
+    } else {
+      oneLineHtml = `<span>${escapeHtml(value || toolName)}</span>`;
+    }
+
+    const secondaryHtml = secondary ? `<span class="tool-secondary">${escapeHtml(secondary)}</span>` : '';
+
+    const toolContent = `
+      <div class="tool-card" style="border-left-color: ${colorScheme.border}">
+        <div class="tool-card-header">
+          <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
+          <span class="tool-label">${escapeHtml(config.label)}</span>
+          ${secondaryHtml}
+          ${statusBadge}
+        </div>
+        <div class="tool-card-body ${styleClass}">
+          ${oneLineHtml}
+        </div>
+        ${hasResult ? `<div class="tool-card-result"><div class="markdown-body">${renderMarkdown(toolResult!)}</div></div>` : ''}
+      </div>`;
+    return toolContent;
+  }
+
+  // 可折叠显示（Edit、Write、Task、Plan 等复杂工具）
+  const config = TOOL_CONFIG_MAP[toolName] || getDefaultToolConfig();
+  const value = config.getValue ? config.getValue(toolInput) : undefined;
+  const titleText = value || toolName;
+
+  let inputPreview = '';
+  if (toolInput && Object.keys(toolInput).length > 0) {
+    const previewObj: Record<string, unknown> = {};
+    // 只显示关键字段
+    for (const key of ['file_path', 'old_string', 'new_string', 'prompt', 'description', 'subject', 'question']) {
+      if (key in toolInput) {
+        const val = toolInput[key];
+        if (typeof val === 'string' && val.length > 200) {
+          previewObj[key] = (val as string).substring(0, 200) + '...';
+        } else {
+          previewObj[key] = val;
+        }
+      }
+    }
+    if (Object.keys(previewObj).length > 0) {
+      inputPreview = `<pre class="tool-input-preview"><code>${escapeHtml(JSON.stringify(previewObj, null, 2))}</code></pre>`;
+    }
+  }
+
+  const expanded = isRunning ? ' open' : '';
+  const toolContent = `
+    <div class="tool-card" style="border-left-color: ${colorScheme.border}">
+      <details class="tool-collapsible"${expanded}>
+        <summary class="tool-card-header tool-collapsible-summary">
+          <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
+          <span class="tool-label">${escapeHtml(config.label)}</span>
+          <span class="tool-title-text">${escapeHtml(titleText)}</span>
+          ${statusBadge}
+          <span class="tool-chevron">▾</span>
+        </summary>
+        <div class="tool-card-body">
+          ${inputPreview}
+          ${hasResult
+            ? `<div class="tool-card-result"><div class="markdown-body">${renderMarkdown(toolResult!)}</div></div>`
+            : isRunning
+              ? '<div class="tool-running-indicator"><span class="pending-dot"></span><span class="pending-dot"></span><span class="pending-dot"></span></div>'
+              : ''}
+        </div>
+      </details>
+    </div>`;
+  return toolContent;
+}
+
+function renderMessageHtml(msg: Message, prevRole?: string): string {
+  if (msg.role === 'tool') {
+    return renderToolMessageHtml(msg);
+  }
+
   if (msg.role === 'error') {
     return `
       <div class="message error">
-        <div class="message-avatar">!</div>
         <div class="message-content message-error-content">
           <div class="message-error-title">调用失败</div>
           <div class="markdown-body">${renderMarkdown(msg.content)}</div>
-          <div class="message-time">${formatTime(msg.timestamp)}</div>
+          <div class="message-footer">
+            <div class="message-time">${formatTime(msg.timestamp)}</div>
+          </div>
         </div>
       </div>
     `;
   }
 
   const isThinking = msg.role === 'thinking';
-  const avatarLabel = msg.role === 'user' ? 'You' : isThinking ? '🧠' : 'AI';
+  const avatarLabel = msg.role === 'user' ? 'You' : '';
   const roleClass = isThinking ? 'assistant thinking-msg' : msg.role;
 
   let thinkingHtml = '';
   let contentHtml = '';
-  const thinkingExpanded = !collapsedThinkingBlocks.has(msg.id);
+  // 默认折叠，只有用户手动展开过才展开（匹配 claudecodeui defaultOpen=false）
+  const thinkingExpanded = expandedThinkingBlocks.has(msg.id);
 
   if (isThinking && msg.content.trim()) {
     thinkingHtml = renderThinkingDetails(msg.content, '思考过程', thinkingExpanded, msg.id);
   } else {
-    // 始终显示思考内容（如果有），不论是否有正文
+    // 助手消息中合并的思考过程
     if (msg.thinking && msg.thinking.trim()) {
       thinkingHtml = renderThinkingDetails(msg.thinking, '思考过程', thinkingExpanded, msg.id);
     }
@@ -3528,22 +3907,81 @@ function renderMessageHtml(msg: Message): string {
     }
   }
 
-  // 用户消息：引用文件芯片和正文合并展示为一条消息
+  // 用户消息：引用文件芯片
   const userRefs = msg.role === 'user' && msg.refs && msg.refs.length > 0
     ? renderFileRefChipsHtml(msg.refs)
     : '';
 
+  // 消息复制控件
+  let copyControlHtml = '';
+  if (!isThinking && msg.content.trim()) {
+    if (msg.role === 'assistant') {
+      // 助手消息：复制 Markdown（默认）/ 复制纯文本
+      const escapedContent = escapeHtml(msg.content);
+      copyControlHtml = `
+        <div class="msg-copy-control">
+          <button type="button" class="msg-copy-btn" data-copy-content="${escapedContent}" title="复制消息" aria-label="复制消息">
+            <svg class="msg-copy-icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+          </button>
+        </div>`;
+    } else if (msg.role === 'user') {
+      const escapedContent = escapeHtml(msg.content);
+      copyControlHtml = `
+        <div class="msg-copy-control">
+          <button type="button" class="msg-copy-btn" data-copy-content="${escapedContent}" title="复制消息" aria-label="复制消息">
+            <svg class="msg-copy-icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+            </svg>
+          </button>
+        </div>`;
+    }
+  }
+
+  const isGrouped = prevRole && prevRole === msg.role && (msg.role === 'user' || msg.role === 'assistant' || msg.role === 'tool');
+  const groupedClass = isGrouped ? ' grouped' : '';
+
+  // 助手/思考消息：全宽布局，无头像
+  if (msg.role === 'assistant' || isThinking) {
+    return `
+      <div class="message ${roleClass}${groupedClass}">
+        <div class="message-content">
+          ${thinkingHtml}
+          ${contentHtml}
+          <div class="message-footer">
+            ${copyControlHtml}
+            <div class="message-time">${formatTime(msg.timestamp)}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // 用户消息：蓝色气泡 + 头像
   return `
-    <div class="message ${roleClass}">
-      <div class="message-avatar">${avatarLabel}</div>
+    <div class="message ${roleClass}${groupedClass}">
+      ${isGrouped ? '' : `<div class="message-avatar">${avatarLabel}</div>`}
       <div class="message-content">
         ${userRefs}
         ${thinkingHtml}
         ${contentHtml}
-        <div class="message-time">${formatTime(msg.timestamp)}</div>
+        <div class="message-footer">
+          ${copyControlHtml}
+          <div class="message-time">${formatTime(msg.timestamp)}</div>
+        </div>
       </div>
     </div>
   `;
+}
+
+/** 完整消息处理管线：合并相邻消息 → 处理工具消息 → 过滤不可见 → 渲染 HTML */
+function renderMessageListHtml(messages: Message[]): string {
+  return filterVisibleMessages(processToolMessages(mergeAdjacentSameRole(messages)))
+    .map((msg, idx, arr) => renderMessageHtml(msg, idx > 0 ? arr[idx - 1].role : undefined))
+    .join('');
 }
 
 function renderFileRefChipsHtml(refs: FileRef[]): string {
@@ -3687,9 +4125,23 @@ function renderChatHeaderHtml(conversation: Conversation | undefined): string {
   const platform = conversation?.platform || 'claude';
   const sessionId = conversation?.id || activeConversationId || '—';
   const canCopySessionId = sessionId !== '—';
+  const projectDir = getEffectiveProjectDir();
+  const hasProjectDir = projectDir.length > 0;
   const sessionTitle = canCopySessionId
-    ? `Session ID: ${sessionId}（点击复制）`
+    ? (hasProjectDir
+        ? `Session ID: ${sessionId}（点击在终端中 cd ${projectDir} && claude --resume）`
+        : `Session ID: ${sessionId}（点击复制）`)
     : 'Session ID';
+
+  // 终端图标（替代复制图标）
+  const terminalIconSvg = canCopySessionId && hasProjectDir
+    ? `<svg class="session-id-action-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="4 17 10 11 4 5"></polyline>
+        <line x1="12" y1="19" x2="20" y2="19"></line>
+      </svg>`
+    : (canCopySessionId
+        ? renderCopyIconHtml('session-id-copy-icon')
+        : '');
 
   return `
     <div class="chat-header-left">
@@ -3709,7 +4161,7 @@ function renderChatHeaderHtml(conversation: Conversation | undefined): string {
           aria-label="${escapeHtml(sessionTitle)}"
         >
           <span class="session-id-text">${escapeHtml(sessionId)}</span>
-          ${renderCopyIconHtml('session-id-copy-icon')}
+          ${terminalIconSvg}
         </button>
       `
           : `<span class="session-id">${escapeHtml(sessionId)}</span>`
@@ -3747,7 +4199,7 @@ function renderChatContent(): string {
 
   return `
     <div class="message-list" id="message-list">
-      ${filterVisibleMessages(mergeThinkingIntoAssistant(messages)).map(renderMessageHtml).join('')}
+      ${renderMessageListHtml(messages)}
     </div>
   `;
 }
@@ -3991,7 +4443,7 @@ function removePendingAssistantIndicator() {
   document.querySelector('#pending-assistant')?.remove();
 }
 
-function showPendingAssistantIndicator(statusText = '正在请求模型...') {
+function showPendingAssistantIndicator(statusText = '正在思考...') {
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   if (!messageList) return;
 
@@ -4001,11 +4453,12 @@ function showPendingAssistantIndicator(statusText = '正在请求模型...') {
     pendingEl.id = 'pending-assistant';
     pendingEl.className = 'message assistant pending';
     pendingEl.innerHTML = `
-      <div class="message-avatar">AI</div>
       <div class="message-content message-pending-content">
-        <span class="pending-dot"></span>
-        <span class="pending-dot"></span>
-        <span class="pending-dot"></span>
+        <div class="pending-animation">
+          <span class="pending-dot"></span>
+          <span class="pending-dot"></span>
+          <span class="pending-dot"></span>
+        </div>
         <span class="pending-text"></span>
       </div>
     `;
@@ -4032,6 +4485,79 @@ function hideSendingState() {
   // 直接重置按钮为非加载状态（此函数仅在当前查看的会话结束时调用）
   setSendButtonLoading(false);
   updateSendButtonState();
+}
+
+/** 消息列表渲染后的统一后处理：代码复制按钮、思考块折叠、消息复制控件 */
+function setupMessageListPostRender(container: HTMLElement): void {
+  // 初始化代码块复制按钮
+  initCodeCopyButtons(container);
+
+  // 绑定思考块折叠事件
+  container.querySelectorAll('.thinking-block[data-thinking-id]').forEach((details) => {
+    // 避免重复绑定
+    if ((details as HTMLElement).dataset.thinkingBound === '1') return;
+    (details as HTMLElement).dataset.thinkingBound = '1';
+    details.addEventListener('toggle', () => {
+      const id = (details as HTMLElement).dataset.thinkingId;
+      if (!id) return;
+      if ((details as HTMLDetailsElement).open) {
+        expandedThinkingBlocks.add(id);
+      } else {
+        expandedThinkingBlocks.delete(id);
+      }
+    });
+  });
+
+  // 初始化滚动到底部按钮
+  initScrollToBottomButton(container);
+
+  // 初始化消息复制按钮
+  container.querySelectorAll('.msg-copy-btn').forEach((btn) => {
+    if ((btn as HTMLElement).dataset.bound === '1') return;
+    (btn as HTMLElement).dataset.bound = '1';
+    btn.addEventListener('click', async () => {
+      const content = (btn as HTMLElement).dataset.copyContent || '';
+      const copyAsMarkdown = (btn as HTMLElement).dataset.copyMarkdown === '1';
+      try {
+        if (copyAsMarkdown) {
+          // 复制为 Markdown：去掉 HTML 标签
+          const tempDiv = document.createElement('div');
+          tempDiv.innerHTML = content;
+          // 将代码块转回 markdown 格式
+          tempDiv.querySelectorAll('.code-block-wrapper').forEach((wrapper) => {
+            const code = (wrapper.querySelector('.code-copy-btn') as HTMLElement)?.dataset.code || '';
+            const lang = wrapper.querySelector('.code-lang-badge')?.textContent || '';
+            const fence = '```' + (lang && lang !== 'text' ? lang : '');
+            wrapper.outerHTML = fence + '\n' + code + '\n```';
+          });
+          await navigator.clipboard.writeText(tempDiv.textContent || '');
+        } else {
+          await navigator.clipboard.writeText(content);
+        }
+        const icon = btn.querySelector('.msg-copy-icon-svg') as HTMLElement | null;
+        if (icon) {
+          icon.innerHTML = '<polyline points="20 6 9 17 4 12"></polyline>';
+        }
+        btn.classList.add('copied');
+        setTimeout(() => {
+          if (icon) {
+            icon.innerHTML = '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>';
+          }
+          btn.classList.remove('copied');
+        }, 2000);
+      } catch {
+        // 降级复制
+        const textarea = document.createElement('textarea');
+        textarea.value = content;
+        textarea.style.position = 'fixed';
+        textarea.style.opacity = '0';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        document.body.removeChild(textarea);
+      }
+    });
+  });
 }
 
 function refreshChatContent() {
@@ -4071,19 +4597,9 @@ function refreshChatContent() {
         timestamp: Math.floor(Date.now() / 1000),
       });
     }
-    messageList.innerHTML = filterVisibleMessages(mergeThinkingIntoAssistant(messages)).map(renderMessageHtml).join('');
-    // 绑定思考块折叠事件，跟踪用户操作
-    messageList.querySelectorAll('.thinking-block[data-thinking-id]').forEach((details) => {
-      details.addEventListener('toggle', () => {
-        const id = (details as HTMLElement).dataset.thinkingId;
-        if (!id) return;
-        if (!(details as HTMLDetailsElement).open) {
-          collapsedThinkingBlocks.add(id);
-        } else {
-          collapsedThinkingBlocks.delete(id);
-        }
-      });
-    });
+    messageList.innerHTML = renderMessageListHtml(messages);
+    // 后处理：代码复制按钮、思考块折叠事件、消息复制控件
+    setupMessageListPostRender(messageList);
     if (isSendButtonLoading()) {
       showPendingAssistantIndicator();
     } else {
