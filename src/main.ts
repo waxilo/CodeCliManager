@@ -167,7 +167,6 @@ let platforms: Record<string, PlatformConfig> = {};
 let currentPlatform = '';
 let activeConversationId = '';
 let editingConversationId: string | null = null;
-let currentTime = new Date();
 let pendingUserMessage: string | null = null;
 /** pendingUserMessage 所属的会话 ID（确保消息不串会话） */
 let pendingUserMessageConvId: string | null = null;
@@ -718,21 +717,6 @@ async function init() {
   window.addEventListener('resize', () => {
     applySidebarWidth(sidebarWidth);
   });
-  setInterval(() => {
-    currentTime = new Date();
-    // 更新相对时间显示（仅更新 .compact-time 元素，不重建整个列表）
-    document.querySelectorAll<HTMLElement>('.conversation-item').forEach((item) => {
-      const id = item.dataset.id;
-      if (!id) return;
-      const conv = conversations.find(c => c.id === id);
-      if (!conv) return;
-      const timeEl = item.querySelector('.compact-time');
-      const newTime = formatCompactTime(conv.updated_at);
-      if (timeEl && newTime) {
-        timeEl.textContent = newTime;
-      }
-    });
-  }, 60000);
 }
 
 // 设置事件监听器 - 监听后端发送的实时事件
@@ -1687,36 +1671,18 @@ async function loadData() {
   }
 }
 
-function formatCompactTime(timestamp: number): string {
-  const date = new Date(timestamp * 1000);
-  const diffInMinutes = Math.floor(Math.max(0, currentTime.getTime() - date.getTime()) / (1000 * 60));
-  
-  if (diffInMinutes < 1) return '<1m';
-  if (diffInMinutes < 60) return `${diffInMinutes}m`;
-  
-  const diffInHours = Math.floor(diffInMinutes / 60);
-  if (diffInHours < 24) return `${diffInHours}hr`;
-  
-  const diffInDays = Math.floor(diffInHours / 24);
-  return `${diffInDays}d`;
-}
-
 function renderConversationList(): string {
   if (conversations.length === 0) {
     return '<div class="empty-state">No conversations yet</div>';
   }
-  
+
   return conversations.map(c => {
     const isActive = c.id === activeConversationId;
     const isEditing = editingConversationId === c.id;
     const isRunning = runningSessions.has(c.id);
-    const messageCount = c.messages.length;
-    const platformName = platforms[c.platform]?.name || c.platform;
-    const compactTime = formatCompactTime(c.updated_at);
-    
+
     return `
       <div class="conversation-item ${isActive ? 'active' : ''} ${isEditing ? 'editing' : ''} ${isRunning ? 'running' : ''}" data-id="${c.id}">
-        ${isActive && !isEditing ? '<div class="active-indicator"></div>' : ''}
         ${isEditing ? `
           <div class="conversation-edit-row">
             <input type="text"
@@ -1729,56 +1695,24 @@ function renderConversationList(): string {
               <button type="button" class="edit-action-btn cancel" data-action="cancel-edit" title="Cancel">✕</button>
             </div>
           </div>
-          <div class="conversation-meta">
-            <span class="platform-tag">${platformName}</span>
-            ${messageCount > 0 ? `<span class="message-count">${messageCount}</span>` : ''}
-            ${compactTime ? `<span class="compact-time">${compactTime}</span>` : ''}
-          </div>
         ` : `
-          <div class="conversation-main">
-            <div class="conversation-header">
-              ${isRunning ? '<span class="conversation-spinner" title="AI 正在回答中..."></span>' : ''}
-              <div class="conversation-title">${escapeHtml(c.title)}</div>
-            </div>
-            <div class="conversation-meta">
-              <span class="platform-tag">${platformName}</span>
-              ${messageCount > 0 ? `<span class="message-count">${messageCount}</span>` : ''}
-            </div>
-          </div>
-          <div class="conversation-aside">
-            ${compactTime ? `<span class="compact-time">${compactTime}</span>` : ''}
-            <div class="action-buttons">
-              <button type="button" class="action-btn edit" data-action="edit" data-id="${c.id}" title="重命名">✎</button>
-              <button type="button" class="action-btn delete" data-action="delete" data-id="${c.id}" title="删除">🗑</button>
-            </div>
-          </div>
+          <span class="conversation-row">
+            <span class="conversation-title">${escapeHtml(c.title)}</span>
+            <button type="button" class="conv-more-btn" data-action="more" data-id="${c.id}" title="更多操作" aria-label="更多操作">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+            </button>
+          </span>
         `}
       </div>
     `;
   }).join('');
 }
 
-/** 仅更新侧边栏会话列表的转圈状态（局部 DOM 更新，不重建整个列表） */
 function updateConversationListSpinner() {
-  const items = document.querySelectorAll<HTMLElement>('.conversation-item');
-  items.forEach((item) => {
+  document.querySelectorAll<HTMLElement>('.conversation-item').forEach((item) => {
     const id = item.dataset.id;
     if (!id) return;
-    const isRunning = runningSessions.has(id);
-    item.classList.toggle('running', isRunning);
-
-    const header = item.querySelector('.conversation-header');
-    if (!header) return;
-
-    let spinner = header.querySelector<HTMLElement>('.conversation-spinner');
-    if (isRunning && !spinner) {
-      const el = document.createElement('span');
-      el.className = 'conversation-spinner';
-      el.title = 'AI 正在回答中...';
-      header.insertBefore(el, header.firstChild);
-    } else if (!isRunning && spinner) {
-      spinner.remove();
-    }
+    item.classList.toggle('running', runningSessions.has(id));
   });
 }
 
@@ -1997,12 +1931,8 @@ function handleConversationListClick(e: Event) {
     const action = actionEl.dataset.action;
     const id = actionEl.dataset.id;
 
-    if (action === 'delete' && id) {
-      void deleteConversation(id);
-      return;
-    }
-    if (action === 'edit' && id) {
-      startEdit(id);
+    if (action === 'more' && id) {
+      toggleConversationMenu(id, actionEl as HTMLElement);
       return;
     }
     if (action === 'save-edit' && id) {
@@ -2022,6 +1952,59 @@ function handleConversationListClick(e: Event) {
   if (id) {
     selectConversation(id);
   }
+}
+
+function closeConversationMenu() {
+  document.querySelector('.conv-menu-overlay')?.remove();
+}
+
+function toggleConversationMenu(conversationId: string, anchorEl: HTMLElement) {
+  const existing = document.querySelector<HTMLElement>('.conv-menu-overlay');
+  if (existing?.dataset.convId === conversationId) {
+    return closeConversationMenu();
+  }
+  closeConversationMenu();
+
+  const { right, bottom, top: anchorTop } = anchorEl.getBoundingClientRect();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'conv-menu-overlay';
+  overlay.dataset.convId = conversationId;
+  overlay.innerHTML = `
+    <div class="conv-menu-dropdown">
+      <button type="button" class="conv-menu-item" data-action="edit" data-id="${conversationId}">重命名</button>
+      <button type="button" class="conv-menu-item is-danger" data-action="delete" data-id="${conversationId}">删除</button>
+    </div>
+  `;
+
+  let onKey: (ev: KeyboardEvent) => void;
+  const closeMenu = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+  onKey = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape') closeMenu();
+  };
+
+  document.addEventListener('keydown', onKey);
+  overlay.addEventListener('click', (ev) => {
+    const btn = (ev.target as HTMLElement).closest<HTMLElement>('.conv-menu-item');
+    if (!btn || !btn.dataset.action) return closeMenu();
+    const { action, id } = btn.dataset;
+    closeMenu();
+    if (action === 'edit' && id) startEdit(id);
+    if (action === 'delete' && id) void deleteConversation(id);
+  });
+
+  document.body.appendChild(overlay);
+
+  requestAnimationFrame(() => {
+    const menu = overlay.querySelector<HTMLElement>('.conv-menu-dropdown');
+    if (!menu) return;
+    const r = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(8, right - r.width)}px`;
+    menu.style.top = `${bottom + r.height > window.innerHeight ? Math.max(8, anchorTop - r.height - 4) : bottom + 4}px`;
+  });
 }
 
 interface ConfirmDialogOptions {
