@@ -146,6 +146,6 @@ export function renderMarkdown(text: string): string {
   const raw = marked.parse(text, { async: false }) as string;
   return DOMPurify.sanitize(raw, {
     USE_PROFILES: { html: true },
-    ADD_ATTR: ['data-code', 'data-bound', 'target', 'rel'],
+    ADD_ATTR: ['data-code', 'data-bound', 'target', 'rel', 'class'],
   });
 }

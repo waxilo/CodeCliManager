@@ -958,8 +958,14 @@ body.is-sidebar-resizing {
 
 .message.user .message-content .markdown-body pre,
 .message.user .message-content .code-block-wrapper {
-  background: rgba(0, 0, 0, 0.2);
-  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(0, 0, 0, 0.3) !important;
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.message.user .message-content .code-block-wrapper pre code,
+.message.user .message-content .code-block-wrapper .hljs {
+  color: #e2e8f0 !important;
+  background: transparent !important;
 }
 
 .message.user .message-time {
@@ -1192,10 +1198,10 @@ body.is-sidebar-resizing {
 }
 
 .code-block-wrapper pre code {
-  background: transparent;
+  background: transparent !important;
   padding: 0;
   border-radius: 0;
-  color: #c9d1d9;
+  color: #c9d1d9 !important;
   font-size: inherit;
 }
 
@@ -1241,9 +1247,17 @@ body.is-sidebar-resizing {
   color: var(--color-text);
 }
 
-/* 兼容 highlighted code（marked 默认不生成 wrapper 时） */
+/* highlight.js 语法高亮强制覆盖：确保代码在暗色背景下始终可见 */
+.markdown-body .hljs,
+.markdown-body pre code.hljs,
+.code-block-wrapper .hljs,
+.code-block-wrapper pre code {
+  background: transparent !important;
+  color: #c9d1d9 !important;
+}
+
+/* 兼容旧版 pre */
 .markdown-body pre code.hljs {
-  background: transparent;
   padding: 0;
 }
 
@@ -2083,18 +2097,23 @@ body.is-sidebar-resizing {
 
 .thinking-content {
   padding: 10px 14px;
-  background: var(--color-bg-base);
+  color: #6c7086;
+}
+
+[data-theme="light"] .thinking-content {
+  color: #585b6e;
 }
 
 .thinking-content pre {
   margin: 0;
   font-size: 13px;
   line-height: 1.65;
-  color: var(--color-text-muted);
+  color: inherit;
   font-style: italic;
   white-space: pre-wrap;
   word-break: break-word;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: transparent;
 }
 
 /* ---- 流式思考中的闪烁动画标签 ---- */
