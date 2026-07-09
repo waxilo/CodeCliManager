@@ -3392,14 +3392,6 @@ body.is-sidebar-resizing {
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.4);
 }
 
-[data-theme="dark"] .drag-over::before {
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
-}
-
-[data-theme="dark"] .drag-over::after {
-  background: rgba(255, 255, 255, 0.04);
-}
-
 /* 复制提示 Toast */
 .copy-toast {
   position: fixed;
@@ -3435,33 +3427,50 @@ body.is-sidebar-resizing {
 .file-ref-chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  margin-bottom: 6px;
+  gap: 6px;
+  margin-bottom: 8px;
 }
 
 .file-ref-chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 8px;
-  border-radius: 6px;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 8px;
   background: var(--color-bg-surface);
   border: 1px solid var(--color-bg-surface-hover);
   font-size: 12px;
   color: var(--color-text-secondary);
   cursor: default;
-  max-width: 100%;
+  max-width: 220px;
   overflow: hidden;
+  transition: background 0.15s ease;
 }
 
-.file-ref-chip--misc {
-  border-color: var(--color-accent);
-  opacity: 0.85;
+.file-ref-chip:hover {
+  background: var(--color-bg-surface-hover);
+}
+
+/* 图片芯片：突出缩略图展示 */
+.file-ref-chip--image {
+  padding: 3px 10px 3px 3px;
+  gap: 6px;
+}
+
+.file-ref-chip-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 5px;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid var(--color-bg-surface-hover);
+  cursor: pointer;
+  background: var(--color-bg-elevated);
 }
 
 .file-ref-chip-icon {
   flex-shrink: 0;
-  font-size: 12px;
+  font-size: 14px;
   line-height: 1;
 }
 
@@ -3469,36 +3478,109 @@ body.is-sidebar-resizing {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 12px;
 }
 
-/* ── 拖拽文件视觉反馈 ─────────────────────────────────────────────── */
-body.drag-over::after {
-  content: '';
-  position: fixed;
+.file-ref-chip[data-file-path] {
+  cursor: pointer;
+}
+.file-ref-chip[data-file-path]:hover {
+  opacity: 0.85;
+}
+
+/* 用户气泡内的芯片：半透明白底白字 */
+.message.user .file-ref-chip {
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.2);
+  color: #fff;
+  backdrop-filter: blur(2px);
+}
+
+.message.user .file-ref-chip--image {
+  border-color: rgba(255, 255, 255, 0.35);
+}
+
+.message.user .file-ref-chip:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+
+.message.user .file-ref-chip-icon {
+  opacity: 0.9;
+}
+
+.message.user .file-ref-chip-path {
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.message.user .file-ref-chip-thumb {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* ── 拖拽文件遮罩层 ─────────────────────────────────────────────── */
+.main-content {
+  position: relative;
+}
+
+.drop-zone-overlay {
+  position: absolute;
   inset: 0;
-  border: 3px dashed var(--color-accent);
-  border-radius: 12px;
-  background: rgba(128, 128, 128, 0.06);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-overlay);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-radius: inherit;
   pointer-events: none;
-  z-index: 9998;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 100;
 }
 
-body.drag-over::before {
-  content: '释放文件以引用或导入';
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  padding: 16px 32px;
-  border-radius: 12px;
-  background: var(--color-bg-elevated);
-  color: var(--color-text);
-  font-size: 18px;
+.main-content.drag-over .drop-zone-overlay {
+  opacity: 1;
+}
+
+.drop-zone-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+}
+
+.drop-zone-icon {
+  width: 56px;
+  height: 56px;
+  padding: 14px;
+  border-radius: 14px;
+  background: var(--color-bg-surface);
+  color: var(--color-accent);
+  opacity: 0.85;
+}
+
+.drop-zone-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.drop-zone-title {
+  margin: 0;
+  font-size: 20px;
   font-weight: 600;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-  pointer-events: none;
-  z-index: 9999;
+  color: var(--color-text);
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+
+.drop-zone-hint {
+  margin: 0;
+  font-size: 14px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+  max-width: 280px;
 }
 
 /* ── 粘贴图片附件栏 ───────────────────────────────────────────────── */
@@ -3556,26 +3638,85 @@ body.drag-over::before {
   opacity: 1;
 }
 
-/* ── 图片引用芯片缩略图 ────────────────────────────────────────────── */
-.file-ref-chip-thumb {
-  width: 28px;
-  height: 28px;
-  border-radius: 3px;
-  object-fit: cover;
-  flex-shrink: 0;
-  margin-right: -2px;
-  border: 1px solid var(--color-bg-surface-hover);
-  cursor: pointer;
+/* ── 导入/拖放文件预览栏 ─────────────────────────────────────────── */
+.imported-file-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px 2px;
+  overflow-x: auto;
 }
 
-.file-ref-chip {
-  cursor: default;
-}
-.file-ref-chip[data-file-path] {
+.imported-file-thumb {
+  position: relative;
+  flex-shrink: 0;
+  width: 52px;
+  height: 52px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 2px solid var(--color-bg-surface-hover);
   cursor: pointer;
+  background: var(--color-bg-surface);
 }
-.file-ref-chip[data-file-path]:hover {
-  opacity: 0.85;
+
+.imported-file-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.imported-file-thumb:hover {
+  border-color: var(--color-accent);
+}
+
+.imported-file-card {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 28px 6px 10px;
+  border-radius: 6px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-bg-surface-hover);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  max-width: 200px;
+}
+
+.imported-file-card-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.imported-file-card-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.imported-file-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 0 6px 0 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.imported-file-thumb:hover .imported-file-remove,
+.imported-file-card:hover .imported-file-remove {
+  opacity: 1;
 }
 
 /* ── 图片大图预览 Lightbox ─────────────────────────────────────────── */

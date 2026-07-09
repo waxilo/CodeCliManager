@@ -1,11 +1,12 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { renderMarkdown as _renderMarkdown, initCodeCopyButtons, copyToClipboard as _copyToClipboard } from './markdown';
 
 /** 后端 import_external_path 返回值 */
 interface ImportResult {
-  relative_path: string;
+  absolute_path: string;
   is_dir: boolean;
 }
 
@@ -1240,7 +1241,8 @@ function hasRequiredProjectDir(): boolean {
 function canSendMessage(content?: string): boolean {
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   const text = (content ?? input?.value ?? '').trim();
-  if (!text) {
+  // 有导入文件引用时也允许发送（即使没有文字）
+  if (!text && importedFileRefs.length === 0) {
     return false;
   }
   if (isNewChatSession() && !hasRequiredProjectDir()) {
@@ -1496,6 +1498,7 @@ function renderInputComposerHtml(): string {
     <div class="input-area">
       <div class="input-composer">
         <div id="paste-attachments-bar" class="paste-attachments-bar" style="display:none"></div>
+        <div id="imported-file-bar" class="imported-file-bar" style="display:none"></div>
         <textarea
           id="message-input"
           class="input-composer-textarea"
@@ -1783,6 +1786,19 @@ function render() {
         aria-label="调整侧边栏宽度"
       ></div>
       <div class="main-content">
+        <div class="drop-zone-overlay" id="drop-zone-overlay">
+          <div class="drop-zone-content">
+            <div class="drop-zone-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <p class="drop-zone-title">拖拽文件到此处引用</p>
+            <p class="drop-zone-hint">支持项目内文件自动匹配，外部文件以绝对路径引用</p>
+          </div>
+        </div>
         ${activeConversationId || pendingUserMessage ? `
         <div class="main-topbar">
           <div class="main-topbar-main">
@@ -3865,14 +3881,23 @@ function renderMessageHtml(msg: Message, prevRole?: string): string {
       thinkingHtml = renderThinkingDetails(msg.thinking, '思考过程', thinkingExpanded, msg.id);
     }
     if (msg.content.trim()) {
-      contentHtml = `<div class="markdown-body">${renderMarkdown(msg.content)}</div>`;
+      // 用户消息：剥离 @文件路径引用和 @File[] 标签后再渲染（芯片已展示文件信息）
+      const renderContent = msg.role === 'user'
+        ? stripFileRefTags(stripFileRefsFromDisplay(msg.content))
+        : msg.content;
+      if (renderContent.trim()) {
+        contentHtml = `<div class="markdown-body">${renderMarkdown(renderContent)}</div>`;
+      }
     }
   }
 
-  // 用户消息：引用文件芯片
-  const userRefs = msg.role === 'user' && msg.refs && msg.refs.length > 0
-    ? renderFileRefChipsHtml(msg.refs)
-    : '';
+  // 用户消息：从内容中解析 @File[] 引用生成文件芯片
+  const fileRefChips = msg.role === 'user' ? parseFileRefs(msg.content) : [];
+  const userRefs = fileRefChips.length > 0
+    ? renderFileRefChipsHtml(fileRefChips)
+    : (msg.role === 'user' && msg.refs && msg.refs.length > 0
+      ? renderFileRefChipsHtml(msg.refs)
+      : '');
 
   // 消息复制控件
   let copyControlHtml = '';
@@ -3949,16 +3974,15 @@ function renderMessageListHtml(messages: Message[]): string {
 function renderFileRefChipsHtml(refs: FileRef[]): string {
   // 为图片文件异步预加载缩略图
   setTimeout(() => {
-    const dir = getEffectiveProjectDir();
-    if (!dir) return;
-    const baseDir = dir.endsWith('/') ? dir : dir + '/';
     const chips = document.querySelectorAll<HTMLElement>('.file-ref-chip[data-file-path] img.file-ref-chip-thumb');
     chips.forEach(async (img) => {
       const filePath = ((img as HTMLElement).parentElement as HTMLElement)?.dataset.filePath;
       if (!filePath || img.getAttribute('src') !== '') return;
       try {
+        // 绝对路径直接使用，相对路径拼接项目目录
+        const fullPath = resolveFilePath(filePath);
         const mime = getImageMime(filePath);
-        const b64 = await invoke<string>('read_file_base64', { filePath: baseDir + filePath });
+        const b64 = await invoke<string>('read_file_base64', { filePath: fullPath });
         (img as HTMLImageElement).src = `data:${mime};base64,${b64}`;
       } catch { /* 加载缩略图失败，保持空状态 */ }
     });
@@ -3971,11 +3995,14 @@ function renderFileRefChipsHtml(refs: FileRef[]): string {
           (ref) => {
             const icon = getFileSuggestionIcon(ref.path);
             const isImg = isImageFile(ref.path);
+            // 提取文件名（去掉尾部斜杠用于目录）
+            const cleanPath = ref.path.replace(/\/$/, '');
+            const parts = cleanPath.split(/[/\\]/).filter(Boolean);
+            const fileName = ref.path.endsWith('/') ? parts[parts.length - 1] + '/' : (parts[parts.length - 1] || ref.path);
             return `
-        <span class="file-ref-chip${ref.isImage ? ' file-ref-chip--misc' : ''}" title="${escapeHtml(ref.path)}" ${isImg ? `data-file-path="${escapeHtml(ref.path)}"` : ''}>
-          ${isImg ? `<img class="file-ref-chip-thumb" src="" alt="" loading="lazy" />` : ''}
-          <span class="file-ref-chip-icon">${icon}</span>
-          <span class="file-ref-chip-path">${escapeHtml(ref.path)}</span>
+        <span class="file-ref-chip${isImg ? ' file-ref-chip--image' : ''}" title="${escapeHtml(ref.path)}" ${isImg ? `data-file-path="${escapeHtml(ref.path)}"` : ''}>
+          ${isImg ? `<img class="file-ref-chip-thumb" src="" alt="" loading="lazy" />` : `<span class="file-ref-chip-icon">${icon}</span>`}
+          <span class="file-ref-chip-path">${escapeHtml(fileName)}</span>
         </span>`;
           },
         )
@@ -4208,7 +4235,8 @@ async function sendMessage() {
   if (!input) return;
 
   const hasPastedImages = pasteAttachments.length > 0;
-  if (!input.value.trim() && !hasPastedImages) return;
+  const hasImportedFiles = importedFileRefs.length > 0;
+  if (!input.value.trim() && !hasPastedImages && !hasImportedFiles) return;
   if (sendBtn?.disabled) return;
 
   if (isNewChatSession() && !hasRequiredProjectDir()) {
@@ -4217,6 +4245,10 @@ async function sendMessage() {
 
   let content = input.value.trim();
   input.value = '';
+
+  // 捕获导入的文件引用（在 clearImportedFileRefs 之前），用于构造发送给 CLI 的 prompt
+  const capturedImportedRefs = importedFileRefs.map((e) => e.ref);
+  clearImportedFileRefs();
 
   // 粘贴图片附件：拼到 prompt 前（给 CLI 用的），content 保持原始文字用于展示
   const pasteRefs: { path: string; name: string; objectUrl: string }[] = [];
@@ -4230,17 +4262,48 @@ async function sendMessage() {
     clearPasteAttachments();
   }
 
-  // 所有引用（@file 引用 + 粘贴图片）合并
-  const allRefs: FileRef[] = pasteRefs.map((a) => ({ path: a.path, isImage: true }));
+  // 将导入的文件引用也拼到 prompt 前面（已经是 @File[path] 格式，直接拼接）
+  if (capturedImportedRefs.length > 0) {
+    const importedRefStr = capturedImportedRefs.join(' ');
+    promptWithPaste = importedRefStr + (promptWithPaste ? ' ' + promptWithPaste : '');
+  }
 
-  const { prompt: resolvedContent, refs: fileRefs } = await resolveFileReferences(promptWithPaste);
+  // 所有引用（粘贴图片 + 导入文件）合并
+  const allRefs: FileRef[] = [
+    ...pasteRefs.map((a) => ({ path: a.path, isImage: true })),
+    ...capturedImportedRefs.map((r) => {
+      const path = unwrapFileRef(r).replace(/\/$/, '');
+      return { path, isImage: isImageFile(path) };
+    }),
+  ];
 
-  // 合并 @file 引用
+  // 从 prompt 中提取 @File[] 标签，剩余文本交给 resolveFileReferences 处理 @path 引用
+  const fileRefTagStr = capturedImportedRefs.length > 0 ? capturedImportedRefs.join(' ') + ' ' : '';
+  // 先剥离 @File[] 标签，避免 resolveFileReferences 将其当作 @引用重复处理
+  const promptForResolve = stripFileRefTags(promptWithPaste);
+
+  const { prompt: resolvedFromAtPaths, displayPrompt, refs: fileRefs } = await resolveFileReferences(promptForResolve);
+
+  // 合并 @file 引用到 allRefs
   for (const ref of fileRefs) {
     if (!allRefs.some((r) => r.path === ref.path)) {
       allRefs.push(ref);
     }
   }
+
+  // 最终发送给 CLI 的 prompt：@File[] 标签 + resolveFileReferences 处理后的内容
+  const resolvedContent = fileRefTagStr + resolvedFromAtPaths;
+
+  // 展示用内容：剥离 @path 引用和粘贴图片引用，保留 @File[] 标签用于消息渲染
+  let displayContent = stripFileRefsFromDisplay(displayPrompt);
+  for (const att of pasteRefs) {
+    const escaped = att.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    displayContent = displayContent.replace(new RegExp(`@${escaped}\\s*`, 'g'), '');
+  }
+  displayContent = displayContent.trim();
+
+  // 存储的消息内容：@File[] 标签 + 干净文字（用于持久化和渲染芯片）
+  const messageContent = (fileRefTagStr + (displayContent || '')).trim();
 
   pendingUserMessage = resolvedContent;
 
@@ -4251,7 +4314,7 @@ async function sendMessage() {
       conv.messages.push({
         id: `user-${Date.now()}`,
         role: 'user',
-        content: resolvedContent,
+        content: messageContent,
         refs: allRefs.length > 0 ? allRefs : undefined,
         timestamp: Math.floor(Date.now() / 1000),
       });
@@ -4731,6 +4794,132 @@ function clearPasteAttachments() {
   renderPasteAttachmentsBar();
 }
 
+// ── @File[] 引用格式辅助函数 ────────────────────────────────────────
+
+/** 将原始路径包装为 @File[path] 引用，去除 Windows canonicalize 产生的 \\?\ 前缀 */
+function wrapFileRef(path: string): string {
+  const cleanPath = path.replace(/^\\\\\?\\/, '');
+  return `@File[${cleanPath}]`;
+}
+
+/** 从 @File[path] 引用中提取路径 */
+function unwrapFileRef(ref: string): string {
+  const m = ref.match(/^@File\[(.+)]$/);
+  return m ? m[1] : ref;
+}
+
+/** 解析文本中所有 @File[path] 引用，返回 FileRef 数组 */
+function parseFileRefs(text: string): FileRef[] {
+  const results: FileRef[] = [];
+  const pattern = /@File\[([^\]]+)]/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const path = match[1];
+    results.push({ path: path.replace(/\/$/, ''), isImage: isImageFile(path) });
+  }
+  return results;
+}
+
+/** 从显示文本中剥离 @File[path] 引用 */
+function stripFileRefTags(text: string): string {
+  return text.replace(/@File\[[^\]]+]\s*/g, '').replace(/\s{2,}/g, ' ').trim();
+}
+
+// ── 导入/拖放文件预览栏 ────────────────────────────────────────────
+interface ImportedFileRef {
+  ref: string;       // @File[path] 格式的引用文本
+  fileName: string;  // 显示的文件名
+  isImage: boolean;
+  isDir: boolean;
+  dataUrl?: string;  // 图片的 data URL（用于缩略图）
+}
+let importedFileRefs: ImportedFileRef[] = [];
+
+function addImportedFileRef(entry: ImportedFileRef): void {
+  // 避免重复
+  if (importedFileRefs.some((e) => e.ref === entry.ref)) return;
+  importedFileRefs.push(entry);
+  renderImportedFileBar();
+}
+
+function renderImportedFileBar(): void {
+  const bar = document.querySelector('#imported-file-bar');
+  if (!bar) return;
+
+  if (importedFileRefs.length === 0) {
+    (bar as HTMLElement).style.display = 'none';
+    bar.innerHTML = '';
+    return;
+  }
+
+  (bar as HTMLElement).style.display = 'flex';
+  bar.innerHTML = importedFileRefs
+    .map((entry, idx) => {
+      const rawPath = unwrapFileRef(entry.ref);
+      if (entry.isImage && entry.dataUrl) {
+        return `
+          <div class="imported-file-thumb" data-idx="${idx}" title="${escapeHtml(rawPath)}">
+            <img src="${entry.dataUrl}" alt="${escapeHtml(entry.fileName)}" />
+            <button type="button" class="imported-file-remove" data-idx="${idx}" title="移除" aria-label="移除附件">×</button>
+          </div>`;
+      }
+      const icon = entry.isDir ? '📁' : (entry.isImage ? '🖼️' : '📄');
+      return `
+        <div class="imported-file-card" data-idx="${idx}" title="${escapeHtml(rawPath)}">
+          <span class="imported-file-card-icon">${icon}</span>
+          <span class="imported-file-card-name">${escapeHtml(entry.fileName)}</span>
+          <button type="button" class="imported-file-remove" data-idx="${idx}" title="移除" aria-label="移除附件">×</button>
+        </div>`;
+    })
+    .join('');
+
+  // 移除按钮事件
+  bar.querySelectorAll('.imported-file-remove').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const idx = parseInt((btn as HTMLElement).dataset.idx || '');
+      if (!isNaN(idx) && importedFileRefs[idx]) {
+        removeImportedFileRef(idx);
+      }
+    });
+  });
+
+  // 图片缩略图点击放大
+  bar.querySelectorAll('.imported-file-thumb').forEach((thumb) => {
+    thumb.addEventListener('click', () => {
+      const idx = parseInt((thumb as HTMLElement).dataset.idx || '');
+      if (!isNaN(idx) && importedFileRefs[idx]?.dataUrl) {
+        openImageLightbox(importedFileRefs[idx].dataUrl!);
+      }
+    });
+  });
+}
+
+function removeImportedFileRef(idx: number): void {
+  const entry = importedFileRefs[idx];
+  if (!entry) return;
+  importedFileRefs.splice(idx, 1);
+  renderImportedFileBar();
+  updateSendButtonState();
+}
+
+function clearImportedFileRefs(): void {
+  importedFileRefs = [];
+  renderImportedFileBar();
+}
+
+/** 为导入的文件加载图片预览（base64 data URL） */
+async function loadImagePreview(filePath: string): Promise<string | undefined> {
+  try {
+    const fullPath = resolveFilePath(filePath);
+    const mime = getImageMime(filePath);
+    const b64 = await invoke<string>('read_file_base64', { filePath: fullPath });
+    return `data:${mime};base64,${b64}`;
+  } catch {
+    return undefined;
+  }
+}
+
 function openImageLightbox(src: string) {
   const existing = document.querySelector('#image-lightbox');
   if (existing) existing.remove();
@@ -4830,6 +5019,14 @@ function hideFileSuggestions() {
 }
 
 /**
+ * 剥离用户消息中的 @文件路径引用（用于展示）。
+ * 只匹配含路径分隔符（/ 或 \）的 @引用，保留普通 @提及（如 @someone）。
+ */
+function stripFileRefsFromDisplay(text: string): string {
+  return text.replace(/@[^\s@]*[/\\][^\s@]*/g, '').replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
  * 根据文件路径判断文件类型，用于图标展示
  */
 function isImageFile(filePath: string): boolean {
@@ -4869,11 +5066,10 @@ function getImageMime(filePath: string): string {
 
 async function viewImageFile(filePath: string) {
   try {
-    const dir = getEffectiveProjectDir();
-    if (!dir) return;
-    const baseDir = dir.endsWith('/') ? dir : dir + '/';
+    // 绝对路径直接使用，相对路径拼接项目目录
+    const fullPath = resolveFilePath(filePath);
     const mime = getImageMime(filePath);
-    const b64 = await invoke<string>('read_file_base64', { filePath: baseDir + filePath });
+    const b64 = await invoke<string>('read_file_base64', { filePath: fullPath });
     openImageLightbox(`data:${mime};base64,${b64}`);
   } catch (e) {
     console.error('Failed to load image for preview:', e);
@@ -5064,22 +5260,36 @@ async function handleImportExternalFile(): Promise<void> {
           source: filePath,
           projectDir,
         });
-        const ref = result.is_dir ? `${result.relative_path}/` : result.relative_path;
-        importedRefs.push(ref);
+        // 直接使用绝对路径引用，不再复制文件
+        importedRefs.push(result.absolute_path);
       } catch (err) {
         console.error('[import] 导入文件失败:', filePath, err);
       }
     }
 
     if (importedRefs.length > 0) {
-      const currentValue = textarea.value.trimEnd();
-      const refStr = importedRefs.map((r) => `@${r}`).join(' ');
-      textarea.value = currentValue ? `${currentValue} ${refStr} ` : `${refStr} `;
-      textarea.focus();
-      const newPos = textarea.value.length;
-      textarea.setSelectionRange(newPos, newPos);
+      showCopyToastMsg(`已引用 ${importedRefs.length} 个文件`);
       updateSendButtonState();
-      showCopyToastMsg(`已导入 ${importedRefs.length} 个文件`);
+
+      // 添加到预览栏
+      for (const ref of importedRefs) {
+        const isImg = isImageFile(ref);
+        const parts = ref.replace(/\/$/, '').split(/[/\\]/).filter(Boolean);
+        const fileName = parts[parts.length - 1] || ref;
+        const refStr = wrapFileRef(ref);
+        addImportedFileRef({ ref: refStr, fileName, isImage: isImg, isDir: false });
+        if (isImg) {
+          loadImagePreview(ref).then((dataUrl) => {
+            if (dataUrl) {
+              const entry = importedFileRefs.find((e) => e.ref === refStr);
+              if (entry) {
+                entry.dataUrl = dataUrl;
+                renderImportedFileBar();
+              }
+            }
+          });
+        }
+      }
     }
   } catch (err) {
     console.error('[import] 选择文件失败:', err);
@@ -5109,15 +5319,15 @@ async function handleImportExternalFolder(): Promise<void> {
       projectDir,
     });
 
-    // 文件夹引用追加 / 后缀
-    const ref = `${result.relative_path}/`;
-    const currentValue = textarea.value.trimEnd();
-    textarea.value = currentValue ? `${currentValue} @${ref} ` : `@${ref} `;
-    textarea.focus();
-    const newPos = textarea.value.length;
-    textarea.setSelectionRange(newPos, newPos);
+    // 直接使用绝对路径引用，文件夹追加 / 后缀
+    const ref = `${result.absolute_path}/`;
     updateSendButtonState();
-    showCopyToastMsg('已导入文件夹');
+    showCopyToastMsg('已引用文件夹');
+
+    // 添加到预览栏
+    const parts = ref.replace(/\/$/, '').split(/[/\\]/).filter(Boolean);
+    const dirName = (parts[parts.length - 1] || ref) + '/';
+    addImportedFileRef({ ref: wrapFileRef(ref), fileName: dirName, isImage: false, isDir: true });
   } catch (err) {
     console.error('[import] 导入文件夹失败:', err);
     showCopyToastMsg('导入文件夹失败');
@@ -5125,120 +5335,108 @@ async function handleImportExternalFolder(): Promise<void> {
 }
 
 // ── 拖拽文件自动引用 ────────────────────────────────────────────────
-let _dragCounter = 0;
+let _lastDropTime = 0;
+let _unlistenDragDrop: (() => void) | null = null;
 
-function bindDragDropFileRefs() {
-  document.body.addEventListener('dragover', (e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-  });
+async function bindDragDropFileRefs() {
+  // 避免重复注册监听器
+  if (_unlistenDragDrop) _unlistenDragDrop();
+  const win = getCurrentWebviewWindow();
 
-  document.body.addEventListener('dragenter', (e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    _dragCounter++;
-    if (_dragCounter === 1) {
-      document.body.classList.add('drag-over');
-    }
-  });
+  _unlistenDragDrop = await win.onDragDropEvent(async (event) => {
+    const dropTarget = document.querySelector('.main-content');
 
-  document.body.addEventListener('dragleave', (e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    _dragCounter--;
-    if (_dragCounter <= 0) {
-      _dragCounter = 0;
-      document.body.classList.remove('drag-over');
-    }
-  });
+    if (event.payload.type === 'over') {
+      dropTarget?.classList.add('drag-over');
+    } else if (event.payload.type === 'leave') {
+      dropTarget?.classList.remove('drag-over');
+    } else if (event.payload.type === 'drop') {
+      dropTarget?.classList.remove('drag-over');
 
-  document.body.addEventListener('drop', async (e: DragEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    _dragCounter = 0;
-    document.body.classList.remove('drag-over');
+      // 防止同一拖放操作重复触发（300ms 内忽略重复 drop）
+      const now = Date.now();
+      if (now - _lastDropTime < 300) return;
+      _lastDropTime = now;
 
-    const files = e.dataTransfer?.files;
-    if (!files || files.length === 0) return;
+      const paths = event.payload.paths;
+      if (!paths || paths.length === 0) return;
 
-    const projectDir = getEffectiveProjectDir();
-    if (!projectDir) {
-      showCopyToastMsg('请先选择工作目录');
-      return;
-    }
+      const projectDir = getEffectiveProjectDir();
+      if (!projectDir) {
+        showCopyToastMsg('请先选择工作目录');
+        return;
+      }
 
-    const projectFiles = await loadProjectFiles();
-    if (projectFiles.length === 0) {
-      showCopyToastMsg('未能加载项目文件列表');
-      return;
-    }
+      const projectFiles = await loadProjectFiles();
+      const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
+      if (!textarea) return;
 
-    const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
-    if (!textarea) return;
+      const refs: string[] = [];
 
-    const insertedRefs: string[] = [];
-    const importedRefs: string[] = [];
+      for (const fullPath of paths) {
+        const normalizedPath = fullPath.replace(/\\/g, '/');
+        const normalizedProjectDir = projectDir.replace(/\\/g, '/');
+        const segments = normalizedPath.split('/').filter(Boolean);
+        const fileName = segments[segments.length - 1] || '';
 
-    for (let i = 0; i < files.length; i++) {
-      const fileName = files[i].name;
-      // 获取文件完整路径（Tauri WebView 会暴露 path 属性）
-      const fullPath = (files[i] as any).path as string | undefined;
+        // 按文件名匹配项目文件列表
+        const matches = projectFiles.filter((f) => {
+          const parts = f.split('/');
+          return parts[parts.length - 1] === fileName;
+        });
 
-      // 按文件名精确匹配项目文件列表
-      const matches = projectFiles.filter((f) => {
-        const parts = f.split('/');
-        return parts[parts.length - 1] === fileName;
-      });
-
-      if (matches.length === 1) {
-        // 唯一匹配，直接引用
-        if (!insertedRefs.includes(matches[0])) {
-          insertedRefs.push(matches[0]);
-        }
-      } else if (matches.length > 1) {
-        // 多个同名文件，选择路径最短的（最接近根目录）
-        const shortest = matches.reduce((a, b) => (a.length <= b.length ? a : b));
-        if (!insertedRefs.includes(shortest)) {
-          insertedRefs.push(shortest);
-        }
-      } else if (fullPath) {
-        // 不在项目文件列表中 — 检查是否是项目外的路径
-        const normalizedPath = fullPath.split('\\').join('/');
-        const normalizedProjectDir = projectDir.split('\\').join('/');
-        const isInsideProject = normalizedPath.startsWith(normalizedProjectDir);
-
-        if (!isInsideProject) {
-          // 外部文件/文件夹，复制到 .imports/
+        if (matches.length === 1) {
+          if (!refs.includes(matches[0])) refs.push(matches[0]);
+        } else if (matches.length > 1) {
+          const shortest = matches.reduce((a, b) => (a.length <= b.length ? a : b));
+          if (!refs.includes(shortest)) refs.push(shortest);
+        } else if (normalizedPath.startsWith(normalizedProjectDir)) {
+          // 项目内文件（含 target/ 等被索引跳过的目录）→ 相对路径
+          const relPath = normalizedPath.slice(normalizedProjectDir.length).replace(/^\//, '');
+          if (relPath && !refs.includes(relPath)) refs.push(relPath);
+        } else {
+          // 外部文件/文件夹 → 验证后使用绝对路径
           try {
             const result = await invoke<ImportResult>(
               'import_external_path',
               { source: fullPath, projectDir }
             );
-            // 后端返回 is_dir，可靠判断是否为文件夹
-            const ref = result.is_dir
-              ? `${result.relative_path}/`
-              : result.relative_path;
-            importedRefs.push(ref);
+            const absRef = result.is_dir ? `${result.absolute_path}/` : result.absolute_path;
+            if (!refs.includes(absRef)) refs.push(absRef);
           } catch (err) {
-            console.error('[drop] 导入外部文件失败:', err);
+            console.error('[drop] 引用外部文件失败:', fullPath, err);
           }
         }
       }
-    }
 
-    const allRefs = [...insertedRefs, ...importedRefs];
-    if (allRefs.length > 0) {
-      const currentValue = textarea.value.trimEnd();
-      const refStr = allRefs.map((r) => `@${r}`).join(' ');
-      textarea.value = currentValue ? `${currentValue} ${refStr} ` : `${refStr} `;
-      textarea.focus();
-      const newCursorPos = textarea.value.length;
-      textarea.setSelectionRange(newCursorPos, newCursorPos);
-      updateSendButtonState();
-      if (importedRefs.length > 0) {
-        showCopyToastMsg(`已导入 ${importedRefs.length} 个外部文件/文件夹`);
-      } else {
-        showCopyToastMsg(`已引用 ${insertedRefs.length} 个文件`);
+      if (refs.length > 0) {
+        updateSendButtonState();
+        showCopyToastMsg(`已引用 ${refs.length} 个文件`);
+
+        // 添加到预览栏
+        for (const ref of refs) {
+          const isDir = ref.endsWith('/');
+          const isImg = isImageFile(ref);
+          const cleanPath = ref.replace(/\/$/, '');
+          const parts = cleanPath.split(/[/\\]/).filter(Boolean);
+          const fileName = isDir ? (parts[parts.length - 1] || ref) + '/' : (parts[parts.length - 1] || ref);
+
+          const refStr = wrapFileRef(ref);
+          addImportedFileRef({ ref: refStr, fileName, isImage: isImg, isDir });
+
+          // 异步加载图片缩略图
+          if (isImg) {
+            loadImagePreview(ref).then((dataUrl) => {
+              if (dataUrl) {
+                const entry = importedFileRefs.find((e) => e.ref === refStr);
+                if (entry) {
+                  entry.dataUrl = dataUrl;
+                  renderImportedFileBar();
+                }
+              }
+            });
+          }
+        }
       }
     }
   });
@@ -5272,9 +5470,12 @@ function showCopyToastMsg(msg: string): void {
  * 解析 prompt 中的 @file 引用。
  * - 文本文件：尝试读取内容拼入 prompt
  * - 图片/二进制/目录：保留 @path 引用让 CLI 处理
- * 返回 { prompt, refs }，refs 为匹配到的文件引用列表。
+ * 返回 { prompt, displayPrompt, refs }：
+ *   prompt        — 发给 CLI 的最终内容（含嵌入的文件文本和 @引用）
+ *   displayPrompt — 用于消息气泡展示的干净文本（已剥离已解析的 @path 引用）
+ *   refs          — 匹配到的文件引用列表
  */
-async function resolveFileReferences(prompt: string): Promise<{ prompt: string; refs: FileRef[] }> {
+async function resolveFileReferences(prompt: string): Promise<{ prompt: string; displayPrompt: string; refs: FileRef[] }> {
   const atPattern = /@([^\s@]+)/g;
   const rawRefs: string[] = [];
   let match: RegExpExecArray | null;
@@ -5284,56 +5485,84 @@ async function resolveFileReferences(prompt: string): Promise<{ prompt: string; 
     rawRefs.push(match[1]);
   }
 
-  if (rawRefs.length === 0) return { prompt, refs: [] };
-
-  // 精确匹配项目中的文件路径（含目录）
-  const matchedRefs = rawRefs.filter((ref) => files.some((f) => f === ref));
-  if (matchedRefs.length === 0) return { prompt, refs: [] };
+  if (rawRefs.length === 0) return { prompt, displayPrompt: prompt, refs: [] };
 
   const projectDir = getEffectiveProjectDir();
-  if (!projectDir) return { prompt, refs: [] };
 
-  const dir = projectDir.endsWith('/') ? projectDir : projectDir + '/';
+  // 分离：项目索引文件 vs 绝对路径 vs 其他（可能是未索引的项目内文件）
+  const projectRefs = rawRefs.filter((ref) => files.some((f) => f === ref));
+  const absoluteRefs = rawRefs.filter((ref) => isAbsolutePath(ref) && !projectRefs.includes(ref));
+  const remainingRefs = rawRefs.filter((ref) => !projectRefs.includes(ref) && !absoluteRefs.includes(ref));
+
+  // 没有任何匹配的引用，直接返回
+  if (projectRefs.length === 0 && absoluteRefs.length === 0 && remainingRefs.length === 0) return { prompt, displayPrompt: prompt, refs: [] };
+  if (projectRefs.length > 0 && !projectDir) return { prompt, displayPrompt: prompt, refs: [] };
+
   const fileRefs: FileRef[] = [];
   const embeddedContents: string[] = [];
   const unresolvedRefs: string[] = [];
 
-  for (const ref of matchedRefs) {
+  // ── 处理项目相对路径引用（嵌入文本文件内容） ──
+  if (projectRefs.length > 0) {
+    const dir = projectDir!.endsWith('/') ? projectDir! : projectDir! + '/';
+    for (const ref of projectRefs) {
+      const isDir = ref.endsWith('/');
+      const isImg = isImageFile(ref);
+      fileRefs.push({ path: ref, isImage: isImg || isDir });
+
+      if (isDir) {
+        unresolvedRefs.push(ref);
+        continue;
+      }
+      if (isImg || isOtherBinaryFile(ref)) {
+        unresolvedRefs.push(ref);
+        continue;
+      }
+
+      try {
+        const fullPath = dir + ref;
+        const content = await invoke<string>('read_file_content', { filePath: fullPath });
+        embeddedContents.push(`--- File: ${ref} ---\n${content}\n---\n`);
+      } catch {
+        unresolvedRefs.push(ref);
+      }
+    }
+  }
+
+  // ── 处理绝对路径引用（直接保留 @引用，由 CLI 自行读取文件） ──
+  for (const ref of absoluteRefs) {
     const isDir = ref.endsWith('/');
     const isImg = isImageFile(ref);
     fileRefs.push({ path: ref, isImage: isImg || isDir });
+    unresolvedRefs.push(ref);
+  }
 
-    // 目录：直接保留 @path 引用
-    if (isDir) {
-      unresolvedRefs.push(ref);
-      continue;
-    }
-
-    // 图片和已知二进制文件：保留 @path 引用
-    if (isImg || isOtherBinaryFile(ref)) {
-      unresolvedRefs.push(ref);
-      continue;
-    }
-
-    // 尝试作为文本文件读取
-    try {
+  // ── 处理未索引的项目相对路径（如 target/ 内的文件） ──
+  for (const ref of remainingRefs) {
+    if (projectDir) {
+      const dir = projectDir.endsWith('/') ? projectDir : projectDir + '/';
       const fullPath = dir + ref;
-      const content = await invoke<string>('read_file_content', { filePath: fullPath });
-      embeddedContents.push(`--- File: ${ref} ---\n${content}\n---\n`);
-    } catch {
-      // 读取失败（实际是二进制文件），保留 @path 引用
-      unresolvedRefs.push(ref);
+      // 尝试读取验证文件是否存在
+      try {
+        await invoke<string>('read_file_content', { filePath: fullPath });
+        // 文件存在 → 显示芯片，保留 @引用让 CLI 读取
+        fileRefs.push({ path: ref, isImage: false });
+        unresolvedRefs.push(ref);
+      } catch {
+        // 文件不存在，忽略（可能是其他 @ 语法如 @mention）
+      }
     }
   }
 
-  // 去掉 prompt 中的 @file 引用标签
+  // ── 组装最终 prompt ──
   let cleanedPrompt = prompt;
-  for (const ref of matchedRefs) {
+  // 去掉项目相对路径的 @file 引用标签（内容已嵌入）
+  for (const ref of projectRefs) {
     cleanedPrompt = cleanedPrompt.replace(new RegExp(`@${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'g'), '');
   }
+  // 绝对路径不剥离 @引用，留给 CLI 处理
   cleanedPrompt = cleanedPrompt.trim();
 
-  // 组装最终 prompt：嵌入内容 + 保留引用 + 用户消息
   let finalPrompt = embeddedContents.join('\n');
   if (finalPrompt) finalPrompt += '\n';
   if (unresolvedRefs.length > 0) {
@@ -5341,7 +5570,37 @@ async function resolveFileReferences(prompt: string): Promise<{ prompt: string; 
   }
   finalPrompt += cleanedPrompt;
 
-  return { prompt: finalPrompt, refs: fileRefs };
+  // ── 生成展示用文本：剥离所有已解析的 @path 引用（芯片已展示文件信息） ──
+  let displayContent = prompt;
+  const resolvedRemainingRefs = remainingRefs.filter((ref) =>
+    fileRefs.some((fr) => fr.path === ref)
+  );
+  for (const ref of [...projectRefs, ...absoluteRefs, ...resolvedRemainingRefs]) {
+    const escaped = ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    displayContent = displayContent.replace(new RegExp(`@${escaped}\\s*`, 'g'), '');
+  }
+  displayContent = displayContent.trim();
+
+  return { prompt: finalPrompt, displayPrompt: displayContent, refs: fileRefs };
+}
+
+/** 检测字符串是否为绝对路径（Unix: 以 / 开头；Windows: 以盘符开头如 C:\ 或 C:/） */
+function isAbsolutePath(p: string): boolean {
+  // Unix 绝对路径
+  if (p.startsWith('/')) return true;
+  // Windows 绝对路径: 盘符 + :\ 或 :/
+  if (/^[A-Za-z]:[\\/]/.test(p)) return true;
+  // Windows UNC 路径: \\
+  if (p.startsWith('\\\\')) return true;
+  return false;
+}
+
+/** 将文件路径解析为可读取的绝对路径（相对路径自动拼接项目目录） */
+function resolveFilePath(filePath: string): string {
+  if (isAbsolutePath(filePath)) return filePath;
+  const dir = getEffectiveProjectDir();
+  if (!dir) return filePath;
+  return (dir.endsWith('/') ? dir : dir + '/') + filePath;
 }
 
 init();
