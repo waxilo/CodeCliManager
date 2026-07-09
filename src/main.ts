@@ -174,7 +174,6 @@ let transientSessionError: string | null = null;
 let chatModelOptions: string[] = [];
 /** 从配置文件（ANTHROPIC_MODEL / 活跃 profile.default_model）读取的当前默认模型 */
 let currentDefaultModel: string = '';
-let compactingConversationId: string | null = null;
 /** 新会话尚未创建 ID 时，用户选择的工作目录 */
 let pendingProjectDir: string | null = null;
 let chatModelPickerHighlightIndex = -1;
@@ -826,9 +825,6 @@ async function setupEventListeners() {
     }
     // 无论哪个会话结束，都清理 pending 键
     runningSessions.delete('pending');
-    if (compactingConversationId && (!endedSessionId || endedSessionId === compactingConversationId)) {
-      compactingConversationId = null;
-    }
     clearStreamingState(endedSessionId || '');
 
     const isCurrentSession = !endedSessionId || endedSessionId === activeConversationId;
@@ -1806,12 +1802,6 @@ function render() {
 
 function attachEventListeners() {
   document.querySelector('#new-chat-btn')?.addEventListener('click', newChat);
-
-  document.querySelector('#context-indicator-slot')?.addEventListener('click', (e) => {
-    if ((e.target as HTMLElement).closest('.context-clickable')) {
-      void compactActiveContext();
-    }
-  });
 
   document.querySelector('#refresh-btn')?.addEventListener('click', async () => {
     const btn = document.querySelector('#refresh-btn') as HTMLButtonElement | null;
@@ -4012,15 +4002,6 @@ function renderContextIndicatorInner(): string {
   const tokens = conv?.context_tokens ?? 0;
   if (!conv || tokens <= 0) return '';
 
-  if (compactingConversationId === conv.id) {
-    return `
-      <div class="context-indicator context-busy" title="正在压缩上下文…" aria-label="正在压缩上下文">
-        <span class="context-spinner" aria-hidden="true"></span>
-        <span class="context-indicator-pct">压缩中</span>
-      </div>
-    `;
-  }
-
   const model = conv.last_model?.trim() || '';
   const windowSize = getContextWindowFor(tokens);
   const ratio = Math.min(1, tokens / windowSize);
@@ -4029,10 +4010,10 @@ function renderContextIndicatorInner(): string {
   const circumference = 2 * Math.PI * 7;
   const offset = circumference * (1 - ratio);
   const level = pct >= 90 ? 'danger' : pct >= 75 ? 'warn' : 'ok';
-  const tip = `${model ? model + ' · ' : ''}上下文 ${formatTokenCount(tokens)} / ${formatTokenCount(windowSize)} · 剩余 ${formatTokenCount(remaining)}（已用 ${pct}%）· 点击压缩上下文`;
+  const tip = `${model ? model + ' · ' : ''}上下文 ${formatTokenCount(tokens)} / ${formatTokenCount(windowSize)} · 剩余 ${formatTokenCount(remaining)}（已用 ${pct}%）`;
 
   return `
-    <div class="context-indicator context-clickable context-${level}" role="button" tabindex="0" title="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}">
+    <div class="context-indicator context-${level}" title="${escapeHtml(tip)}" aria-label="${escapeHtml(tip)}">
       <svg class="context-ring" viewBox="0 0 18 18" width="16" height="16" aria-hidden="true">
         <circle class="context-ring-bg" cx="9" cy="9" r="7" fill="none" stroke-width="2.5"></circle>
         <circle class="context-ring-fg" cx="9" cy="9" r="7" fill="none" stroke-width="2.5"
@@ -4051,45 +4032,6 @@ function renderContextIndicatorHtml(): string {
 function updateContextIndicator(): void {
   const slot = document.querySelector('#context-indicator-slot');
   if (slot) slot.innerHTML = renderContextIndicatorInner();
-}
-
-/** 点击上下文环形：确认后向当前会话发送 /compact 压缩历史，释放上下文空间 */
-async function compactActiveContext(): Promise<void> {
-  const id = activeConversationId;
-  if (!id || compactingConversationId || runningSessions.has(id)) return;
-  const conv = conversations.find((c) => c.id === id);
-  if (!conv || !(conv.context_tokens && conv.context_tokens > 0)) return;
-
-  const confirmed = await showConfirmDialog({
-    title: '压缩上下文',
-    message: '将当前会话历史总结压缩，以释放上下文窗口空间？',
-    sub: '压缩后模型仅保留摘要、会丢失部分原始细节，并消耗少量额度。',
-    confirmLabel: '压缩',
-  });
-  if (!confirmed) return;
-
-  compactingConversationId = id;
-  runningSessions.add(id);
-  setSendButtonLoading(true);
-  updateContextIndicator();
-  updateConversationListSpinner();
-
-  try {
-    // /compact 是 Claude Code 内置斜杠命令，必须经 streaming input 模式发送，
-    // 否则在 -p 单次模式下会被当作纯文本，不会真正执行压缩。
-    await invoke('execute_prompt', {
-      conversationId: id,
-      prompt: '/compact',
-      streamingInput: true,
-    });
-  } catch (e) {
-    console.error('压缩上下文失败:', e);
-    compactingConversationId = null;
-    runningSessions.delete(id);
-    setSendButtonLoading(false);
-    updateContextIndicator();
-    updateConversationListSpinner();
-  }
 }
 
 function renderChatHeaderHtml(conversation: Conversation | undefined): string {

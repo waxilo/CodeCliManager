@@ -778,24 +778,6 @@ body.is-sidebar-resizing {
   color: var(--color-text);
 }
 
-.context-clickable {
-  cursor: pointer;
-}
-
-.context-busy {
-  color: var(--color-text-secondary);
-}
-
-.context-spinner {
-  width: 14px;
-  height: 14px;
-  flex-shrink: 0;
-  border: 2px solid var(--color-bg-surface-hover);
-  border-top-color: var(--color-accent, #4f8cff);
-  border-radius: 50%;
-  animation: conv-spin 0.7s linear infinite;
-}
-
 .context-ring {
   flex-shrink: 0;
 }
