@@ -1496,9 +1496,9 @@ function renderProjectDirToolbarHtml(): string {
 function renderInputComposerHtml(): string {
   return `
     <div class="input-area">
+      <div id="paste-attachments-bar" class="paste-attachments-bar" style="display:none"></div>
+      <div id="imported-file-bar" class="imported-file-bar" style="display:none"></div>
       <div class="input-composer">
-        <div id="paste-attachments-bar" class="paste-attachments-bar" style="display:none"></div>
-        <div id="imported-file-bar" class="imported-file-bar" style="display:none"></div>
         <textarea
           id="message-input"
           class="input-composer-textarea"
@@ -1899,11 +1899,11 @@ function attachEventListeners() {
     showImportMenu(target);
   });
 
-  // 图片引用芯片点击大图预览（事件委托）
-  document.querySelector('#message-list')?.addEventListener('click', (e) => {
+  // 文件引用芯片双击预览（事件委托，图片 / PDF / 文本通用）
+  document.querySelector('#message-list')?.addEventListener('dblclick', (e) => {
     const chip = (e.target as HTMLElement).closest('.file-ref-chip') as HTMLElement | null;
     if (chip?.dataset.filePath) {
-      viewImageFile(chip.dataset.filePath);
+      void previewFileByPath(chip.dataset.filePath);
     }
   });
 
@@ -4000,7 +4000,7 @@ function renderFileRefChipsHtml(refs: FileRef[]): string {
             const parts = cleanPath.split(/[/\\]/).filter(Boolean);
             const fileName = ref.path.endsWith('/') ? parts[parts.length - 1] + '/' : (parts[parts.length - 1] || ref.path);
             return `
-        <span class="file-ref-chip${isImg ? ' file-ref-chip--image' : ''}" title="${escapeHtml(ref.path)}" ${isImg ? `data-file-path="${escapeHtml(ref.path)}"` : ''}>
+        <span class="file-ref-chip${isImg ? ' file-ref-chip--image' : ''}" title="${escapeHtml(ref.path)}" data-file-path="${escapeHtml(ref.path)}">
           ${isImg ? `<img class="file-ref-chip-thumb" src="" alt="" loading="lazy" />` : `<span class="file-ref-chip-icon">${icon}</span>`}
           <span class="file-ref-chip-path">${escapeHtml(fileName)}</span>
         </span>`;
@@ -4831,7 +4831,6 @@ interface ImportedFileRef {
   fileName: string;  // 显示的文件名
   isImage: boolean;
   isDir: boolean;
-  dataUrl?: string;  // 图片的 data URL（用于缩略图）
 }
 let importedFileRefs: ImportedFileRef[] = [];
 
@@ -4856,14 +4855,8 @@ function renderImportedFileBar(): void {
   bar.innerHTML = importedFileRefs
     .map((entry, idx) => {
       const rawPath = unwrapFileRef(entry.ref);
-      if (entry.isImage && entry.dataUrl) {
-        return `
-          <div class="imported-file-thumb" data-idx="${idx}" title="${escapeHtml(rawPath)}">
-            <img src="${entry.dataUrl}" alt="${escapeHtml(entry.fileName)}" />
-            <button type="button" class="imported-file-remove" data-idx="${idx}" title="移除" aria-label="移除附件">×</button>
-          </div>`;
-      }
-      const icon = entry.isDir ? '📁' : (entry.isImage ? '🖼️' : '📄');
+      const ext = entry.fileName.split('.').pop()?.toLowerCase() || '';
+      const icon = entry.isDir ? '📁' : (entry.isImage ? '🖼️' : (ext === 'pdf' ? '📕' : '📄'));
       return `
         <div class="imported-file-card" data-idx="${idx}" title="${escapeHtml(rawPath)}">
           <span class="imported-file-card-icon">${icon}</span>
@@ -4884,12 +4877,12 @@ function renderImportedFileBar(): void {
     });
   });
 
-  // 图片缩略图点击放大
-  bar.querySelectorAll('.imported-file-thumb').forEach((thumb) => {
-    thumb.addEventListener('click', () => {
-      const idx = parseInt((thumb as HTMLElement).dataset.idx || '');
-      if (!isNaN(idx) && importedFileRefs[idx]?.dataUrl) {
-        openImageLightbox(importedFileRefs[idx].dataUrl!);
+  // 双击卡片预览（图片 / txt）
+  bar.querySelectorAll('.imported-file-card').forEach((card) => {
+    card.addEventListener('dblclick', () => {
+      const idx = parseInt((card as HTMLElement).dataset.idx || '');
+      if (!isNaN(idx) && importedFileRefs[idx]) {
+        void previewImportedFile(idx);
       }
     });
   });
@@ -4908,16 +4901,124 @@ function clearImportedFileRefs(): void {
   renderImportedFileBar();
 }
 
-/** 为导入的文件加载图片预览（base64 data URL） */
-async function loadImagePreview(filePath: string): Promise<string | undefined> {
-  try {
-    const fullPath = resolveFilePath(filePath);
-    const mime = getImageMime(filePath);
-    const b64 = await invoke<string>('read_file_base64', { filePath: fullPath });
-    return `data:${mime};base64,${b64}`;
-  } catch {
-    return undefined;
+async function previewImportedFile(idx: number): Promise<void> {
+  const entry = importedFileRefs[idx];
+  if (!entry) return;
+  if (entry.isDir) return;
+
+  const filePath = unwrapFileRef(entry.ref);
+
+  if (entry.isImage) {
+    try {
+      const mime = getImageMime(filePath);
+      const b64 = await invoke<string>('read_file_base64', { filePath });
+      openImageLightbox(`data:${mime};base64,${b64}`);
+    } catch (e) {
+      console.error('加载图片预览失败:', e);
+    }
+    return;
   }
+
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+
+  if (ext === 'pdf') {
+    try {
+      await openPdfPreview(filePath, entry.fileName);
+    } catch (e) {
+      console.error('预览 PDF 失败:', e);
+    }
+    return;
+  }
+
+  // 已知二进制文件不支持内嵌预览，不响应双击
+  if (isOtherBinaryFile(filePath)) return;
+
+  // 其余文本类文件（md / csv / json / yaml / 代码等）统一当文本预览
+  try {
+    const content = await invoke<string>('read_file_content', { filePath });
+    openTextPreview(content, entry.fileName);
+  } catch (e) {
+    console.error('读取文件失败:', e);
+  }
+}
+
+function openTextPreview(content: string, fileName: string) {
+  const existing = document.querySelector('#text-preview-overlay');
+  if (existing) existing.remove();
+
+  const overlay = document.createElement('div');
+  overlay.id = 'text-preview-overlay';
+  overlay.className = 'text-preview-overlay';
+  overlay.innerHTML = `
+    <div class="text-preview-dialog">
+      <div class="text-preview-header">
+        <span class="text-preview-title">${escapeHtml(fileName)}</span>
+        <button type="button" class="text-preview-close" title="关闭" aria-label="关闭预览">×</button>
+      </div>
+      <pre class="text-preview-content">${escapeHtml(content)}</pre>
+    </div>
+  `;
+
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+
+  overlay.querySelector('.text-preview-close')?.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') close();
+  };
+  document.addEventListener('keydown', onKey);
+
+  document.body.appendChild(overlay);
+}
+
+async function openPdfPreview(filePath: string, fileName: string): Promise<void> {
+  const existing = document.querySelector('#pdf-preview-overlay');
+  if (existing) existing.remove();
+
+  let pdfDataUrl = '';
+  try {
+    const b64 = await invoke<string>('read_file_base64', { filePath });
+    pdfDataUrl = `data:application/pdf;base64,${b64}`;
+  } catch (e) {
+    console.error('读取 PDF 失败:', e);
+    return;
+  }
+
+  const overlay = document.createElement('div');
+  overlay.id = 'pdf-preview-overlay';
+  overlay.className = 'pdf-preview-overlay';
+  overlay.innerHTML = `
+    <div class="pdf-preview-dialog">
+      <div class="pdf-preview-header">
+        <span class="pdf-preview-title">${escapeHtml(fileName)}</span>
+        <button type="button" class="pdf-preview-close" title="关闭" aria-label="关闭预览">×</button>
+      </div>
+      <iframe src="${pdfDataUrl}" class="pdf-preview-frame"></iframe>
+    </div>
+  `;
+
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+  };
+
+  overlay.querySelector('.pdf-preview-close')?.addEventListener('click', close);
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) close();
+  });
+
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key === 'Escape') close();
+  };
+  document.addEventListener('keydown', onKey);
+
+  document.body.appendChild(overlay);
 }
 
 function openImageLightbox(src: string) {
@@ -5064,15 +5165,40 @@ function getImageMime(filePath: string): string {
   return mimeMap[ext] || 'image/png';
 }
 
-async function viewImageFile(filePath: string) {
+/** 消息中文件引用芯片的双击预览（与导入卡片复用同一套预览逻辑） */
+async function previewFileByPath(rawPath: string): Promise<void> {
+  const fullPath = resolveFilePath(rawPath);
+  const fileName = rawPath.replace(/\/$/, '').split(/[/\\]/).pop() || rawPath;
+
+  if (isImageFile(rawPath)) {
+    try {
+      const mime = getImageMime(rawPath);
+      const b64 = await invoke<string>('read_file_base64', { filePath: fullPath });
+      openImageLightbox(`data:${mime};base64,${b64}`);
+    } catch (e) {
+      console.error('加载图片预览失败:', e);
+    }
+    return;
+  }
+
+  const ext = rawPath.split('.').pop()?.toLowerCase() || '';
+
+  if (ext === 'pdf') {
+    try {
+      await openPdfPreview(fullPath, fileName);
+    } catch (e) {
+      console.error('预览 PDF 失败:', e);
+    }
+    return;
+  }
+
+  if (isOtherBinaryFile(rawPath)) return;
+
   try {
-    // 绝对路径直接使用，相对路径拼接项目目录
-    const fullPath = resolveFilePath(filePath);
-    const mime = getImageMime(filePath);
-    const b64 = await invoke<string>('read_file_base64', { filePath: fullPath });
-    openImageLightbox(`data:${mime};base64,${b64}`);
+    const content = await invoke<string>('read_file_content', { filePath: fullPath });
+    openTextPreview(content, fileName);
   } catch (e) {
-    console.error('Failed to load image for preview:', e);
+    console.error('读取文件失败:', e);
   }
 }
 
@@ -5278,17 +5404,6 @@ async function handleImportExternalFile(): Promise<void> {
         const fileName = parts[parts.length - 1] || ref;
         const refStr = wrapFileRef(ref);
         addImportedFileRef({ ref: refStr, fileName, isImage: isImg, isDir: false });
-        if (isImg) {
-          loadImagePreview(ref).then((dataUrl) => {
-            if (dataUrl) {
-              const entry = importedFileRefs.find((e) => e.ref === refStr);
-              if (entry) {
-                entry.dataUrl = dataUrl;
-                renderImportedFileBar();
-              }
-            }
-          });
-        }
       }
     }
   } catch (err) {
@@ -5423,19 +5538,6 @@ async function bindDragDropFileRefs() {
 
           const refStr = wrapFileRef(ref);
           addImportedFileRef({ ref: refStr, fileName, isImage: isImg, isDir });
-
-          // 异步加载图片缩略图
-          if (isImg) {
-            loadImagePreview(ref).then((dataUrl) => {
-              if (dataUrl) {
-                const entry = importedFileRefs.find((e) => e.ref === refStr);
-                if (entry) {
-                  entry.dataUrl = dataUrl;
-                  renderImportedFileBar();
-                }
-              }
-            });
-          }
         }
       }
     }
