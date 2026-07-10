@@ -866,8 +866,9 @@ body.is-sidebar-resizing {
 
 /* ---- 用户消息：右侧蓝色气泡（匹配 claudecodeui）---- */
 .message.user {
-  flex-direction: row-reverse;
-  justify-content: flex-start;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0;
   padding: 0 12px;
 }
 
@@ -925,23 +926,6 @@ body.is-sidebar-resizing {
   background: transparent !important;
 }
 
-.message.user .message-time {
-  color: rgba(255, 255, 255, 0.65);
-  font-size: 11px;
-}
-
-.message.user .msg-copy-btn {
-  color: rgba(255, 255, 255, 0.5);
-  border-color: rgba(255, 255, 255, 0.15);
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.message.user .msg-copy-btn:hover {
-  color: rgba(255, 255, 255, 0.9);
-  border-color: rgba(255, 255, 255, 0.3);
-  background: rgba(255, 255, 255, 0.2);
-}
-
 /* ---- 助手消息：全宽无背景气泡（匹配 claudecodeui）---- */
 .message.assistant {
   flex-direction: column;
@@ -962,31 +946,6 @@ body.is-sidebar-resizing {
   color: var(--color-text);
   font-size: 14px;
   line-height: 1.65;
-}
-
-/* ---- 头像通用样式 ---- */
-.message-avatar {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 13px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-.message.user .message-avatar {
-  width: 32px;
-  height: 32px;
-  background: #2563eb;
-  color: #fff;
-}
-
-/* 分组消息：隐藏头像 */
-.message.user.grouped .message-avatar {
-  visibility: hidden;
 }
 
 .message-content pre {
@@ -1308,6 +1267,18 @@ body.is-sidebar-resizing {
   font-size: 11px;
   color: var(--color-text-muted);
   text-align: right;
+}
+
+/* 用户消息 footer：在气泡外部，默认隐藏，悬浮消息时显示 */
+.message-footer-user {
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  padding-right: 4px;
+  user-select: none;
+}
+
+.message.user:hover .message-footer-user {
+  opacity: 1;
 }
 
 /* ---- 消息复制控件 ---- */
@@ -2103,9 +2074,34 @@ body.is-sidebar-resizing {
   padding: 0;
 }
 
+/* 流式输出中的消息：左侧蓝色指示条 + 生成中动画 */
 .message.streaming .message-content .markdown-body {
   border-left: 2px solid var(--color-accent);
   padding-left: 10px;
+}
+
+/* 流式输出指示器：显示在 message-footer 中，与完成后的时间戳结构一致 */
+.message-streaming-indicator {
+  font-size: 11px;
+  color: var(--color-accent-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 流式输出中的闪烁点动画（与 pending-dot 保持一致的风格） */
+.message-streaming-indicator::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: pending-dot-bounce 1.2s infinite ease-in-out;
+}
+
+/* 统一 message-footer 最小高度，避免流式输出切换到完成状态时布局跳动 */
+.message.streaming .message-footer {
+  min-height: 20px;
 }
 
 /* ---- 错误消息 ---- */

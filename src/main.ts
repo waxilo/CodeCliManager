@@ -1158,7 +1158,12 @@ function refreshStreamingUI(sessionId: string) {
         const el = document.createElement('div');
         el.id = blockId;
         el.className = 'message assistant streaming';
-        el.innerHTML = `<div class="message-content"><div class="markdown-body">${renderMarkdown(block.content)}</div></div>`;
+        el.innerHTML = `<div class="message-content">
+          <div class="markdown-body">${renderMarkdown(block.content)}</div>
+          <div class="message-footer">
+            <span class="message-streaming-indicator">正在输出...</span>
+          </div>
+        </div>`;
         messageList.appendChild(el);
         initCodeCopyButtons(el);
         existingEls.set(idx, el);
@@ -3865,7 +3870,6 @@ function renderMessageHtml(msg: Message, prevRole?: string): string {
   }
 
   const isThinking = msg.role === 'thinking';
-  const avatarLabel = msg.role === 'user' ? 'You' : '';
   const roleClass = isThinking ? 'assistant thinking-msg' : msg.role;
 
   let thinkingHtml = '';
@@ -3899,33 +3903,19 @@ function renderMessageHtml(msg: Message, prevRole?: string): string {
       ? renderFileRefChipsHtml(msg.refs)
       : '');
 
-  // 消息复制控件
+  // 消息复制控件（非思考消息且有内容时显示）
   let copyControlHtml = '';
   if (!isThinking && msg.content.trim()) {
-    if (msg.role === 'assistant') {
-      // 助手消息：复制 Markdown（默认）/ 复制纯文本
-      const escapedContent = escapeHtml(msg.content);
-      copyControlHtml = `
-        <div class="msg-copy-control">
-          <button type="button" class="msg-copy-btn" data-copy-content="${escapedContent}" title="复制消息" aria-label="复制消息">
-            <svg class="msg-copy-icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-          </button>
-        </div>`;
-    } else if (msg.role === 'user') {
-      const escapedContent = escapeHtml(msg.content);
-      copyControlHtml = `
-        <div class="msg-copy-control">
-          <button type="button" class="msg-copy-btn" data-copy-content="${escapedContent}" title="复制消息" aria-label="复制消息">
-            <svg class="msg-copy-icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
-              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
-            </svg>
-          </button>
-        </div>`;
-    }
+    const escapedContent = escapeHtml(msg.content);
+    copyControlHtml = `
+      <div class="msg-copy-control">
+        <button type="button" class="msg-copy-btn" data-copy-content="${escapedContent}" title="复制消息" aria-label="复制消息">
+          <svg class="msg-copy-icon-svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+            <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+          </svg>
+        </button>
+      </div>`;
   }
 
   const isGrouped = prevRole && prevRole === msg.role && (msg.role === 'user' || msg.role === 'assistant' || msg.role === 'tool');
@@ -3947,18 +3937,17 @@ function renderMessageHtml(msg: Message, prevRole?: string): string {
     `;
   }
 
-  // 用户消息：蓝色气泡 + 头像
+  // 用户消息：蓝色气泡（复制 / 时间在气泡外，悬浮显示）
   return `
     <div class="message ${roleClass}${groupedClass}">
-      ${isGrouped ? '' : `<div class="message-avatar">${avatarLabel}</div>`}
       <div class="message-content">
         ${userRefs}
         ${thinkingHtml}
         ${contentHtml}
-        <div class="message-footer">
-          ${copyControlHtml}
-          <div class="message-time">${formatTime(msg.timestamp)}</div>
-        </div>
+      </div>
+      <div class="message-footer message-footer-user">
+        ${copyControlHtml}
+        <div class="message-time">${formatTime(msg.timestamp)}</div>
       </div>
     </div>
   `;
