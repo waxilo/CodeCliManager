@@ -804,7 +804,11 @@ async function setupEventListeners() {
     const isViewingThis = activeConversationId === payload.conversation_id;
 
     if (isViewingThis) {
-      hideSendingState();
+      // 如果会话仍在运行中（如重试/重新生成），保持 loading 状态
+      // session-ended 到达时再调用 hideSendingState
+      if (!runningSessions.has(payload.conversation_id)) {
+        hideSendingState();
+      }
       refreshChatContent();
       updateContextIndicator();
     } else {
@@ -3850,7 +3854,7 @@ function renderToolMessageHtml(msg: Message): string {
   return toolContent;
 }
 
-function renderMessageHtml(msg: Message, prevRole?: string): string {
+function renderMessageHtml(msg: Message, prevRole?: string, showUndo = false): string {
   if (msg.role === 'tool') {
     return renderToolMessageHtml(msg);
   }
@@ -3938,6 +3942,15 @@ function renderMessageHtml(msg: Message, prevRole?: string): string {
   }
 
   // 用户消息：蓝色气泡（复制 / 时间在气泡外，悬浮显示）
+  // 撤回按钮（仅最后一条用户消息，hover 显示）
+  const undoHtml = showUndo ? `
+    <button type="button" class="msg-action-btn msg-retry-btn"
+      data-action="undo" title="撤回此消息" aria-label="撤回此消息">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="1 4 1 10 7 10"></polyline>
+        <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+      </svg>
+    </button>` : '';
   return `
     <div class="message ${roleClass}${groupedClass}">
       <div class="message-content">
@@ -3946,6 +3959,7 @@ function renderMessageHtml(msg: Message, prevRole?: string): string {
         ${contentHtml}
       </div>
       <div class="message-footer message-footer-user">
+        ${undoHtml}
         ${copyControlHtml}
         <div class="message-time">${formatTime(msg.timestamp)}</div>
       </div>
@@ -3955,8 +3969,17 @@ function renderMessageHtml(msg: Message, prevRole?: string): string {
 
 /** 完整消息处理管线：合并相邻消息 → 处理工具消息 → 过滤不可见 → 渲染 HTML */
 function renderMessageListHtml(messages: Message[]): string {
-  return filterVisibleMessages(processToolMessages(mergeAdjacentSameRole(messages)))
-    .map((msg, idx, arr) => renderMessageHtml(msg, idx > 0 ? arr[idx - 1].role : undefined))
+  const isRunning = activeConversationId ? runningSessions.has(activeConversationId) : false;
+  const processed = filterVisibleMessages(processToolMessages(mergeAdjacentSameRole(messages)));
+  // 提前计算最后一条用户消息索引，避免在 .map() 内部 O(n²) 重复计算
+  const lastUserIdx = processed.map(m => m.role).lastIndexOf('user');
+  return processed
+    .map((msg, idx, arr) => {
+      // 撤回按钮始终显示在最后一条用户消息上，即使后面还有 AI 回复
+      // 点击撤回会删除该用户提问 + 所有后续回答
+      const showUndo = !isRunning && idx === lastUserIdx;
+      return renderMessageHtml(msg, idx > 0 ? arr[idx - 1].role : undefined, showUndo);
+    })
     .join('');
 }
 
@@ -4398,6 +4421,56 @@ async function abortSession() {
   }
 }
 
+/** 重新生成或撤回消息的统一入口 */
+async function invokeRetryMessage(mode: 'regenerate' | 'undo') {
+  if (!activeConversationId || isSendButtonLoading()) return;
+
+  if (mode === 'regenerate') {
+    setSendButtonLoading(true);
+    runningSessions.add(activeConversationId);
+  } else {
+    // 撤回：也设置 loading 状态防止双击，但不加入 runningSessions
+    setSendButtonLoading(true);
+  }
+
+  try {
+    await invoke('retry_message', { conversationId: activeConversationId, mode });
+
+    if (mode === 'regenerate') {
+      // 兜底超时：如果 session-ended 在 3 分钟内未到达，强制恢复 UI
+      const timeoutCid = activeConversationId;
+      setTimeout(() => {
+        if (timeoutCid && runningSessions.has(timeoutCid)) {
+          console.warn('[retry] regenerate 超时未收到 session-ended，强制恢复');
+          runningSessions.delete(timeoutCid);
+          hideSendingState();
+        }
+      }, 180_000);
+    }
+    // undo 模式：invoke 同步完成后恢复按钮状态
+    if (mode === 'undo') {
+      setSendButtonLoading(false);
+    }
+  } catch (e) {
+    console.error(`[${mode}] 操作失败:`, e);
+    if (mode === 'regenerate') {
+      runningSessions.delete(activeConversationId);
+    }
+    setSendButtonLoading(false);
+    showCopyToastMsg(mode === 'regenerate' ? '重新生成失败' : '撤回失败');
+  }
+}
+
+/** 重新生成：截断最后 AI 回复并重发 */
+async function handleRetryClick() {
+  await invokeRetryMessage('regenerate');
+}
+
+/** 撤回：删除最后一条用户消息及其回复 */
+async function handleUndoClick() {
+  await invokeRetryMessage('undo');
+}
+
 function handleSendButtonClick() {
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
   if (!sendBtn) return;
@@ -4516,6 +4589,21 @@ function setupMessageListPostRender(container: HTMLElement): void {
       }, 2000);
     });
   });
+
+  // 初始化重试/撤回按钮事件委托（仅绑定一次）
+  if (!(container as HTMLElement).dataset.retryBound) {
+    (container as HTMLElement).dataset.retryBound = '1';
+    container.addEventListener('click', (e) => {
+      const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('.msg-retry-btn');
+      if (!btn) return;
+      const action = btn.dataset.action;
+      if (action === 'retry') {
+        void handleRetryClick();
+      } else if (action === 'undo') {
+        void handleUndoClick();
+      }
+    });
+  }
 }
 
 function refreshChatContent() {
@@ -4597,10 +4685,9 @@ function selectConversation(id: string) {
     updateConversationListSpinner();
 
     setTimeout(() => {
-      const messageList = document.querySelector<HTMLDivElement>('#message-list');
-      if (messageList) {
-        messageList.scrollTop = messageList.scrollHeight;
-      }
+      // 使用 scrollMessageListToBottom() 而非直接赋值 scrollTop，
+      // 它会临时禁用 smooth 滚动避免切换长会话时动画太久
+      scrollMessageListToBottom();
       // 如果切换到的会话正在流式输出，恢复流式 UI
       if (thisSessionRunning && streamingBySession.has(id)) {
         showPendingAssistantIndicator();

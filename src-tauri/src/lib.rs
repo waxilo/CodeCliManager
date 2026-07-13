@@ -1662,6 +1662,18 @@ enum StreamOutcome {
     },
 }
 
+fn conversation_to_payload(conv: &Conversation) -> SessionEventPayload {
+    SessionEventPayload {
+        conversation_id: conv.id.clone(),
+        title: conv.title.clone(),
+        messages: conv.messages.clone(),
+        project_dir: conv.project_dir.clone(),
+        updated_at: conv.updated_at,
+        context_tokens: conv.context_tokens,
+        last_model: conv.last_model.clone(),
+    }
+}
+
 fn emit_message_chunk(app: &AppHandle, conversation_id: &str, kind: &str, content: &str) {
     let payload = MessageChunkPayload {
         conversation_id: conversation_id.to_string(),
@@ -3060,15 +3072,7 @@ async fn execute_prompt(
                                 "session-created"
                             };
 
-                            let payload = SessionEventPayload {
-                                conversation_id: conv.id.clone(),
-                                title: conv.title.clone(),
-                                messages: conv.messages.clone(),
-                                project_dir: conv.project_dir.clone(),
-                                updated_at: conv.updated_at,
-                                context_tokens: conv.context_tokens,
-                                last_model: conv.last_model.clone(),
-                            };
+                            let payload = conversation_to_payload(conv);
                             eprintln!("[execute_prompt] emit {} for session {}", event_name, conv.id);
                             let _ = app.emit(event_name, &payload);
                             let _ = app.emit("session-ended", Some(conv.id.clone()));
@@ -3133,6 +3137,210 @@ async fn abort_session(conversation_id: Option<String>) -> Result<bool, String> 
     }
     eprintln!("[abort] no active process found for {:?}", conversation_id);
     Ok(false)
+}
+
+/// 截断会话 JSONL 并触发"重新生成"或"撤回"
+/// mode: "regenerate" — 删除最后一条 AI 回复，用相同用户消息重发
+/// mode: "undo" — 删除最后一轮对话（最后一条用户消息及其后续），仅更新 UI 不回发
+#[tauri::command]
+async fn retry_message(
+    app: AppHandle,
+    conversation_id: String,
+    mode: String,
+) -> Result<(), String> {
+    // 1. 如果正在运行，先终止
+    mark_session_aborted(&conversation_id);
+    let _ = kill_active_process(&conversation_id);
+
+    // 2. 找到 JSONL 文件
+    let path = find_claude_session_file(&conversation_id)
+        .ok_or_else(|| format!("找不到会话文件: {}", conversation_id))?;
+
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("读取会话文件失败: {}", e))?;
+
+    // 3. 解析所有行，找到截断点，同时提取最后一条用户消息内容
+    let mut last_user_prompt: Option<String> = None;
+    let mut last_user_line_idx: i64 = -1;
+    let mut last_assistant_line_idx: i64 = -1;
+    let lines: Vec<&str> = content.lines().collect();
+
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() { continue; }
+        let value: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        // 跳过元数据行
+        if value.get("isMeta").and_then(|m| m.as_bool()) == Some(true) { continue; }
+        let msg_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        let message = value.get("message");
+        let role = message
+            .and_then(|m| m.get("role"))
+            .and_then(|r| r.as_str())
+            .unwrap_or("");
+
+        // 提取用户消息文本（仅 real user message，排除 tool_result）
+        if role == "user" && msg_type == "user" {
+            if let Some(content_blocks) = message.and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
+                let texts: Vec<&str> = content_blocks
+                    .iter()
+                    .filter_map(|block| {
+                        let block_type = block.get("type").and_then(|t| t.as_str());
+                        if block_type == Some("text") {
+                            block.get("text").and_then(|t| t.as_str())
+                        } else if block_type == Some("tool_result") {
+                            // tool_result 也可能包含用户反馈文本
+                            block.get("content").and_then(|c| c.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                let prompt_text = texts.join("\n");
+                if !prompt_text.trim().is_empty() {
+                    last_user_prompt = Some(prompt_text);
+                    last_user_line_idx = i as i64;
+                }
+            }
+        }
+
+        if role == "assistant" {
+            last_assistant_line_idx = i as i64;
+        }
+    }
+
+    // 4. 确定截断位置
+    let truncate_idx = match mode.as_str() {
+        "regenerate" => {
+            if last_user_prompt.is_none() {
+                return Err("未找到可重试的用户消息".into());
+            }
+            if last_assistant_line_idx < 0 {
+                return Err("未找到可重试的 AI 回复".into());
+            }
+            if last_assistant_line_idx <= last_user_line_idx {
+                return Err("数据异常：AI 回复在用户消息之前，无法重试".into());
+            }
+            // 删除最后一条 assistant 及其之后的 tool_result 行
+            last_assistant_line_idx as usize
+        }
+        "undo" => {
+            if last_user_line_idx < 0 {
+                return Err("未找到可撤回的用户消息".into());
+            }
+            last_user_line_idx as usize
+        }
+        _ => return Err(format!("未知模式: {}", mode)),
+    };
+
+    // 5. 截断并写回 JSONL（使用切片 join 直接拼接，避免中间 Vec 分配）
+    let new_content = lines[..truncate_idx].join("\n");
+    std::fs::write(&path, &new_content)
+        .map_err(|e| format!("写入会话文件失败: {}", e))?;
+
+    eprintln!(
+        "[retry_message] 截断会话 {}（模式={}），保留 {} 行，删除了 {} 行",
+        conversation_id,
+        mode,
+        truncate_idx,
+        lines.len().saturating_sub(truncate_idx),
+    );
+
+    // 6. 通知前端更新消息列表（从截断后的 JSONL 重新加载）
+    let after_conv = load_claude_history()
+        .into_iter()
+        .find(|c| c.id == conversation_id);
+    if let Some(conv) = after_conv {
+        let payload = conversation_to_payload(&conv);
+        let _ = app.emit("messages-updated", payload);
+    }
+
+    // 7. "regenerate" 模式：用原用户消息重新发送
+    if mode == "regenerate" {
+        if let Some(prompt) = last_user_prompt {
+            let app_clone = app.clone();
+            let cid = conversation_id.clone();
+
+            // 获取会话当前的模型和项目目录（同步于 execute_prompt 的行为）
+            let regen_info = load_claude_history()
+                .iter()
+                .find(|c| c.id == cid)
+                .map(|c| (c.last_model.clone(), c.project_dir.clone()))
+                .unwrap_or((None, None));
+            let (regenerate_model, regenerate_project_dir) = regen_info;
+
+            // 异步执行，与 execute_prompt 保持一致
+            tauri::async_runtime::spawn(async move {
+                // Drop guard: 确保任务异常退出时前端不会卡在 loading 状态
+                struct SessionEndedGuard {
+                    app: AppHandle,
+                    cid: String,
+                }
+                impl Drop for SessionEndedGuard {
+                    fn drop(&mut self) {
+                        let _ = self.app.emit("session-ended", Some(self.cid.clone()));
+                    }
+                }
+                let _guard = SessionEndedGuard {
+                    app: app_clone.clone(),
+                    cid: cid.clone(),
+                };
+
+                eprintln!("[retry_message] 重新发送用户消息到会话 {}", cid);
+                let app_handle = app_clone.clone();
+                let cid_for_stream = cid.clone();
+                let prompt_for_stream = prompt.clone();
+                // 克隆以满足 spawn_blocking 的 'static 要求
+                let model_owned = regenerate_model.clone();
+                let project_dir_owned = regenerate_project_dir.clone();
+
+                let stream_result = tauri::async_runtime::spawn_blocking(move || {
+                    spawn_claude_stream(
+                        app_handle,
+                        &prompt_for_stream,
+                        Some(&cid_for_stream),
+                        project_dir_owned.as_ref(),
+                        model_owned.as_deref(),
+                    )
+                }).await;
+
+                match stream_result {
+                    Ok(Ok(outcome)) => match outcome {
+                        StreamOutcome::Success(_final_session_id) => {
+                            let after_conversations = load_claude_history();
+                            if let Some(conv) = after_conversations.iter().find(|c| c.id == cid) {
+                                let payload = conversation_to_payload(conv);
+                                let _ = app_clone.emit("messages-updated", &payload);
+                            }
+                            let _ = app_clone.emit("session-ended", Some(cid.clone()));
+                        }
+                        StreamOutcome::Failed { session_id, error } => {
+                            eprintln!(
+                                "[retry_message] claude 执行失败 (session={:?}): {}",
+                                session_id, error
+                            );
+                            let _ = app_clone.emit("session-ended", Some(cid.clone()));
+                        }
+                    },
+                    Ok(Err(e)) => {
+                        let err_msg = format!("重新生成失败: {}", e);
+                        emit_session_error(&app_clone, Some(&cid), &err_msg);
+                        let _ = app_clone.emit("session-ended", Some(cid.clone()));
+                    }
+                    Err(e) => {
+                        let err_msg = format!("启动进程失败: {}", e);
+                        emit_session_error(&app_clone, Some(&cid), &err_msg);
+                        let _ = app_clone.emit("session-ended", Some(cid.clone()));
+                    }
+                }
+            });
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -3562,6 +3770,7 @@ pub fn run() {
             execute_cli_command,
             execute_prompt,
             abort_session,
+            retry_message,
             get_conversation_list,
             get_conversation_messages,
             get_claude_api_config,

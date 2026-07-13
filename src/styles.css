@@ -1321,6 +1321,43 @@ body.is-sidebar-resizing {
   border-color: #238636;
 }
 
+/* ---- 消息操作按钮（重新生成 / 撤回）---- */
+.msg-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+
+.message:hover .msg-action-btn,
+.message-content:hover .msg-action-btn,
+.msg-action-btn:focus-visible {
+  opacity: 1;
+}
+
+.msg-action-btn:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent-soft);
+}
+
+.msg-retry-btn.loading {
+  animation: conv-spin 0.7s linear infinite;
+  opacity: 1;
+  color: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
 .input-area {
   padding: 12px 20px 16px;
   background: var(--color-bg-base);
