@@ -271,6 +271,98 @@ body.is-sidebar-resizing {
   min-width: 0;
 }
 
+/* ── 工作区分组 ────────────────────────────────────────────────────── */
+.workspace-group {
+  margin-bottom: 2px;
+}
+
+.workspace-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  user-select: none;
+  border-radius: 6px;
+  margin: 0 2px;
+  transition: background 0.15s;
+}
+
+.workspace-header:hover {
+  background: var(--color-bg-surface);
+}
+
+.workspace-arrow {
+  font-size: 9px;
+  color: var(--color-text-muted);
+  transition: transform 0.15s;
+  flex-shrink: 0;
+  width: 12px;
+  text-align: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.workspace-arrow.expanded {
+  transform: rotate(90deg);
+}
+
+.workspace-name {
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  letter-spacing: 0.3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.workspace-count {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+.workspace-add-btn {
+  width: 20px;
+  height: 20px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  flex-shrink: 0;
+  transition: opacity 0.15s, background 0.15s, color 0.15s;
+}
+
+.workspace-header:hover .workspace-add-btn {
+  opacity: 1;
+}
+
+.workspace-add-btn:hover {
+  background: var(--color-bg-surface-hover, var(--color-bg-surface));
+  color: var(--color-accent);
+}
+
+.workspace-conversations {
+  padding-left: 12px;
+}
+
+.workspace-group.uncategorized .workspace-name {
+  font-style: italic;
+  opacity: 0.7;
+}
+
 .main-topbar {
   display: flex;
   align-items: center;

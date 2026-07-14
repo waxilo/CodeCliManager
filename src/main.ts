@@ -185,6 +185,13 @@ const expandedThinkingBlocks = new Set<string>();
 let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
 let isSidebarCollapsed = false;
 
+/** 侧边栏工作区展开状态持久化（localStorage key） */
+const EXPANDED_WORKSPACES_KEY = 'expandedWorkspaces';
+/** 工作区展开状态，key 为 workspace path */
+let expandedWorkspaces = new Set<string>(
+  (() => { try { return JSON.parse(localStorage.getItem(EXPANDED_WORKSPACES_KEY) || '[]'); } catch { return []; } })()
+);
+
 const streamingBySession = new Map<string, StreamingState>();
 const pendingTextDelta = new Map<string, string>();
 /** 正在运行的会话 ID 集合（后台执行的任务也包含在内） */
@@ -1667,6 +1674,113 @@ async function refreshConversationFromBackend(conversationId: string) {
   }
 }
 
+// ── 工作区分组辅助函数 ─────────────────────────────────────────────
+
+interface WorkspaceGroup {
+  path: string;
+  displayName: string;
+  conversations: Conversation[];
+}
+
+/** 从完整路径提取最后一级目录名作为展示名 */
+function getWorkspaceDisplayName(path: string): string {
+  const normalized = path.replace(/[\\/]+$/, '');
+  const parts = normalized.split(/[\\/]/);
+  return parts[parts.length - 1] || path;
+}
+
+/** 将工作区展开状态持久化到 localStorage */
+function saveExpandedWorkspaces(): void {
+  try {
+    localStorage.setItem(EXPANDED_WORKSPACES_KEY, JSON.stringify(Array.from(expandedWorkspaces)));
+  } catch (e) {
+    console.warn('Failed to save expanded workspaces:', e);
+  }
+}
+
+/** 按 project_dir 将对话分组为工作区，返回工作区列表和未分类对话 */
+function groupConversationsByWorkspace(): { workspaces: WorkspaceGroup[]; uncategorized: Conversation[] } {
+  const workspaceMap = new Map<string, Conversation[]>();
+  const uncategorized: Conversation[] = [];
+
+  for (const conv of conversations) {
+    const dir = conv.project_dir?.trim();
+    if (dir) {
+      const list = workspaceMap.get(dir) || [];
+      list.push(conv);
+      workspaceMap.set(dir, list);
+    } else {
+      uncategorized.push(conv);
+    }
+  }
+
+  // 构建工作区数组，按最近对话时间降序排列
+  const workspaces: WorkspaceGroup[] = Array.from(workspaceMap.entries()).map(([path, convs]) => ({
+    path,
+    displayName: getWorkspaceDisplayName(path),
+    conversations: convs.sort((a, b) => b.updated_at - a.updated_at),
+  }));
+  workspaces.sort((a, b) => {
+    const aLatest = a.conversations[0]?.updated_at ?? 0;
+    const bLatest = b.conversations[0]?.updated_at ?? 0;
+    return bLatest - aLatest;
+  });
+
+  // 未分类对话也按时间降序
+  uncategorized.sort((a, b) => b.updated_at - a.updated_at);
+
+  return { workspaces, uncategorized };
+}
+
+/** 在指定工作区快速新建对话（预设工作目录，跳过选目录步骤） */
+function newChatInWorkspace(workspacePath: string): void {
+  activeConversationId = '';
+  invalidateFileCache();
+  pendingUserMessage = null;
+  pendingUserMessageConvId = null;
+  transientSessionError = null;
+  pendingProjectDir = workspacePath;
+  render();
+  void refreshModelInfo();
+
+  setTimeout(() => {
+    const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+    if (input) input.focus();
+  }, 100);
+}
+
+/** 渲染单个对话列表项 HTML（供工作区分组复用） */
+function renderConversationItemHtml(c: Conversation): string {
+  const isActive = c.id === activeConversationId;
+  const isEditing = editingConversationId === c.id;
+  const isRunning = runningSessions.has(c.id);
+
+  return `
+    <div class="conversation-item ${isActive ? 'active' : ''} ${isEditing ? 'editing' : ''} ${isRunning ? 'running' : ''}" data-id="${c.id}">
+      ${isEditing ? `
+        <div class="conversation-edit-row">
+          <input type="text"
+                 class="edit-input"
+                 id="edit-input-${c.id}"
+                 value="${escapeHtml(c.title)}"
+          />
+          <div class="edit-action-buttons">
+            <button type="button" class="edit-action-btn save" data-action="save-edit" data-id="${c.id}" title="Save">✓</button>
+            <button type="button" class="edit-action-btn cancel" data-action="cancel-edit" title="Cancel">✕</button>
+          </div>
+        </div>
+      ` : `
+        <span class="conversation-row">
+          <span class="conversation-title">${escapeHtml(c.title)}</span>
+          <button type="button" class="conv-more-btn" data-action="more" data-id="${c.id}" title="更多操作" aria-label="更多操作">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+          </button>
+        </span>
+      `}
+    </div>
+  `;
+}
+
 async function loadData() {
   try {
     const raw = await invoke<(Conversation & { projectDir?: string | null })[]>('get_conversations');
@@ -1684,36 +1798,49 @@ function renderConversationList(): string {
     return '<div class="empty-state">No conversations yet</div>';
   }
 
-  return conversations.map(c => {
-    const isActive = c.id === activeConversationId;
-    const isEditing = editingConversationId === c.id;
-    const isRunning = runningSessions.has(c.id);
+  const { workspaces, uncategorized } = groupConversationsByWorkspace();
+  let html = '';
 
-    return `
-      <div class="conversation-item ${isActive ? 'active' : ''} ${isEditing ? 'editing' : ''} ${isRunning ? 'running' : ''}" data-id="${c.id}">
-        ${isEditing ? `
-          <div class="conversation-edit-row">
-            <input type="text"
-                   class="edit-input"
-                   id="edit-input-${c.id}"
-                   value="${escapeHtml(c.title)}"
-            />
-            <div class="edit-action-buttons">
-              <button type="button" class="edit-action-btn save" data-action="save-edit" data-id="${c.id}" title="Save">✓</button>
-              <button type="button" class="edit-action-btn cancel" data-action="cancel-edit" title="Cancel">✕</button>
-            </div>
+  // 渲染各工作区分组
+  for (const ws of workspaces) {
+    const isExpanded = expandedWorkspaces.has(ws.path);
+    html += `
+      <div class="workspace-group" data-workspace-path="${escapeHtml(ws.path)}">
+        <div class="workspace-header" data-action="toggle-workspace" data-workspace="${escapeHtml(ws.path)}">
+          <span class="workspace-arrow${isExpanded ? ' expanded' : ''}">▶</span>
+          <span class="workspace-name" title="${escapeHtml(ws.path)}">${escapeHtml(ws.displayName)}</span>
+          <span class="workspace-count">${ws.conversations.length}</span>
+          <button type="button" class="workspace-add-btn" data-action="new-chat-in-workspace" data-workspace="${escapeHtml(ws.path)}" title="在此工作区新建对话" aria-label="在此工作区新建对话">+</button>
+        </div>
+        ${isExpanded ? `
+          <div class="workspace-conversations">
+            ${ws.conversations.map(c => renderConversationItemHtml(c)).join('')}
           </div>
-        ` : `
-          <span class="conversation-row">
-            <span class="conversation-title">${escapeHtml(c.title)}</span>
-            <button type="button" class="conv-more-btn" data-action="more" data-id="${c.id}" title="更多操作" aria-label="更多操作">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
-            </button>
-          </span>
-        `}
+        ` : ''}
       </div>
     `;
-  }).join('');
+  }
+
+  // 未分类对话（project_dir 为 null）
+  if (uncategorized.length > 0) {
+    const uncatExpanded = expandedWorkspaces.has('__uncategorized__');
+    html += `
+      <div class="workspace-group uncategorized">
+        <div class="workspace-header" data-action="toggle-workspace" data-workspace="__uncategorized__">
+          <span class="workspace-arrow${uncatExpanded ? ' expanded' : ''}">▶</span>
+          <span class="workspace-name">未分类</span>
+          <span class="workspace-count">${uncategorized.length}</span>
+        </div>
+        ${uncatExpanded ? `
+          <div class="workspace-conversations">
+            ${uncategorized.map(c => renderConversationItemHtml(c)).join('')}
+          </div>
+        ` : ''}
+      </div>
+    `;
+  }
+
+  return html;
 }
 
 function updateConversationListSpinner() {
@@ -1945,6 +2072,26 @@ function handleConversationListClick(e: Event) {
     e.stopPropagation();
     const action = actionEl.dataset.action;
     const id = actionEl.dataset.id;
+    const workspacePath = actionEl.dataset.workspace;
+
+    // 工作区展开/折叠
+    if (action === 'toggle-workspace' && workspacePath) {
+      if (expandedWorkspaces.has(workspacePath)) {
+        expandedWorkspaces.delete(workspacePath);
+      } else {
+        expandedWorkspaces.add(workspacePath);
+      }
+      saveExpandedWorkspaces();
+      const list = document.querySelector('#conversation-list');
+      if (list) list.innerHTML = renderConversationList();
+      return;
+    }
+
+    // 工作区内新建对话
+    if (action === 'new-chat-in-workspace' && workspacePath) {
+      newChatInWorkspace(workspacePath);
+      return;
+    }
 
     if (action === 'more' && id) {
       toggleConversationMenu(id, actionEl as HTMLElement);
