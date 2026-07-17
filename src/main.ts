@@ -196,7 +196,165 @@ const streamingBySession = new Map<string, StreamingState>();
 const pendingTextDelta = new Map<string, string>();
 /** 正在运行的会话 ID 集合（后台执行的任务也包含在内） */
 const runningSessions = new Set<string>();
-let streamRefreshTimer: number | null = null;
+let streamRefreshRafId: number | null = null;
+let streamRefreshPending = false;
+let streamRefreshLastTime = 0;
+
+// ── ScrollController：独立滚动容器管理 ──────────────────────────────
+
+interface ScrollControllerOptions {
+  /** 距离底部多少 px 时判定为"在底部"（触发恢复自动滚动） */
+  resumePx: number;
+  /** 距离底部多少 px 时判定为"用户已离开"（触发停止自动滚动） */
+  leavePx: number;
+  /** 是否创建浮动"回到底部"按钮 */
+  createButton?: boolean;
+  /** 滚动按钮的 CSS class */
+  buttonClass?: string;
+  /** 是否阻止 wheel 事件冒泡（嵌套滚动容器使用，避免影响父容器） */
+  stopWheelPropagation?: boolean;
+}
+
+class ScrollController {
+  readonly el: HTMLElement;
+  autoScroll = true;
+  private opts: Required<ScrollControllerOptions>;
+  private rafId: number | null = null;
+  private buttonEl: HTMLElement | null = null;
+  private buttonClickHandler: (() => void) | null = null;
+
+  constructor(el: HTMLElement, opts: ScrollControllerOptions) {
+    this.el = el;
+    this.opts = {
+      resumePx: opts.resumePx,
+      leavePx: opts.leavePx,
+      createButton: opts.createButton ?? false,
+      buttonClass: opts.buttonClass ?? 'scroll-to-bottom-btn',
+      stopWheelPropagation: opts.stopWheelPropagation ?? false,
+    };
+
+    // wheel 事件：向上滚动 → 关闭自动滚动
+    el.addEventListener('wheel', this._onWheel, { passive: true });
+    // scroll 事件：回到底部 → 恢复自动滚动（scroll 不冒泡，无需处理）
+    el.addEventListener('scroll', this._onScroll, { passive: true });
+
+    if (this.opts.createButton) {
+      this._createButton();
+    }
+  }
+
+  /** 新内容到达时调用：若 autoScroll 则置底（RAF 节流） */
+  onNewContent(): void {
+    if (!this.autoScroll) return;
+    if (this.rafId !== null) return; // 已有待处理的 RAF
+    this.rafId = requestAnimationFrame(() => {
+      this.rafId = null;
+      this._scrollToBottom();
+    });
+  }
+
+  /** 立即置底并开启自动滚动 */
+  scrollToBottom(): void {
+    this.autoScroll = true;
+    this._scrollToBottom();
+    this._updateButton();
+  }
+
+  /** 销毁：移除监听器和按钮 */
+  destroy(): void {
+    this.el.removeEventListener('wheel', this._onWheel);
+    this.el.removeEventListener('scroll', this._onScroll);
+    if (this.rafId !== null) {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    if (this.buttonClickHandler) {
+      this.buttonEl?.removeEventListener('click', this.buttonClickHandler);
+      this.buttonClickHandler = null;
+    }
+    this.buttonEl?.remove();
+    this.buttonEl = null;
+  }
+
+  // ── 内部方法 ──────────────────────────────────────────
+
+  private _isNearBottom(): boolean {
+    return this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight < this.opts.resumePx;
+  }
+
+  private _isFarFromBottom(): boolean {
+    return this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight > this.opts.leavePx;
+  }
+
+  private _scrollToBottom(): void {
+    // 暂时关闭 smooth 滚动避免动画积压
+    const prev = this.el.style.scrollBehavior;
+    this.el.style.scrollBehavior = 'auto';
+    this.el.scrollTop = this.el.scrollHeight;
+    this.el.style.scrollBehavior = prev;
+  }
+
+  private _onWheel = (e: WheelEvent): void => {
+    if (this.opts.stopWheelPropagation) {
+      e.stopPropagation();
+    }
+    if (e.deltaY < 0) {
+      // 用户向上滚动 → 停止自动跟随
+      this.autoScroll = false;
+    } else if (this._isNearBottom()) {
+      // 用户向下滚动到底部 → 恢复自动跟随
+      this.autoScroll = true;
+    }
+  };
+
+  private _onScroll = (): void => {
+    if (this._isNearBottom()) {
+      this.autoScroll = true;
+    } else if (this._isFarFromBottom()) {
+      // 用户已离开底部区域 → 停止自动跟随
+      this.autoScroll = false;
+    }
+    this._updateButton();
+  };
+
+  private _createButton(): void {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = this.opts.buttonClass;
+    btn.title = '滚动到底部';
+    btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
+    btn.addEventListener('click', this.buttonClickHandler = () => this.scrollToBottom());
+    this.el.appendChild(btn);
+    this.buttonEl = btn;
+  }
+
+  private _updateButton(): void {
+    if (!this.buttonEl) return;
+    if (this._isNearBottom()) {
+      this.buttonEl.classList.remove('visible');
+    } else {
+      this.buttonEl.classList.add('visible');
+    }
+  }
+}
+
+// ── 全局滚动控制器 ──────────────────────────────────────
+
+/** Answer 区域滚动控制器（#message-list） */
+let answerScroller: ScrollController | null = null;
+/** Thinking 区域滚动控制器（按元素映射，key 为 streaming-block-N 的 N） */
+const thinkingScrollers = new Map<string, ScrollController>();
+
+/** 获取或创建指定思考块的 ScrollController */
+function getThinkingScroller(el: HTMLElement, id: string): ScrollController {
+  let sc = thinkingScrollers.get(id);
+  if (!sc || sc.el !== el) {
+    sc?.destroy();
+    sc = new ScrollController(el, { resumePx: 20, leavePx: 80, stopWheelPropagation: true });
+    thinkingScrollers.set(id, sc);
+  }
+  return sc;
+}
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 
@@ -772,7 +930,7 @@ async function setupEventListeners() {
     if (isViewingThis) {
       hideSendingState();
       render();
-      setTimeout(scrollMessageListToBottom, 100);
+      setTimeout(() => answerScroller?.scrollToBottom(), 100);
     } else {
       // 用户在看别的会话或新聊天页，只更新侧边栏
       updateConversationListSpinner();
@@ -898,6 +1056,12 @@ function clearStreamingState(sessionId: string) {
   streamingBySession.delete(sessionId);
   pendingTextDelta.delete(sessionId);
   removeStreamingElements();
+  // 取消待处理的 RAF 刷新
+  if (streamRefreshRafId !== null) {
+    cancelAnimationFrame(streamRefreshRafId);
+    streamRefreshRafId = null;
+    streamRefreshPending = false;
+  }
 }
 
 /** 将当前缓冲的文本追加到当前 text 块的 content */
@@ -1012,12 +1176,23 @@ function handleMessageChunk(payload: MessageChunkPayload) {
 }
 
 function scheduleStreamingRefresh(sessionId: string) {
-  if (streamRefreshTimer !== null) return;
-  streamRefreshTimer = window.setTimeout(() => {
-    streamRefreshTimer = null;
+  if (streamRefreshPending) return;
+  streamRefreshPending = true;
+
+  const doRefresh = (timestamp: number) => {
+    if (timestamp - streamRefreshLastTime < 100) {
+      // 距上次刷新不足 100ms，等待下一帧
+      streamRefreshRafId = requestAnimationFrame(doRefresh);
+      return;
+    }
+    streamRefreshLastTime = timestamp;
+    streamRefreshRafId = null;
+    streamRefreshPending = false;
     flushPendingTextDelta(sessionId);
     refreshStreamingUI(sessionId);
-  }, 200);
+  };
+
+  streamRefreshRafId = requestAnimationFrame(doRefresh);
 }
 
 function handleSessionError(payload: SessionErrorPayload) {
@@ -1139,6 +1314,9 @@ function refreshStreamingUI(sessionId: string) {
         } else {
           existingEl.querySelector('.thinking-block')?.classList.remove('streaming-active');
         }
+        // 思考内容独立滚动
+        const scrollEl = existingEl.querySelector<HTMLElement>('.thinking-content-scroll');
+        if (scrollEl) getThinkingScroller(scrollEl, blockId).onNewContent();
       } else {
         // 删除旧元素（类型不匹配或不存在）
         existingEl?.remove();
@@ -1157,6 +1335,9 @@ function refreshStreamingUI(sessionId: string) {
             }
           });
         }
+        // 新创建的思考块：初始化独立 ScrollController
+        const scrollEl = el.querySelector<HTMLElement>('.thinking-content-scroll');
+        if (scrollEl) getThinkingScroller(scrollEl, blockId).scrollToBottom();
         existingEls.set(idx, el);
       }
     } else if (block.type === 'text') {
@@ -1184,57 +1365,34 @@ function refreshStreamingUI(sessionId: string) {
 
   // 移除不再需要的旧流式元素（块数量减少时）
   existingEls.forEach((el, idx) => {
-    if (!usedIndices.has(idx)) el.remove();
+    if (!usedIndices.has(idx)) {
+      // 清理对应的 thinking scroller
+      const blockId = `streaming-block-${idx}`;
+      thinkingScrollers.get(blockId)?.destroy();
+      thinkingScrollers.delete(blockId);
+      el.remove();
+    }
   });
 
-  if (isNearBottom()) {
-    scrollMessageListToBottom();
-  }
+  // Answer 区域自动置底
+  answerScroller?.onNewContent();
 }
 
-function scrollMessageListToBottom() {
+/** 初始化 Answer 区域 ScrollController（#message-list） */
+function initAnswerScroller(): void {
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
-  if (messageList) {
-    // 流式输出时临时禁用 smooth 滚动，避免动画追逐效应
-    const prevBehavior = messageList.style.scrollBehavior;
-    messageList.style.scrollBehavior = 'auto';
-    messageList.scrollTop = messageList.scrollHeight;
-    messageList.style.scrollBehavior = prevBehavior;
-  }
-}
+  if (!messageList) return;
 
-/** 初始化滚动到底部浮动按钮 */
-function initScrollToBottomButton(container: HTMLElement): void {
-  // 移除旧按钮
-  container.querySelector('.scroll-to-bottom-btn')?.remove();
+  // 销毁旧实例
+  answerScroller?.destroy();
+  thinkingScrollers.forEach((sc) => sc.destroy());
+  thinkingScrollers.clear();
 
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.className = 'scroll-to-bottom-btn';
-  btn.title = '滚动到底部';
-  btn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
-  btn.addEventListener('click', () => scrollMessageListToBottom());
-  container.appendChild(btn);
-
-  const handleScroll = () => {
-    if (isNearBottom()) {
-      btn.classList.remove('visible');
-    } else {
-      btn.classList.add('visible');
-    }
-  };
-
-  container.addEventListener('scroll', handleScroll, { passive: true });
-  // 初始状态
-  handleScroll();
-}
-
-/** 判断用户是否处于消息列表底部附近（阈值 80px），用于流式输出时的智能滚动 */
-function isNearBottom(): boolean {
-  const messageList = document.querySelector<HTMLDivElement>('#message-list');
-  if (!messageList) return true;
-  const threshold = 80;
-  return messageList.scrollHeight - messageList.scrollTop - messageList.clientHeight < threshold;
+  answerScroller = new ScrollController(messageList, {
+    resumePx: 20,
+    leavePx: 80,
+    createButton: true,
+  });
 }
 
 function isNewChatSession(): boolean {
@@ -4659,7 +4817,7 @@ function showPendingAssistantIndicator(statusText = '正在思考...') {
   if (textEl) {
     textEl.textContent = statusText;
   }
-  scrollMessageListToBottom();
+  answerScroller?.scrollToBottom();
 }
 
 function updatePendingStatus(statusText: string) {
@@ -4698,8 +4856,8 @@ function setupMessageListPostRender(container: HTMLElement): void {
     });
   });
 
-  // 初始化滚动到底部按钮
-  initScrollToBottomButton(container);
+  // 初始化 Answer 区域滚动控制器
+  initAnswerScroller();
 
   // 初始化消息复制按钮
   container.querySelectorAll('.msg-copy-btn').forEach((btn) => {
@@ -4779,7 +4937,7 @@ function refreshChatContent() {
     } else {
       removePendingAssistantIndicator();
     }
-    scrollMessageListToBottom();
+    answerScroller?.scrollToBottom();
   }
 }
 
@@ -4832,9 +4990,8 @@ function selectConversation(id: string) {
     updateConversationListSpinner();
 
     setTimeout(() => {
-      // 使用 scrollMessageListToBottom() 而非直接赋值 scrollTop，
-      // 它会临时禁用 smooth 滚动避免切换长会话时动画太久
-      scrollMessageListToBottom();
+      // 滚动到底部（ScrollController 会临时禁用 smooth 避免长动画）
+      answerScroller?.scrollToBottom();
       // 如果切换到的会话正在流式输出，恢复流式 UI
       if (thisSessionRunning && streamingBySession.has(id)) {
         showPendingAssistantIndicator();
