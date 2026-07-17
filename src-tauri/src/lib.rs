@@ -1501,98 +1501,8 @@ fn load_app_state() -> AppState {
 }
 
 fn get_default_state() -> AppState {
-    let mut conversations = Vec::new();
-    
-    let now = chrono::Utc::now().timestamp();
-    let hour_ago = now - 3600;
-    let two_hours_ago = now - 7200;
-    
-    conversations.push(Conversation {
-        id: "session-1".to_string(),
-        title: "如何学习 Rust".to_string(),
-        messages: vec![
-            Message {
-                id: "msg-1".to_string(),
-                role: "user".to_string(),
-                content: "告诉我如何学习 Rust 编程语言".to_string(),
-                thinking: None,
-                timestamp: two_hours_ago,
-            },
-            Message {
-                id: "msg-2".to_string(),
-                role: "assistant".to_string(),
-                content: "学习 Rust 的最佳方式：\n1. 阅读官方文档 \"The Rust Programming Language\"\n2. 完成 Rustlings 练习\n3. 构建小项目\n4. 参与开源项目".to_string(),
-                thinking: None,
-                timestamp: two_hours_ago + 1,
-            },
-        ],
-        platform: "claude".to_string(),
-        project_dir: None,
-        source_path: None,
-        created_at: two_hours_ago,
-        updated_at: two_hours_ago + 1,
-        context_tokens: None,
-        last_model: None,
-    });
-    
-    conversations.push(Conversation {
-        id: "session-2".to_string(),
-        title: "前端性能优化".to_string(),
-        messages: vec![
-            Message {
-                id: "msg-3".to_string(),
-                role: "user".to_string(),
-                content: "前端性能优化有哪些方法？".to_string(),
-                thinking: None,
-                timestamp: hour_ago,
-            },
-            Message {
-                id: "msg-4".to_string(),
-                role: "assistant".to_string(),
-                content: "前端性能优化技巧：\n- 代码分割和懒加载\n- 图片优化（WebP/AVIF）\n- 缓存策略\n- CDN 加速\n- 减少重绘重排".to_string(),
-                thinking: None,
-                timestamp: hour_ago + 1,
-            },
-        ],
-        platform: "claude".to_string(),
-        project_dir: None,
-        source_path: None,
-        created_at: hour_ago,
-        updated_at: hour_ago + 1,
-        context_tokens: None,
-        last_model: None,
-    });
-    
-    conversations.push(Conversation {
-        id: "session-3".to_string(),
-        title: "Tauri 框架介绍".to_string(),
-        messages: vec![
-            Message {
-                id: "msg-5".to_string(),
-                role: "user".to_string(),
-                content: "什么是 Tauri 框架？".to_string(),
-                thinking: None,
-                timestamp: now - 300,
-            },
-            Message {
-                id: "msg-6".to_string(),
-                role: "assistant".to_string(),
-                content: "Tauri 是一个用于构建跨平台桌面应用的框架，使用 Rust 作为后端，前端可以使用任何 Web 技术。相比 Electron，Tauri 应用体积更小、性能更好。".to_string(),
-                thinking: None,
-                timestamp: now - 299,
-            },
-        ],
-        platform: "claude".to_string(),
-        project_dir: None,
-        source_path: None,
-        created_at: now - 300,
-        updated_at: now - 299,
-        context_tokens: None,
-        last_model: None,
-    });
-    
     AppState {
-        conversations,
+        conversations: Vec::new(),
         platforms: get_default_platforms(),
         active_platform: "claude".to_string(),
         current_platform: detect_os(),
@@ -2457,6 +2367,62 @@ fn delete_conversation(conversation_id: String, source_path: Option<String>) -> 
     }
 
     Ok(true)
+}
+
+#[tauri::command]
+fn delete_workspace_conversations(project_dir: String) -> Result<u32, String> {
+    let project_dir_trimmed = project_dir.trim();
+    if project_dir_trimmed.is_empty() {
+        return Err("project_dir is empty".to_string());
+    }
+
+    // 使用和前端 get_conversations() 相同的数据源（优先读 Claude JSONL 历史）
+    let app_state = load_app_state();
+    let ids_to_delete: Vec<String> = app_state
+        .conversations
+        .iter()
+        .filter(|c| {
+            c.project_dir
+                .as_deref()
+                .is_some_and(|d| d.trim() == project_dir_trimmed)
+        })
+        .map(|c| c.id.clone())
+        .collect();
+
+    if ids_to_delete.is_empty() {
+        return Ok(0);
+    }
+
+    let count = ids_to_delete.len() as u32;
+    let mut errors: Vec<String> = Vec::new();
+
+    for conv_id in &ids_to_delete {
+        let resolved_path = find_claude_session_file(conv_id);
+        if let Some(ref path) = resolved_path {
+            if let Err(err) = delete_claude_session_file(path, conv_id) {
+                errors.push(err);
+            }
+        }
+        mark_session_deleted(conv_id);
+    }
+
+    // 清理 state.json（如果其中也包含被删会话）
+    let mut persisted = load_persisted_state();
+    let id_set: HashSet<String> = ids_to_delete.iter().cloned().collect();
+    let before = persisted.conversations.len();
+    persisted.conversations.retain(|c| !id_set.contains(&c.id));
+    if persisted.conversations.len() != before {
+        save_app_state(&persisted);
+    }
+
+    if !errors.is_empty() {
+        eprintln!(
+            "[delete_workspace] some session files could not be deleted: {:?}",
+            errors
+        );
+    }
+
+    Ok(count)
 }
 
 fn read_claude_session_id_from_file(path: &Path) -> Option<String> {
@@ -3764,6 +3730,7 @@ pub fn run() {
             set_active_platform,
             add_platform,
             delete_conversation,
+            delete_workspace_conversations,
             get_conversation,
             update_conversation_title,
             send_message,

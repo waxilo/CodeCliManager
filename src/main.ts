@@ -1812,7 +1812,7 @@ function renderConversationItemHtml(c: Conversation): string {
   const isRunning = runningSessions.has(c.id);
 
   return `
-    <div class="conversation-item ${isActive ? 'active' : ''} ${isEditing ? 'editing' : ''} ${isRunning ? 'running' : ''}" data-id="${c.id}">
+    <div class="conversation-item ${isActive ? 'active' : ''} ${isEditing ? 'editing' : ''} ${isRunning ? 'running' : ''}" data-id="${c.id}" title="${escapeHtml(c.title)}">
       ${isEditing ? `
         <div class="conversation-edit-row">
           <input type="text"
@@ -1827,6 +1827,7 @@ function renderConversationItemHtml(c: Conversation): string {
         </div>
       ` : `
         <span class="conversation-row">
+          <svg class="conversation-chat-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
           <span class="conversation-title">${escapeHtml(c.title)}</span>
           <button type="button" class="conv-more-btn" data-action="more" data-id="${c.id}" title="更多操作" aria-label="更多操作">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
@@ -1861,9 +1862,11 @@ function renderConversationList(): string {
   for (const ws of workspaces) {
     const isExpanded = expandedWorkspaces.has(ws.path);
     html += `
-      <div class="workspace-group" data-workspace-path="${escapeHtml(ws.path)}">
+      <div class="workspace-group${isExpanded ? ' is-expanded' : ''}" data-workspace-path="${escapeHtml(ws.path)}">
         <div class="workspace-header" data-action="toggle-workspace" data-workspace="${escapeHtml(ws.path)}">
-          <span class="workspace-arrow${isExpanded ? ' expanded' : ''}">▶</span>
+          <span class="workspace-arrow${isExpanded ? ' expanded' : ''}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </span>
           <span class="workspace-name" title="${escapeHtml(ws.path)}">${escapeHtml(ws.displayName)}</span>
           <span class="workspace-count">${ws.conversations.length}</span>
           <button type="button" class="workspace-add-btn" data-action="new-chat-in-workspace" data-workspace="${escapeHtml(ws.path)}" title="在此工作区新建对话" aria-label="在此工作区新建对话">+</button>
@@ -1881,9 +1884,11 @@ function renderConversationList(): string {
   if (uncategorized.length > 0) {
     const uncatExpanded = expandedWorkspaces.has('__uncategorized__');
     html += `
-      <div class="workspace-group uncategorized">
+      <div class="workspace-group uncategorized${uncatExpanded ? ' is-expanded' : ''}">
         <div class="workspace-header" data-action="toggle-workspace" data-workspace="__uncategorized__">
-          <span class="workspace-arrow${uncatExpanded ? ' expanded' : ''}">▶</span>
+          <span class="workspace-arrow${uncatExpanded ? ' expanded' : ''}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+          </span>
           <span class="workspace-name">未分类</span>
           <span class="workspace-count">${uncategorized.length}</span>
         </div>
@@ -1963,7 +1968,7 @@ function render() {
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
             <div class="new-chat-btn-wrapper">
-              <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
+              <button class="new-chat-btn" id="new-chat-btn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New Chat</button>
             </div>
             <button type="button" class="refresh-btn" id="refresh-btn" title="扫描本地新会话" aria-label="刷新会话列表"><span class="refresh-icon">↻</span></button>
           </div>
@@ -2049,6 +2054,8 @@ function attachEventListeners() {
   if (listEl) {
     listEl.removeEventListener('click', handleConversationListClick);
     listEl.addEventListener('click', handleConversationListClick);
+    listEl.removeEventListener('contextmenu', handleConversationListContextMenu);
+    listEl.addEventListener('contextmenu', handleConversationListContextMenu);
   }
 
   const textarea = document.querySelector('#message-input') as HTMLTextAreaElement;
@@ -2177,8 +2184,92 @@ function handleConversationListClick(e: Event) {
   }
 }
 
+function handleConversationListContextMenu(e: Event) {
+  const target = e.target as HTMLElement;
+  // 只有工作区 header 区域触发右键菜单（非按钮区域）
+  const workspaceHeader = target.closest('.workspace-header') as HTMLElement | null;
+  if (!workspaceHeader) return;
+
+  // 排除「未分类」分组
+  const workspacePath = workspaceHeader.dataset.workspace;
+  if (!workspacePath || workspacePath === '__uncategorized__') return;
+
+  e.preventDefault();
+  e.stopPropagation();
+  toggleWorkspaceContextMenu(workspacePath, workspaceHeader, e as MouseEvent);
+}
+
+function closeWorkspaceContextMenu() {
+  document.querySelector('.ws-menu-overlay')?.remove();
+}
+
+function toggleWorkspaceContextMenu(workspacePath: string, _anchorEl: HTMLElement, event: MouseEvent) {
+  const existing = document.querySelector<HTMLElement>('.ws-menu-overlay');
+  if (existing?.dataset.wsPath === workspacePath) {
+    return closeWorkspaceContextMenu();
+  }
+  closeWorkspaceContextMenu();
+  closeConversationMenu();
+
+  const { clientX: x, clientY: y } = event;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'ws-menu-overlay';
+  overlay.dataset.wsPath = workspacePath;
+  overlay.innerHTML = `
+    <div class="conv-menu-dropdown ws-menu-dropdown">
+      <button type="button" class="conv-menu-item" data-action="new-chat" data-workspace="${escapeHtml(workspacePath)}">在此目录新建对话</button>
+      <button type="button" class="conv-menu-item is-danger" data-action="delete-workspace" data-workspace="${escapeHtml(workspacePath)}">删除目录下所有会话</button>
+    </div>
+  `;
+
+  let onKey: (ev: KeyboardEvent) => void;
+  let onDocClick: (ev: Event) => void;
+  const closeMenu = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKey);
+    document.removeEventListener('click', onDocClick);
+  };
+  onKey = (ev: KeyboardEvent) => {
+    if (ev.key === 'Escape') closeMenu();
+  };
+  // 点击下拉菜单外部时关闭菜单（overlay 是 pointer-events: none，需监听 document）
+  onDocClick = (ev: Event) => {
+    const dropdown = overlay.querySelector('.ws-menu-dropdown');
+    if (dropdown && !dropdown.contains(ev.target as Node)) closeMenu();
+  };
+
+  document.addEventListener('keydown', onKey);
+  document.addEventListener('click', onDocClick);
+
+  // 菜单项点击处理挂在下拉菜单上（overlay 是 pointer-events: none）
+  const dropdown = overlay.querySelector<HTMLElement>('.ws-menu-dropdown')!;
+  dropdown.addEventListener('click', (ev) => {
+    const btn = (ev.target as HTMLElement).closest<HTMLElement>('.conv-menu-item');
+    if (!btn || !btn.dataset.action) return closeMenu();
+    const { action, workspace: ws } = btn.dataset;
+    closeMenu();
+    if (action === 'new-chat' && ws) newChatInWorkspace(ws);
+    if (action === 'delete-workspace' && ws) void deleteWorkspaceConversations(ws);
+  });
+
+  document.body.appendChild(overlay);
+
+  requestAnimationFrame(() => {
+    const menu = overlay.querySelector<HTMLElement>('.ws-menu-dropdown');
+    if (!menu) return;
+    const r = menu.getBoundingClientRect();
+    // 左上角对齐鼠标位置，超出视口右侧则向左偏移
+    const left = x + r.width > window.innerWidth ? Math.max(8, x - r.width) : x;
+    const top = y + r.height > window.innerHeight ? Math.max(8, y - r.height) : y;
+    menu.style.left = `${Math.max(8, left)}px`;
+    menu.style.top = `${Math.max(8, top)}px`;
+  });
+}
+
 function closeConversationMenu() {
   document.querySelector('.conv-menu-overlay')?.remove();
+  closeWorkspaceContextMenu();
 }
 
 function toggleConversationMenu(conversationId: string, anchorEl: HTMLElement) {
@@ -5044,6 +5135,53 @@ async function deleteConversation(id: string) {
   } catch (e) {
     console.error('Failed to delete conversation:', e);
     alert('删除会话失败: ' + String(e));
+    await loadData();
+    render();
+  }
+}
+
+async function deleteWorkspaceConversations(workspacePath: string) {
+  const { workspaces } = groupConversationsByWorkspace();
+  const ws = workspaces.find((w) => w.path === workspacePath);
+  console.log('[deleteWorkspace] path:', workspacePath, 'found:', !!ws, 'count:', ws?.conversations.length);
+  if (!ws || ws.conversations.length === 0) return;
+
+  const count = ws.conversations.length;
+  const confirmed = await showConfirmDialog({
+    title: '删除目录下所有会话',
+    message: `确定要删除「${escapeHtml(ws.displayName)}」下的全部 ${count} 个会话吗？`,
+    sub: `目录路径: ${escapeHtml(workspacePath)}\n此操作将永久删除所有会话记录及对应的 Claude 会话文件，且不可恢复。`,
+    confirmLabel: '全部删除',
+  });
+  if (!confirmed) return;
+
+  try {
+    const deletedCount = await invoke<number>('delete_workspace_conversations', {
+      projectDir: workspacePath,
+    });
+    console.log('[deleteWorkspace] deletedCount:', deletedCount);
+
+    // 清理已删除会话的流式状态
+    for (const conv of ws.conversations) {
+      clearStreamingState(conv.id);
+      runningSessions.delete(conv.id);
+    }
+
+    // 如果当前活跃会话属于被删除的工作区，切换到其他会话
+    const deletedIds = new Set(ws.conversations.map((c) => c.id));
+    if (activeConversationId && deletedIds.has(activeConversationId)) {
+      activeConversationId = '';
+      pendingUserMessage = null;
+      pendingUserMessageConvId = null;
+      transientSessionError = null;
+    }
+
+    await loadData();
+    render();
+    showCopyToastMsg(`已删除 ${deletedCount} 个会话`);
+  } catch (e) {
+    console.error('Failed to delete workspace conversations:', e);
+    alert('删除目录会话失败: ' + String(e));
     await loadData();
     render();
   }
