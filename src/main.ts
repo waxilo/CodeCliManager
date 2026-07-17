@@ -1106,7 +1106,8 @@ function handleMessageChunk(payload: MessageChunkPayload) {
       updated_at: now,
     });
     // 此时尚无会话数据，保留 pendingUserMessage 以确保用户消息可见
-    updateProjectDirControl();
+    updateSendButtonState();
+    updateProjectDirDisplay();
     ensureChatViewVisible();
     updateConversationListSpinner();
     // ensureChatViewVisible 可能调用了 render()，需要恢复按钮 loading 状态
@@ -1471,72 +1472,6 @@ function setSendButtonLoading(loading: boolean) {
   }
 }
 
-function updateProjectDirControl() {
-  const control = document.querySelector<HTMLButtonElement>('#project-dir-control');
-  if (!control) {
-    return;
-  }
-
-  const dir = getEffectiveProjectDir();
-  const canPick = canPickProjectDirectory();
-  const label = getProjectDirDisplayLabel(dir);
-  const title = getProjectDirHoverTitle(dir);
-  const labelEl = control.querySelector('.project-dir-label');
-  if (labelEl) {
-    labelEl.textContent = label;
-    labelEl.setAttribute('title', title);
-  }
-  control.title = title;
-  control.dataset.empty = dir ? 'false' : 'true';
-  control.disabled = !canPick && !dir;
-  control.classList.toggle('is-readonly', !canPick && Boolean(dir));
-  control.classList.toggle('is-openable', Boolean(dir) && !canPick);
-
-  control.querySelector('.project-dir-toolbar-chevron')?.remove();
-  control.querySelector('.project-dir-toolbar-open')?.remove();
-  if (dir && !canPick) {
-    control.insertAdjacentHTML('beforeend', renderProjectDirOpenIconHtml().trim());
-  } else if (canPick) {
-    control.insertAdjacentHTML(
-      'beforeend',
-      '<span class="project-dir-toolbar-chevron" aria-hidden="true">▾</span>',
-    );
-  }
-
-  updateSendButtonState();
-}
-
-function formatProjectDirShortName(dir: string): string {
-  const trimmed = dir.trim();
-  if (!trimmed) {
-    return '';
-  }
-  if (trimmed === '/') {
-    return '/';
-  }
-  if (/^[A-Za-z]:\\?$/.test(trimmed)) {
-    return trimmed.replace(/\\$/, '');
-  }
-  const normalized = trimmed.replace(/[\\/]+$/, '');
-  const segments = normalized.split(/[\\/]/).filter(Boolean);
-  return segments[segments.length - 1] || trimmed;
-}
-
-function getProjectDirDisplayLabel(dir: string): string {
-  return formatProjectDirShortName(dir) || '选择工作目录';
-}
-
-function getProjectDirHoverTitle(dir: string, canPick = canPickProjectDirectory()): string {
-  const trimmed = dir.trim();
-  if (!trimmed) {
-    return '点击选择工作目录';
-  }
-  if (canPick) {
-    return `工作目录: ${trimmed}（点击更换）`;
-  }
-  return `工作目录: ${trimmed}（点击打开）`;
-}
-
 function renderCopyIconHtml(className = 'toolbar-copy-icon'): string {
   return `
     <span class="${className}" aria-hidden="true">
@@ -1548,33 +1483,20 @@ function renderCopyIconHtml(className = 'toolbar-copy-icon'): string {
   `;
 }
 
-function renderProjectDirOpenIconHtml(): string {
-  return `
-    <span class="project-dir-toolbar-open" aria-hidden="true">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
-        <polyline points="15 3 21 3 21 9"/>
-        <line x1="10" y1="14" x2="21" y2="3"/>
-      </svg>
-    </span>
-  `;
-}
-
 async function copyTextToClipboard(text: string): Promise<boolean> {
   const trimmed = text.trim();
   if (!trimmed) return false;
   return _copyToClipboard(trimmed);
 }
 
-function handleProjectDirClick() {
-  if (canPickProjectDirectory()) {
-    void pickProjectDirectory();
-    return;
-  }
-  const dir = getEffectiveProjectDir().trim();
-  if (dir) {
-    void openPathInFileManager(dir);
-  }
+function formatProjectDirShortName(dir: string): string {
+  const trimmed = dir.trim();
+  if (!trimmed) return '';
+  if (trimmed === '/') return '/';
+  if (/^[A-Za-z]:\\?$/.test(trimmed)) return trimmed.replace(/\\$/, '');
+  const normalized = trimmed.replace(/[\\/]+$/, '');
+  const segments = normalized.split(/[\\/]/).filter(Boolean);
+  return segments[segments.length - 1] || trimmed;
 }
 
 async function openPathInFileManager(path: string): Promise<void> {
@@ -1640,29 +1562,54 @@ function renderSendButtonHtml(): string {
   `;
 }
 
-function renderProjectDirToolbarHtml(): string {
+/** 更新右下角工作目录展示（无需重建 DOM） */
+function updateProjectDirDisplay() {
+  const el = document.querySelector('#project-dir-display') as HTMLButtonElement | null;
+  if (!el) return;
+
   const dir = getEffectiveProjectDir();
-  const canPick = canPickProjectDirectory();
-  const label = getProjectDirDisplayLabel(dir);
-  const title = getProjectDirHoverTitle(dir, canPick);
+  const shortName = formatProjectDirShortName(dir);
+  const label = shortName || '—';
+  const title = dir ? `工作目录: ${dir}（点击打开）` : '未设置工作目录';
+  const hasDir = Boolean(dir);
+
+  el.title = title;
+  el.setAttribute('aria-label', title);
+  el.disabled = !hasDir;
+
+  const labelEl = el.querySelector('.project-dir-display-label');
+  if (labelEl) labelEl.textContent = label;
+
+  // 更新外部链接图标
+  el.querySelector('.project-dir-display-open')?.remove();
+  if (hasDir) {
+    el.insertAdjacentHTML('beforeend', '<span class="project-dir-display-open" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>');
+  }
+}
+
+function renderProjectDirDisplayHtml(): string {
+  const dir = getEffectiveProjectDir();
+  const shortName = formatProjectDirShortName(dir);
+  const label = shortName || '—';
+  const title = dir ? `工作目录: ${dir}（点击打开）` : '未设置工作目录';
+  const hasDir = Boolean(dir);
 
   return `
     <button
       type="button"
-      class="project-dir-toolbar ${canPick ? '' : 'is-readonly'}${dir && !canPick ? ' is-openable' : ''}"
-      id="project-dir-control"
-      data-empty="${dir ? 'false' : 'true'}"
+      class="project-dir-display"
+      id="project-dir-display"
       title="${escapeHtml(title)}"
       aria-label="${escapeHtml(title)}"
-      ${!canPick && !dir ? 'disabled' : ''}
+      ${!hasDir ? 'disabled' : ''}
     >
-      <span class="project-dir-toolbar-icon" aria-hidden="true">
+      <span class="project-dir-display-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
         </svg>
       </span>
-      <span class="project-dir-toolbar-label project-dir-label" title="${escapeHtml(title)}">${escapeHtml(label)}</span>
-      ${dir && !canPick ? renderProjectDirOpenIconHtml() : canPick ? '<span class="project-dir-toolbar-chevron" aria-hidden="true">▾</span>' : ''}
+      <span class="project-dir-display-label">${escapeHtml(label)}</span>
+      ${hasDir ? '<span class="project-dir-display-open" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>' : ''}
     </button>
   `;
 }
@@ -1696,7 +1643,7 @@ function renderInputComposerHtml(): string {
             </button>
           </div>
           <div class="input-composer-toolbar-end">
-            ${renderProjectDirToolbarHtml()}
+            ${renderProjectDirDisplayHtml()}
             ${renderChatModelPickerHtml()}
             ${renderContextIndicatorHtml()}
             ${renderSendButtonHtml()}
@@ -1705,41 +1652,6 @@ function renderInputComposerHtml(): string {
       </div>
     </div>
   `;
-}
-
-async function pickProjectDirectory() {
-  if (!canPickProjectDirectory()) {
-    return;
-  }
-
-  try {
-    const selected = await open({
-      directory: true,
-      multiple: false,
-      title: '选择工作目录',
-    });
-    if (typeof selected !== 'string' || !selected.trim()) {
-      return;
-    }
-    const trimmed = selected.trim();
-    if (activeConversationId) {
-      const conv = conversations.find((c) => c.id === activeConversationId);
-      if (conv) {
-        conv.project_dir = trimmed;
-      }
-    } else {
-      pendingProjectDir = trimmed;
-    invalidateFileCache();
-    }
-    updateProjectDirControl();
-
-    const topbarMain = document.querySelector<HTMLDivElement>('.main-topbar-main');
-    if (topbarMain && (activeConversationId || pendingUserMessage)) {
-      topbarMain.innerHTML = renderChatHeaderHtml(undefined);
-    }
-  } catch (e) {
-    console.error('Failed to pick project directory:', e);
-  }
 }
 
 function normalizeConversation(
@@ -1783,20 +1695,6 @@ function resolveConversationProjectDir(
   return null;
 }
 
-function hasStartedConversation(): boolean {
-  if (pendingUserMessage) {
-    return true;
-  }
-  if (!activeConversationId) {
-    return false;
-  }
-  const conv = conversations.find((c) => c.id === activeConversationId);
-  return Boolean(conv && conv.messages.length > 0);
-}
-
-function canPickProjectDirectory(): boolean {
-  return !hasStartedConversation();
-}
 
 // 在内存中更新或添加会话
 function updateOrAddConversation(conv: Conversation) {
@@ -2064,7 +1962,9 @@ function render() {
       <div class="sidebar">
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
-            <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
+            <div class="new-chat-btn-wrapper">
+              <button class="new-chat-btn" id="new-chat-btn">+ New Chat</button>
+            </div>
             <button type="button" class="refresh-btn" id="refresh-btn" title="扫描本地新会话" aria-label="刷新会话列表"><span class="refresh-icon">↻</span></button>
           </div>
         </div>
@@ -2166,10 +2066,13 @@ function attachEventListeners() {
 
   document.querySelector('#send-btn')?.addEventListener('click', handleSendButtonClick);
 
-  const projectDirControl = document.querySelector('#project-dir-control');
-  if (projectDirControl) {
-    projectDirControl.removeEventListener('click', handleProjectDirClick);
-    projectDirControl.addEventListener('click', handleProjectDirClick);
+  // 右下角工作目录展示：点击在文件管理器中打开
+  const projectDirDisplay = document.querySelector('#project-dir-display');
+  if (projectDirDisplay) {
+    projectDirDisplay.addEventListener('click', () => {
+      const dir = getEffectiveProjectDir().trim();
+      if (dir) void openPathInFileManager(dir);
+    });
   }
 
   bindChatModelPickerEvents();
@@ -4526,19 +4429,132 @@ async function refreshModelInfo() {
 }
 
 function newChat() {
+  toggleNewChatDropdown();
+}
+
+/** 关闭 New Chat 下拉框 */
+function closeNewChatDropdown() {
+  document.querySelector('.new-chat-overlay')?.remove();
+  document.querySelector('.new-chat-dropdown')?.remove();
+}
+
+/** 切换 New Chat 下拉框显示/隐藏 */
+function toggleNewChatDropdown() {
+  if (document.querySelector('.new-chat-dropdown')) {
+    closeNewChatDropdown();
+    return;
+  }
+
+  const btnWrapper = document.querySelector('#new-chat-btn')?.parentElement;
+  if (!btnWrapper) return;
+
+  const { workspaces } = groupConversationsByWorkspace();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'new-chat-overlay';
+  overlay.addEventListener('click', closeNewChatDropdown);
+
+  const dropdown = document.createElement('div');
+  dropdown.className = 'new-chat-dropdown';
+  dropdown.innerHTML = renderNewChatDropdownContent(workspaces);
+
+  document.body.appendChild(overlay);
+  document.body.appendChild(dropdown);
+
+  // 定位下拉框
+  requestAnimationFrame(() => {
+    const btnRect = btnWrapper.getBoundingClientRect();
+    dropdown.style.top = `${btnRect.bottom + 4}px`;
+    dropdown.style.left = `${btnRect.left}px`;
+    // 确保不超出右边界
+    const dRect = dropdown.getBoundingClientRect();
+    if (dRect.right > window.innerWidth - 8) {
+      dropdown.style.left = `${Math.max(8, window.innerWidth - dRect.width - 8)}px`;
+    }
+    // 确保不超出下边界
+    if (dRect.bottom > window.innerHeight - 8) {
+      dropdown.style.top = `${Math.max(8, btnRect.top - dRect.height - 4)}px`;
+    }
+  });
+
+  // 监听点击事件
+  dropdown.addEventListener('click', (e) => {
+    const target = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
+    if (!target) return;
+    const action = target.dataset.action;
+    const workspacePath = target.dataset.workspace;
+
+    if (action === 'pick-new-dir') {
+      closeNewChatDropdown();
+      void pickNewWorkspaceDirectory();
+    } else if (action === 'new-chat-in-dropdown' && workspacePath) {
+      closeNewChatDropdown();
+      newChatInWorkspace(workspacePath);
+    }
+  });
+}
+
+/** 选择新的工作目录并创建新会话 */
+async function pickNewWorkspaceDirectory(): Promise<void> {
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: '选择工作目录',
+    });
+    if (typeof selected !== 'string' || !selected.trim()) {
+      return;
+    }
+    const trimmed = selected.trim();
+    pendingProjectDir = trimmed;
+    invalidateFileCache();
+  } catch (e) {
+    console.error('Failed to pick project directory:', e);
+    return;
+  }
+  // 完成选目录后执行创建新会话
   activeConversationId = '';
   invalidateFileCache();
   pendingUserMessage = null;
   pendingUserMessageConvId = null;
   transientSessionError = null;
-  pendingProjectDir = null;
   render();
   void refreshModelInfo();
-  
+
   setTimeout(() => {
     const input = document.querySelector<HTMLTextAreaElement>('#message-input');
     if (input) input.focus();
   }, 100);
+}
+
+/** 渲染 New Chat 下拉框内容 */
+function renderNewChatDropdownContent(workspaces: WorkspaceGroup[]): string {
+  const plusSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+  const folderSvg = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+
+  let html = `
+    <button type="button" class="new-chat-dropdown-action" data-action="pick-new-dir">
+      <span class="new-chat-dropdown-action-icon">${plusSvg}</span>
+      <span class="new-chat-dropdown-item-label">选择新工作目录…</span>
+    </button>
+  `;
+
+  if (workspaces.length > 0) {
+    html += `<div class="new-chat-dropdown-separator"></div>`;
+    html += `<div class="new-chat-dropdown-label">最近使用</div>`;
+    for (const ws of workspaces) {
+      html += `
+        <button type="button" class="new-chat-dropdown-item" data-action="new-chat-in-dropdown" data-workspace="${escapeHtml(ws.path)}" title="${escapeHtml(ws.path)}">
+          <span class="new-chat-dropdown-item-icon">${folderSvg}</span>
+          <span class="new-chat-dropdown-item-label">${escapeHtml(ws.displayName)}</span>
+        </button>
+      `;
+    }
+  } else {
+    html += `<div class="new-chat-dropdown-empty">暂无历史工作目录</div>`;
+  }
+
+  return html;
 }
 
 // 发送消息：通过 invoke 到后端，后端启动 shell 并通过事件推送更新
@@ -4926,7 +4942,8 @@ function refreshChatContent() {
     bindSessionIdCopyEvents();
   }
 
-  updateProjectDirControl();
+  updateSendButtonState();
+  updateProjectDirDisplay();
   if (messageList) {
     const messages = buildDisplayMessages(conversation);
     messageList.innerHTML = renderMessageListHtml(messages);
