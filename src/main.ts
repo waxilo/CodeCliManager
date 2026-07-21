@@ -1770,20 +1770,20 @@ function groupConversationsByWorkspace(): { workspaces: WorkspaceGroup[]; uncate
     }
   }
 
-  // 构建工作区数组，按最近对话时间降序排列
+  // 构建工作区数组，按对话创建时间降序排列
   const workspaces: WorkspaceGroup[] = Array.from(workspaceMap.entries()).map(([path, convs]) => ({
     path,
     displayName: getWorkspaceDisplayName(path),
-    conversations: convs.sort((a, b) => b.updated_at - a.updated_at),
+    conversations: convs.sort((a, b) => b.created_at - a.created_at),
   }));
   workspaces.sort((a, b) => {
-    const aLatest = a.conversations[0]?.updated_at ?? 0;
-    const bLatest = b.conversations[0]?.updated_at ?? 0;
+    const aLatest = a.conversations[0]?.created_at ?? 0;
+    const bLatest = b.conversations[0]?.created_at ?? 0;
     return bLatest - aLatest;
   });
 
-  // 未分类对话也按时间降序
-  uncategorized.sort((a, b) => b.updated_at - a.updated_at);
+  // 未分类对话也按创建时间降序
+  uncategorized.sort((a, b) => b.created_at - a.created_at);
 
   return { workspaces, uncategorized };
 }
