@@ -46,6 +46,12 @@ renderer.code = function (codeObj: { text: string; lang?: string; escaped?: bool
   `;
 };
 
+renderer.link = function (linkObj: { href: string; title?: string | null; text: string }): string {
+  const href = linkObj.href;
+  const title = linkObj.title ? ` title="${escapeAttr(linkObj.title)}"` : '';
+  return `<a href="${href}"${title} target="_blank" rel="noopener noreferrer">${linkObj.text}</a>`;
+};
+
 marked.use({ renderer });
 
 /**
