@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { open } from '@tauri-apps/plugin-dialog';
+import { open, save } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { renderMarkdown as _renderMarkdown, initCodeCopyButtons, copyToClipboard as _copyToClipboard } from './markdown';
 
@@ -145,11 +145,14 @@ type ThemeMode = 'light' | 'dark';
 const THEME_STORAGE_KEY = 'codemanager-theme';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'codemanager-sidebar-width';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codemanager-sidebar-collapsed';
-const DEFAULT_SIDEBAR_WIDTH = 184;
-const LEGACY_DEFAULT_SIDEBAR_WIDTH = 320;
-const MIN_SIDEBAR_WIDTH = 160;
+const DEFAULT_SIDEBAR_WIDTH = 280;
+/** 历史默认宽度：命中这些值时视为「用户从未手动调整」，自动迁移到新默认宽度 */
+const LEGACY_DEFAULT_SIDEBAR_WIDTHS = [320, 184];
+const MIN_SIDEBAR_WIDTH = 240;
 const MIN_MAIN_CONTENT_WIDTH = 300;
 const SIDEBAR_RESIZER_WIDTH = 4;
+/** 窗口宽度低于该值时自动折叠侧边栏（响应式） */
+const SIDEBAR_AUTO_COLLAPSE_WIDTH = 880;
 
 interface StreamBlock {
   type: 'thinking' | 'text';
@@ -184,6 +187,14 @@ const expandedThinkingBlocks = new Set<string>();
 
 let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
 let isSidebarCollapsed = false;
+/** 侧边栏当前是否处于「窄窗口自动折叠」状态（区别于用户手动折叠） */
+let sidebarAutoCollapsed = false;
+/** 上一次判定的窗口宽度区间，用于只在跨越断点时触发自动折叠 */
+let sidebarWasNarrow: boolean | null = null;
+/** 侧边栏会话搜索关键词 */
+let sidebarSearchQuery = '';
+/** 新加入列表、需要播放淡入动画的会话 ID */
+const newConversationIds = new Set<string>();
 
 /** 侧边栏工作区展开状态持久化（localStorage key） */
 const EXPANDED_WORKSPACES_KEY = 'expandedWorkspaces';
@@ -409,8 +420,8 @@ function loadSidebarWidth(): number {
     const stored = localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
     if (stored) {
       const parsed = Number.parseInt(stored, 10);
-      if (!Number.isNaN(parsed) && parsed >= MIN_SIDEBAR_WIDTH) {
-        if (parsed === LEGACY_DEFAULT_SIDEBAR_WIDTH) {
+      if (!Number.isNaN(parsed)) {
+        if (LEGACY_DEFAULT_SIDEBAR_WIDTHS.includes(parsed) || parsed < MIN_SIDEBAR_WIDTH) {
           return DEFAULT_SIDEBAR_WIDTH;
         }
         return parsed;
@@ -447,8 +458,10 @@ function initSidebarWidth() {
 }
 
 function bindSidebarResizer() {
+  // 折叠状态下 resizer 已被 CSS 设为 pointer-events: none，这里仍然绑定，
+  // 保证展开后无需重新 render 即可拖拽
   const resizer = document.querySelector('#sidebar-resizer') as HTMLElement | null;
-  if (!resizer || isSidebarCollapsed) return;
+  if (!resizer) return;
 
   const onPointerMove = (event: PointerEvent) => {
     applySidebarWidth(event.clientX);
@@ -512,18 +525,52 @@ function syncSidebarCollapsedUI() {
   updateSidebarToggleButtons();
 }
 
-function setSidebarCollapsed(collapsed: boolean) {
+function setSidebarCollapsed(collapsed: boolean, persist = true) {
   isSidebarCollapsed = collapsed;
-  saveSidebarCollapsed(collapsed);
+  if (persist) saveSidebarCollapsed(collapsed);
   syncSidebarCollapsedUI();
 }
 
 function toggleSidebarCollapsed() {
+  // 用户手动操作后放弃自动折叠的接管权，避免窗口变宽时被强行展开
+  sidebarAutoCollapsed = false;
   setSidebarCollapsed(!isSidebarCollapsed);
 }
 
 function initSidebarCollapsed() {
   isSidebarCollapsed = loadSidebarCollapsed();
+}
+
+/**
+ * 窄窗口自动折叠侧边栏；变宽后自动恢复。
+ * 只在跨越断点时干预一次，用户之后的手动展开/折叠不会被覆盖。
+ */
+function syncSidebarResponsiveState() {
+  const isNarrow = window.innerWidth < SIDEBAR_AUTO_COLLAPSE_WIDTH;
+  if (isNarrow === sidebarWasNarrow) return;
+  sidebarWasNarrow = isNarrow;
+
+  if (isNarrow) {
+    if (!isSidebarCollapsed) {
+      sidebarAutoCollapsed = true;
+      setSidebarCollapsed(true, false);
+    }
+    return;
+  }
+
+  if (sidebarAutoCollapsed) {
+    sidebarAutoCollapsed = false;
+    // 恢复到用户持久化的偏好
+    setSidebarCollapsed(loadSidebarCollapsed(), false);
+  }
+}
+
+function bindSidebarResponsive() {
+  window.addEventListener('resize', () => {
+    syncSidebarResponsiveState();
+    applySidebarWidth(sidebarWidth);
+  });
+  syncSidebarResponsiveState();
 }
 
 function toggleTheme() {
@@ -888,6 +935,8 @@ async function init() {
   initTheme();
   initSidebarWidth();
   initSidebarCollapsed();
+  // 首屏就按窗口宽度决定侧边栏是否折叠，避免渲染后再跳一次
+  syncSidebarResponsiveState();
   await loadData();
   await loadChatModelOptions();
   render();
@@ -896,9 +945,7 @@ async function init() {
   }
   setupEventListeners();
   setupExternalLinkInterceptor();
-  window.addEventListener('resize', () => {
-    applySidebarWidth(sidebarWidth);
-  });
+  bindSidebarResponsive();
 }
 
 // 设置事件监听器 - 监听后端发送的实时事件
@@ -1727,6 +1774,8 @@ function updateOrAddConversation(conv: Conversation) {
     };
   } else {
     conversations.unshift(normalized);
+    // 标记为新增，下一次渲染时播放淡入动画
+    newConversationIds.add(normalized.id);
   }
   conversations.sort((a, b) => b.created_at - a.created_at);
 }
@@ -1760,6 +1809,106 @@ function getWorkspaceDisplayName(path: string): string {
   const normalized = path.replace(/[\\/]+$/, '');
   const parts = normalized.split(/[\\/]/);
   return parts[parts.length - 1] || path;
+}
+
+// ── 侧边栏展示辅助（项目 icon / 时间 / 模型标签）─────────────────────
+
+/** 把后端时间戳（秒或毫秒）统一为毫秒 */
+function toMillis(ts: number | null | undefined): number {
+  if (!ts) return 0;
+  // 小于 1e12 视为秒级时间戳
+  return ts < 1e12 ? ts * 1000 : ts;
+}
+
+/** 稳定字符串哈希，用于给项目 icon 分配固定色相 */
+function hashString(input: string): number {
+  let hash = 0;
+  for (let i = 0; i < input.length; i++) {
+    hash = (hash << 5) - hash + input.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash);
+}
+
+/** 项目 icon 色相：同一路径始终得到同一颜色 */
+function getWorkspaceHue(path: string): number {
+  return hashString(path) % 360;
+}
+
+/** 项目 icon 文字：取目录名的 1~2 个有效字符 */
+function getWorkspaceInitials(displayName: string): string {
+  const cleaned = displayName.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  if (!cleaned) return '#';
+
+  const words = cleaned.split(/\s+/);
+  if (words.length >= 2) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+
+  const word = words[0];
+  // CamelCase：取首字母 + 第二个大写字母（CodeCliManager → CC）
+  const camel = word.match(/^(\p{Lu})[\p{Ll}\p{N}]*(\p{Lu})/u);
+  if (camel) {
+    return (camel[1] + camel[2]).toUpperCase();
+  }
+  // 中文取首字，其他取前两位
+  return /\p{Script=Han}/u.test(word) ? word[0] : word.slice(0, 2).toUpperCase();
+}
+
+/** 相对时间（完整版，用于项目卡片元信息） */
+function formatRelativeTime(ts: number | null | undefined): string {
+  const ms = toMillis(ts);
+  if (!ms) return '';
+
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return '刚刚';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} 分钟前`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
+  if (diff < 172_800_000) return '昨天';
+  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)} 天前`;
+
+  const date = new Date(ms);
+  const sameYear = date.getFullYear() === new Date().getFullYear();
+  const md = `${date.getMonth() + 1}/${date.getDate()}`;
+  return sameYear ? md : `${date.getFullYear()}/${md}`;
+}
+
+/** 极简时间（用于会话行右侧，尽量少占宽度） */
+function formatCompactTime(ts: number | null | undefined): string {
+  const ms = toMillis(ts);
+  if (!ms) return '';
+
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return '刚刚';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}分`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}时`;
+  if (diff < 172_800_000) return '昨天';
+  if (diff < 604_800_000) return `${Math.floor(diff / 86_400_000)}天`;
+
+  const date = new Date(ms);
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+/** 把模型 ID 压缩成短标签：claude-sonnet-4-5-20250929 → Sonnet 4.5 */
+function formatModelLabel(model: string | null | undefined): string {
+  const raw = model?.trim();
+  if (!raw) return '';
+
+  // 去掉日期后缀与厂商前缀
+  let id = raw.replace(/[-_]?\d{8}$/, '');
+  id = id.replace(/^(anthropic|openai|google|deepseek|qwen|moonshot)[/-]/i, '');
+
+  const family = id.match(/(opus|sonnet|haiku|gpt|o\d|gemini|deepseek|qwen|kimi|glm|grok)/i);
+  const version = id.match(/(\d+(?:[.-]\d+)?)/);
+
+  if (family) {
+    const name = family[1].toLowerCase();
+    const pretty = name.charAt(0).toUpperCase() + name.slice(1);
+    const ver = version ? ` ${version[1].replace('-', '.')}` : '';
+    return `${pretty}${ver}`.trim();
+  }
+
+  return id.length > 18 ? `${id.slice(0, 17)}…` : id;
 }
 
 /** 将工作区展开状态持久化到 localStorage */
@@ -1822,14 +1971,27 @@ function newChatInWorkspace(workspacePath: string): void {
   }, 100);
 }
 
-/** 渲染单个对话列表项 HTML（供工作区分组复用） */
+/** 渲染单个对话列表项 HTML（供工作区卡片复用） */
 function renderConversationItemHtml(c: Conversation): string {
   const isActive = c.id === activeConversationId;
   const isEditing = editingConversationId === c.id;
   const isRunning = runningSessions.has(c.id);
+  const isNew = newConversationIds.has(c.id);
+
+  const classNames = [
+    'conversation-item',
+    isActive ? 'active' : '',
+    isEditing ? 'editing' : '',
+    isRunning ? 'running' : '',
+    isNew ? 'is-new' : '',
+  ].filter(Boolean).join(' ');
+
+  const time = formatCompactTime(c.updated_at || c.created_at);
+  const stateIcon = isRunning ? CONVERSATION_RUNNING_DOT_HTML : CONVERSATION_CHAT_ICON_SVG;
 
   return `
-    <div class="conversation-item ${isActive ? 'active' : ''} ${isEditing ? 'editing' : ''} ${isRunning ? 'running' : ''}" data-id="${c.id}" title="${escapeHtml(c.title)}">
+    <div class="${classNames}" data-id="${c.id}" title="${escapeHtml(c.title)}">
+      <span class="conversation-rail" aria-hidden="true"></span>
       ${isEditing ? `
         <div class="conversation-edit-row">
           <input type="text"
@@ -1838,14 +2000,15 @@ function renderConversationItemHtml(c: Conversation): string {
                  value="${escapeHtml(c.title)}"
           />
           <div class="edit-action-buttons">
-            <button type="button" class="edit-action-btn save" data-action="save-edit" data-id="${c.id}" title="Save">✓</button>
-            <button type="button" class="edit-action-btn cancel" data-action="cancel-edit" title="Cancel">✕</button>
+            <button type="button" class="edit-action-btn save" data-action="save-edit" data-id="${c.id}" title="保存">✓</button>
+            <button type="button" class="edit-action-btn cancel" data-action="cancel-edit" title="取消">✕</button>
           </div>
         </div>
       ` : `
         <span class="conversation-row">
-          <svg class="conversation-chat-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          ${stateIcon}
           <span class="conversation-title">${escapeHtml(c.title)}</span>
+          ${time ? `<span class="conversation-time">${escapeHtml(time)}</span>` : ''}
           <button type="button" class="conv-more-btn" data-action="more" data-id="${c.id}" title="更多操作" aria-label="更多操作">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
           </button>
@@ -1867,64 +2030,273 @@ async function loadData() {
   }
 }
 
-function renderConversationList(): string {
-  if (conversations.length === 0) {
-    return '<div class="empty-state">No conversations yet</div>';
-  }
+/** 未分类分组的固定 key */
+const UNCATEGORIZED_WORKSPACE_KEY = '__uncategorized__';
 
+interface SidebarWorkspaceView {
+  /** 展开状态 / 事件传参使用的 key（未分类为固定常量） */
+  key: string;
+  /** 真实目录路径，未分类为空字符串 */
+  path: string;
+  displayName: string;
+  conversations: Conversation[];
+  /** 最近活动时间（毫秒） */
+  latestActivity: number;
+  /** 最近使用的模型短标签 */
+  modelLabel: string;
+  hasActive: boolean;
+  runningCount: number;
+  isUncategorized: boolean;
+}
+
+/** 构建侧边栏工作区视图模型（含搜索过滤、活动时间、模型标签） */
+function buildSidebarWorkspaceViews(): SidebarWorkspaceView[] {
   const { workspaces, uncategorized } = groupConversationsByWorkspace();
-  let html = '';
+  const query = sidebarSearchQuery.trim().toLowerCase();
 
-  // 渲染各工作区分组
-  for (const ws of workspaces) {
-    const isExpanded = expandedWorkspaces.has(ws.path);
-    html += `
-      <div class="workspace-group${isExpanded ? ' is-expanded' : ''}" data-workspace-path="${escapeHtml(ws.path)}">
-        <div class="workspace-header" data-action="toggle-workspace" data-workspace="${escapeHtml(ws.path)}">
-          <span class="workspace-arrow${isExpanded ? ' expanded' : ''}">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
+  const toView = (
+    key: string,
+    path: string,
+    displayName: string,
+    convs: Conversation[],
+    isUncategorized: boolean,
+  ): SidebarWorkspaceView | null => {
+    // 目录名/路径命中时保留全部会话，否则只保留标题命中的会话
+    const workspaceHit =
+      !!query && (displayName.toLowerCase().includes(query) || path.toLowerCase().includes(query));
+    const matched = !query || workspaceHit
+      ? convs
+      : convs.filter((c) => c.title.toLowerCase().includes(query));
+
+    if (matched.length === 0) return null;
+
+    const latestActivity = matched.reduce(
+      (max, c) => Math.max(max, toMillis(c.updated_at), toMillis(c.created_at)),
+      0,
+    );
+    // 模型标签取最近活动会话上记录的模型
+    const newest = [...matched].sort(
+      (a, b) => toMillis(b.updated_at || b.created_at) - toMillis(a.updated_at || a.created_at),
+    )[0];
+
+    return {
+      key,
+      path,
+      displayName,
+      conversations: matched,
+      latestActivity,
+      modelLabel: formatModelLabel(matched.find((c) => c.last_model)?.last_model ?? newest?.last_model),
+      hasActive: matched.some((c) => c.id === activeConversationId),
+      runningCount: matched.filter((c) => runningSessions.has(c.id)).length,
+      isUncategorized,
+    };
+  };
+
+  const views = workspaces
+    .map((ws) => toView(ws.path, ws.path, ws.displayName, ws.conversations, false))
+    .filter((v): v is SidebarWorkspaceView => v !== null)
+    // 按最近活动时间降序，让常用项目始终靠前
+    .sort((a, b) => b.latestActivity - a.latestActivity);
+
+  const uncatView = uncategorized.length
+    ? toView(UNCATEGORIZED_WORKSPACE_KEY, '', '未分类', uncategorized, true)
+    : null;
+  if (uncatView) views.push(uncatView);
+
+  return views;
+}
+
+const CHEVRON_SVG =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
+
+const CONVERSATION_CHAT_ICON_SVG =
+  '<svg class="conversation-chat-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+
+const CONVERSATION_RUNNING_DOT_HTML =
+  '<span class="conversation-status-dot" title="运行中" aria-label="运行中"></span>';
+
+/** 项目卡片元信息（AI 模型标签 + 最近使用时间 / 运行中状态）的内部 HTML */
+function renderWorkspaceMetaInnerHtml(ws: SidebarWorkspaceView): string {
+  const relTime = formatRelativeTime(ws.latestActivity);
+
+  return [
+    ws.modelLabel
+      ? `<span class="workspace-model-tag" title="${escapeHtml(ws.modelLabel)}"><i class="workspace-model-dot" aria-hidden="true"></i>${escapeHtml(ws.modelLabel)}</span>`
+      : '',
+    ws.runningCount > 0
+      ? `<span class="workspace-live"><i class="workspace-live-dot" aria-hidden="true"></i>${ws.runningCount} 运行中</span>`
+      : relTime
+        ? `<span class="workspace-time">${escapeHtml(relTime)}</span>`
+        : '',
+  ].filter(Boolean).join('');
+}
+
+/** 渲染单个工作区卡片 */
+function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: boolean): string {
+  const key = escapeHtml(ws.key);
+  const cardClasses = [
+    'workspace-card',
+    isExpanded ? 'is-expanded' : '',
+    ws.hasActive ? 'has-active' : '',
+    ws.isUncategorized ? 'is-uncategorized' : '',
+  ].filter(Boolean).join(' ');
+
+  const hue = ws.isUncategorized ? 220 : getWorkspaceHue(ws.path);
+  const initials = ws.isUncategorized ? '·' : getWorkspaceInitials(ws.displayName);
+  const titleAttr = ws.isUncategorized ? '未归属工作目录的会话' : ws.path;
+
+  return `
+    <section class="${cardClasses}" data-workspace-key="${key}" style="--ws-hue: ${hue}">
+      <div
+        class="workspace-header"
+        data-action="toggle-workspace"
+        data-workspace="${key}"
+        role="button"
+        tabindex="0"
+        aria-expanded="${isExpanded}"
+        title="${escapeHtml(titleAttr)}"
+      >
+        <span class="workspace-arrow${isExpanded ? ' expanded' : ''}">${CHEVRON_SVG}</span>
+        <span class="workspace-avatar" aria-hidden="true">${escapeHtml(initials)}</span>
+        <span class="workspace-main">
+          <span class="workspace-name-row">
+            <span class="workspace-name">${escapeHtml(ws.displayName)}</span>
+            <span class="workspace-count">${ws.conversations.length}</span>
           </span>
-          <span class="workspace-name" title="${escapeHtml(ws.path)}">${escapeHtml(ws.displayName)}</span>
-          <span class="workspace-count">${ws.conversations.length}</span>
-        </div>
-        ${isExpanded ? `
-          <div class="workspace-conversations">
-            ${ws.conversations.map(c => renderConversationItemHtml(c)).join('')}
-          </div>
-        ` : ''}
+          <span class="workspace-meta">${renderWorkspaceMetaInnerHtml(ws)}</span>
+        </span>
+        <span class="workspace-actions">
+          ${ws.isUncategorized ? '' : `
+            <button type="button" class="ws-icon-btn" data-action="new-chat-in-workspace" data-workspace="${key}" title="在此目录新建会话" aria-label="在此目录新建会话">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            </button>
+          `}
+          <button type="button" class="ws-icon-btn" data-action="workspace-more" data-workspace="${key}" title="项目操作" aria-label="项目操作">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
+          </button>
+        </span>
       </div>
-    `;
+      <div class="workspace-body">
+        <div class="workspace-conversations">
+          ${ws.conversations.map((c) => renderConversationItemHtml(c)).join('')}
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderSidebarEmptyHtml(isSearching: boolean): string {
+  const icon = isSearching
+    ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>'
+    : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
+
+  return `
+    <div class="sidebar-empty">
+      <span class="sidebar-empty-icon">${icon}</span>
+      <span class="sidebar-empty-title">${isSearching ? '没有匹配的会话' : '还没有会话'}</span>
+      <span class="sidebar-empty-hint">${isSearching ? '试试其他关键词，或清空搜索条件' : '点击上方「新建会话」选择工作目录开始'}</span>
+    </div>
+  `;
+}
+
+function renderConversationList(): string {
+  const isSearching = sidebarSearchQuery.trim().length > 0;
+  const views = conversations.length === 0 ? [] : buildSidebarWorkspaceViews();
+
+  if (views.length === 0) {
+    newConversationIds.clear();
+    return renderSidebarEmptyHtml(isSearching);
   }
 
-  // 未分类对话（project_dir 为 null）
-  if (uncategorized.length > 0) {
-    const uncatExpanded = expandedWorkspaces.has('__uncategorized__');
-    html += `
-      <div class="workspace-group uncategorized${uncatExpanded ? ' is-expanded' : ''}">
-        <div class="workspace-header" data-action="toggle-workspace" data-workspace="__uncategorized__">
-          <span class="workspace-arrow${uncatExpanded ? ' expanded' : ''}">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>
-          </span>
-          <span class="workspace-name">未分类</span>
-          <span class="workspace-count">${uncategorized.length}</span>
-        </div>
-        ${uncatExpanded ? `
-          <div class="workspace-conversations">
-            ${uncategorized.map(c => renderConversationItemHtml(c)).join('')}
-          </div>
-        ` : ''}
-      </div>
-    `;
+  const totalConversations = views.reduce((sum, ws) => sum + ws.conversations.length, 0);
+  const label = isSearching
+    ? `<div class="sidebar-section-label"><span>搜索结果</span><span class="sidebar-section-label-count">${totalConversations} 个会话</span></div>`
+    : `<div class="sidebar-section-label"><span>工作区</span><span class="sidebar-section-label-count">${views.length} 个项目</span></div>`;
+
+  // 搜索时强制展开所有命中的卡片，方便直接定位会话
+  const cards = views
+    .map((ws) => renderWorkspaceCardHtml(ws, isSearching || expandedWorkspaces.has(ws.key)))
+    .join('');
+
+  // 淡入动画只播放一次
+  newConversationIds.clear();
+
+  return label + cards;
+}
+
+/** 局部重渲染侧边栏会话列表 */
+function refreshConversationListDom(): void {
+  const list = document.querySelector('#conversation-list');
+  if (list) list.innerHTML = renderConversationList();
+}
+
+/** 展开 / 收起工作区卡片（带 200ms 高度过渡） */
+function toggleWorkspaceExpanded(key: string): void {
+  const willExpand = !expandedWorkspaces.has(key);
+  if (willExpand) {
+    expandedWorkspaces.add(key);
+  } else {
+    expandedWorkspaces.delete(key);
+  }
+  saveExpandedWorkspaces();
+
+  const card = Array.from(document.querySelectorAll<HTMLElement>('.workspace-card'))
+    .find((el) => el.dataset.workspaceKey === key);
+  const body = card?.querySelector<HTMLElement>('.workspace-body');
+
+  if (!card || !body) {
+    refreshConversationListDom();
+    return;
   }
 
-  return html;
+  card.querySelector('.workspace-arrow')?.classList.toggle('expanded', willExpand);
+  card.querySelector('.workspace-header')?.setAttribute('aria-expanded', String(willExpand));
+
+  const targetHeight = body.scrollHeight;
+
+  if (willExpand) {
+    body.style.maxHeight = '0px';
+    card.classList.add('is-expanded');
+    void body.offsetHeight; // 强制 reflow，确保从 0 开始过渡
+    body.style.maxHeight = `${targetHeight}px`;
+    window.setTimeout(() => {
+      // 过渡结束后交还给内容自适应高度
+      if (card.classList.contains('is-expanded')) body.style.maxHeight = '';
+    }, 220);
+  } else {
+    body.style.maxHeight = `${targetHeight}px`;
+    void body.offsetHeight;
+    card.classList.remove('is-expanded');
+    body.style.maxHeight = ''; // 回落到 CSS 的 max-height: 0
+  }
 }
 
 function updateConversationListSpinner() {
+  // 会话行：运行中显示脉冲点，否则回到聊天图标
   document.querySelectorAll<HTMLElement>('.conversation-item').forEach((item) => {
     const id = item.dataset.id;
     if (!id) return;
-    item.classList.toggle('running', runningSessions.has(id));
+
+    const isRunning = runningSessions.has(id);
+    const wasRunning = item.classList.contains('running');
+    item.classList.toggle('running', isRunning);
+    if (isRunning === wasRunning) return;
+
+    const icon = item.querySelector('.conversation-chat-icon, .conversation-status-dot');
+    if (icon) {
+      icon.outerHTML = isRunning ? CONVERSATION_RUNNING_DOT_HTML : CONVERSATION_CHAT_ICON_SVG;
+    }
+  });
+
+  // 项目卡片：同步「运行中」标记与最近使用时间
+  const cards = document.querySelectorAll<HTMLElement>('.workspace-card');
+  if (cards.length === 0) return;
+
+  const viewByKey = new Map(buildSidebarWorkspaceViews().map((ws) => [ws.key, ws]));
+  cards.forEach((card) => {
+    const ws = card.dataset.workspaceKey ? viewByKey.get(card.dataset.workspaceKey) : undefined;
+    const meta = card.querySelector<HTMLElement>('.workspace-meta');
+    if (ws && meta) meta.innerHTML = renderWorkspaceMetaInnerHtml(ws);
   });
 }
 
@@ -1984,7 +2356,34 @@ function render() {
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
             <div class="new-chat-btn-wrapper">
-              <button class="new-chat-btn" id="new-chat-btn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>New Chat</button>
+              <button type="button" class="new-chat-btn" id="new-chat-btn" aria-haspopup="menu"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>新建会话</button>
+            </div>
+          </div>
+          <div class="sidebar-search-row">
+            <div class="sidebar-search">
+              <span class="sidebar-search-icon" aria-hidden="true">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              </span>
+              <input
+                type="text"
+                class="sidebar-search-input"
+                id="sidebar-search-input"
+                placeholder="搜索会话或项目…"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="搜索会话或项目"
+                value="${escapeHtml(sidebarSearchQuery)}"
+              />
+              <button
+                type="button"
+                class="sidebar-search-clear"
+                id="sidebar-search-clear"
+                title="清空搜索"
+                aria-label="清空搜索"
+                ${sidebarSearchQuery ? '' : 'hidden'}
+              >
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
             </div>
             <button type="button" class="refresh-btn" id="refresh-btn" title="扫描本地新会话" aria-label="刷新会话列表"><span class="refresh-icon">↻</span></button>
           </div>
@@ -2058,13 +2457,14 @@ function attachEventListeners() {
         new Promise((resolve) => setTimeout(resolve, 500)),
       ]);
     } finally {
-      const list = document.querySelector('#conversation-list');
-      if (list) list.innerHTML = renderConversationList();
+      refreshConversationListDom();
       overlay?.remove();
       if (btn) btn.disabled = false;
       btn?.classList.remove('is-loading');
     }
   });
+
+  bindSidebarSearch();
 
   const listEl = document.querySelector('#conversation-list');
   if (listEl) {
@@ -2072,6 +2472,8 @@ function attachEventListeners() {
     listEl.addEventListener('click', handleConversationListClick);
     listEl.removeEventListener('contextmenu', handleConversationListContextMenu);
     listEl.addEventListener('contextmenu', handleConversationListContextMenu);
+    listEl.removeEventListener('keydown', handleConversationListKeydown);
+    listEl.addEventListener('keydown', handleConversationListKeydown);
   }
 
   const textarea = document.querySelector('#message-input') as HTMLTextAreaElement;
@@ -2104,6 +2506,7 @@ function attachEventListeners() {
   document.querySelectorAll('.sidebar-toggle-btn').forEach((btn) => {
     btn.addEventListener('click', toggleSidebarCollapsed);
   });
+  syncSidebarResponsiveState();
   syncSidebarCollapsedUI();
   document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
   document.querySelector('#settings-btn')?.addEventListener('click', () => {
@@ -2147,6 +2550,51 @@ function attachEventListeners() {
   if (msgList) setupMessageListPostRender(msgList);
 }
 
+/** 侧边栏搜索框：输入即过滤（局部重渲染，保持输入焦点） */
+function bindSidebarSearch() {
+  const input = document.querySelector<HTMLInputElement>('#sidebar-search-input');
+  const clearBtn = document.querySelector<HTMLButtonElement>('#sidebar-search-clear');
+  if (!input) return;
+
+  const apply = (value: string) => {
+    sidebarSearchQuery = value;
+    if (clearBtn) clearBtn.hidden = value.trim().length === 0;
+    refreshConversationListDom();
+  };
+
+  input.addEventListener('input', () => apply(input.value));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && input.value) {
+      e.preventDefault();
+      input.value = '';
+      apply('');
+    }
+  });
+
+  clearBtn?.addEventListener('click', () => {
+    input.value = '';
+    apply('');
+    input.focus();
+  });
+}
+
+/** 工作区卡片标题支持键盘展开/收起 */
+function handleConversationListKeydown(e: Event) {
+  const event = e as KeyboardEvent;
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+
+  const target = event.target as HTMLElement;
+  // 焦点在卡片内的操作按钮上时交给按钮自身处理，避免同时触发展开
+  if (target.closest('button')) return;
+
+  const header = target.closest<HTMLElement>('.workspace-header');
+  const key = header?.dataset.workspace;
+  if (!header || !key) return;
+
+  event.preventDefault();
+  toggleWorkspaceExpanded(key);
+}
+
 function handleConversationListClick(e: Event) {
   const target = e.target as HTMLElement;
   const actionEl = target.closest('[data-action]') as HTMLElement | null;
@@ -2160,20 +2608,19 @@ function handleConversationListClick(e: Event) {
 
     // 工作区展开/折叠
     if (action === 'toggle-workspace' && workspacePath) {
-      if (expandedWorkspaces.has(workspacePath)) {
-        expandedWorkspaces.delete(workspacePath);
-      } else {
-        expandedWorkspaces.add(workspacePath);
-      }
-      saveExpandedWorkspaces();
-      const list = document.querySelector('#conversation-list');
-      if (list) list.innerHTML = renderConversationList();
+      toggleWorkspaceExpanded(workspacePath);
       return;
     }
 
     // 工作区内新建对话
     if (action === 'new-chat-in-workspace' && workspacePath) {
       newChatInWorkspace(workspacePath);
+      return;
+    }
+
+    // 工作区 ⋮ 菜单
+    if (action === 'workspace-more' && workspacePath) {
+      toggleWorkspaceMenu(workspacePath, actionEl);
       return;
     }
 
@@ -2208,18 +2655,23 @@ function handleConversationListContextMenu(e: Event) {
 
   // 排除「未分类」分组
   const workspacePath = workspaceHeader.dataset.workspace;
-  if (!workspacePath || workspacePath === '__uncategorized__') return;
+  if (!workspacePath || workspacePath === UNCATEGORIZED_WORKSPACE_KEY) return;
 
   e.preventDefault();
   e.stopPropagation();
-  toggleWorkspaceContextMenu(workspacePath, workspaceHeader, e as MouseEvent);
+  toggleWorkspaceMenu(workspacePath, workspaceHeader, e as MouseEvent);
 }
 
 function closeWorkspaceContextMenu() {
   document.querySelector('.ws-menu-overlay')?.remove();
 }
 
-function toggleWorkspaceContextMenu(workspacePath: string, _anchorEl: HTMLElement, event: MouseEvent) {
+/**
+ * 工作区（项目）操作菜单。
+ * - 由 ⋮ 按钮触发时锚定按钮右下角
+ * - 由右键触发时锚定鼠标位置
+ */
+function toggleWorkspaceMenu(workspacePath: string, anchorEl: HTMLElement, event?: MouseEvent) {
   const existing = document.querySelector<HTMLElement>('.ws-menu-overlay');
   if (existing?.dataset.wsPath === workspacePath) {
     return closeWorkspaceContextMenu();
@@ -2227,15 +2679,19 @@ function toggleWorkspaceContextMenu(workspacePath: string, _anchorEl: HTMLElemen
   closeWorkspaceContextMenu();
   closeConversationMenu();
 
-  const { clientX: x, clientY: y } = event;
+  if (workspacePath === UNCATEGORIZED_WORKSPACE_KEY) return;
 
+  const ws = escapeHtml(workspacePath);
   const overlay = document.createElement('div');
   overlay.className = 'ws-menu-overlay';
   overlay.dataset.wsPath = workspacePath;
   overlay.innerHTML = `
     <div class="conv-menu-dropdown ws-menu-dropdown">
-      <button type="button" class="conv-menu-item" data-action="new-chat" data-workspace="${escapeHtml(workspacePath)}">在此目录新建对话</button>
-      <button type="button" class="conv-menu-item is-danger" data-action="delete-workspace" data-workspace="${escapeHtml(workspacePath)}">删除目录下所有会话</button>
+      <button type="button" class="conv-menu-item" data-action="new-chat" data-workspace="${ws}">在此目录新建会话</button>
+      <button type="button" class="conv-menu-item" data-action="open-dir" data-workspace="${ws}">在文件管理器中打开</button>
+      <button type="button" class="conv-menu-item" data-action="copy-path" data-workspace="${ws}">复制目录路径</button>
+      <button type="button" class="conv-menu-item" data-action="open-settings">设置…</button>
+      <button type="button" class="conv-menu-item is-danger" data-action="delete-workspace" data-workspace="${ws}">删除目录下所有会话</button>
     </div>
   `;
 
@@ -2263,10 +2719,17 @@ function toggleWorkspaceContextMenu(workspacePath: string, _anchorEl: HTMLElemen
   dropdown.addEventListener('click', (ev) => {
     const btn = (ev.target as HTMLElement).closest<HTMLElement>('.conv-menu-item');
     if (!btn || !btn.dataset.action) return closeMenu();
-    const { action, workspace: ws } = btn.dataset;
+    const { action, workspace: dir } = btn.dataset;
     closeMenu();
-    if (action === 'new-chat' && ws) newChatInWorkspace(ws);
-    if (action === 'delete-workspace' && ws) void deleteWorkspaceConversations(ws);
+    if (action === 'new-chat' && dir) newChatInWorkspace(dir);
+    if (action === 'open-dir' && dir) void openPathInFileManager(dir);
+    if (action === 'copy-path' && dir) {
+      void copyTextToClipboard(dir).then((ok) => {
+        if (ok) showCopyToastMsg('已复制目录路径');
+      });
+    }
+    if (action === 'open-settings') void openSettingsModal();
+    if (action === 'delete-workspace' && dir) void deleteWorkspaceConversations(dir);
   });
 
   document.body.appendChild(overlay);
@@ -2275,8 +2738,22 @@ function toggleWorkspaceContextMenu(workspacePath: string, _anchorEl: HTMLElemen
     const menu = overlay.querySelector<HTMLElement>('.ws-menu-dropdown');
     if (!menu) return;
     const r = menu.getBoundingClientRect();
-    // 左上角对齐鼠标位置，超出视口右侧则向左偏移
-    const left = x + r.width > window.innerWidth ? Math.max(8, x - r.width) : x;
+
+    let x: number;
+    let y: number;
+    if (event) {
+      // 右键：锚定鼠标位置
+      x = event.clientX;
+      y = event.clientY;
+    } else {
+      // ⋮ 按钮：右对齐于按钮下方
+      const a = anchorEl.getBoundingClientRect();
+      x = a.right - r.width;
+      y = a.bottom + 4;
+      if (y + r.height > window.innerHeight) y = a.top - r.height - 4;
+    }
+
+    const left = x + r.width > window.innerWidth ? Math.max(8, window.innerWidth - r.width - 8) : x;
     const top = y + r.height > window.innerHeight ? Math.max(8, y - r.height) : y;
     menu.style.left = `${Math.max(8, left)}px`;
     menu.style.top = `${Math.max(8, top)}px`;
@@ -2303,6 +2780,7 @@ function toggleConversationMenu(conversationId: string, anchorEl: HTMLElement) {
   overlay.innerHTML = `
     <div class="conv-menu-dropdown">
       <button type="button" class="conv-menu-item" data-action="edit" data-id="${conversationId}">重命名</button>
+      <button type="button" class="conv-menu-item" data-action="export" data-id="${conversationId}">导出为 Markdown</button>
       <button type="button" class="conv-menu-item is-danger" data-action="delete" data-id="${conversationId}">删除</button>
     </div>
   `;
@@ -2323,6 +2801,7 @@ function toggleConversationMenu(conversationId: string, anchorEl: HTMLElement) {
     const { action, id } = btn.dataset;
     closeMenu();
     if (action === 'edit' && id) startEdit(id);
+    if (action === 'export' && id) void exportConversationToMarkdown(id);
     if (action === 'delete' && id) void deleteConversation(id);
   });
 
@@ -5200,6 +5679,74 @@ async function deleteWorkspaceConversations(workspacePath: string) {
     alert('删除目录会话失败: ' + String(e));
     await loadData();
     render();
+  }
+}
+
+/** 会话标题转安全文件名 */
+function sanitizeFileName(name: string): string {
+  const cleaned = name.replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/\s+/g, ' ').trim();
+  return (cleaned || 'conversation').slice(0, 80);
+}
+
+/** 把会话内容拼成 Markdown 文本 */
+function buildConversationMarkdown(c: Conversation): string {
+  const lines: string[] = [`# ${c.title || '未命名会话'}`, ''];
+
+  lines.push(`- 会话 ID: \`${c.id}\``);
+  if (c.project_dir) lines.push(`- 工作目录: \`${c.project_dir}\``);
+  if (c.last_model) lines.push(`- 模型: \`${c.last_model}\``);
+  if (c.created_at) lines.push(`- 创建时间: ${new Date(toMillis(c.created_at)).toLocaleString()}`);
+  if (c.updated_at) lines.push(`- 更新时间: ${new Date(toMillis(c.updated_at)).toLocaleString()}`);
+  lines.push('', '---', '');
+
+  for (const msg of c.messages ?? []) {
+    const role = msg.role === 'user' ? '用户' : msg.role === 'assistant' ? '助手' : msg.role;
+    lines.push(`## ${role}`, '');
+
+    if (msg.thinking?.trim()) {
+      lines.push('<details><summary>思考过程</summary>', '', msg.thinking.trim(), '', '</details>', '');
+    }
+    if (msg.toolData?.toolName) {
+      lines.push(`> 工具调用：\`${msg.toolData.toolName}\``, '');
+    }
+    if (msg.content?.trim()) {
+      lines.push(msg.content.trim(), '');
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/** 导出单个会话为 Markdown 文件 */
+async function exportConversationToMarkdown(id: string): Promise<void> {
+  const conversation = conversations.find((c) => c.id === id);
+  if (!conversation) return;
+
+  // 列表中的会话可能没有完整消息，导出前先从后端取一次
+  let full = conversation;
+  try {
+    const raw = await invoke<(Conversation & { projectDir?: string | null }) | null>('get_conversation', {
+      conversationId: id,
+    });
+    if (raw) full = normalizeConversation(raw);
+  } catch (e) {
+    console.warn('Failed to load full conversation for export:', e);
+  }
+
+  try {
+    const target = await save({
+      title: '导出会话',
+      defaultPath: `${sanitizeFileName(full.title)}.md`,
+      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    });
+    if (!target) return;
+
+    const bytes = Array.from(new TextEncoder().encode(buildConversationMarkdown(full)));
+    await invoke('write_file_bytes', { filePath: target, data: bytes });
+    showCopyToastMsg('已导出会话');
+  } catch (e) {
+    console.error('Failed to export conversation:', e);
+    alert('导出会话失败: ' + String(e));
   }
 }
 

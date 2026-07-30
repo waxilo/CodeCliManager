@@ -54,6 +54,27 @@
   --color-send-btn-hover: rgba(137, 180, 250, 0.34);
   --color-send-btn-disabled: #313244;
   --color-send-icon: #cdd6f4;
+
+  /* ── 侧边栏（AI 工作区导航）───────────────────────────────── */
+  --sidebar-bg: #181825;
+  --sidebar-header-bg: #181825;
+  --sidebar-card-bg: #1f1f2e;
+  --sidebar-card-bg-hover: #242434;
+  --sidebar-card-border: rgba(255, 255, 255, 0.05);
+  --sidebar-card-border-hover: rgba(255, 255, 255, 0.09);
+  --sidebar-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
+  --sidebar-card-shadow-hover: 0 2px 10px rgba(0, 0, 0, 0.3);
+  --sidebar-item-hover: #2c2c3e;
+  --sidebar-item-active-from: rgba(137, 180, 250, 0.22);
+  --sidebar-item-active-to: rgba(137, 180, 250, 0.06);
+  --sidebar-item-active-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  --sidebar-badge-bg: rgba(255, 255, 255, 0.07);
+  --sidebar-badge-text: #a6adc8;
+  --sidebar-divider: rgba(255, 255, 255, 0.06);
+  --sidebar-search-bg: #11111b;
+  --sidebar-search-border: rgba(255, 255, 255, 0.07);
+  --sidebar-avatar-lightness: 62%;
+  --sidebar-avatar-text-lightness: 16%;
 }
 
 [data-theme='light'] {
@@ -111,4 +132,25 @@
   --color-send-btn-hover: #ddd6fe;
   --color-send-btn-disabled: #e8eaef;
   --color-send-icon: #6366f1;
+
+  /* ── 侧边栏（AI 工作区导航）───────────────────────────────── */
+  --sidebar-bg: #f8fafc;
+  --sidebar-header-bg: #f8fafc;
+  --sidebar-card-bg: #ffffff;
+  --sidebar-card-bg-hover: #ffffff;
+  --sidebar-card-border: rgba(15, 23, 42, 0.07);
+  --sidebar-card-border-hover: rgba(15, 23, 42, 0.11);
+  --sidebar-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --sidebar-card-shadow-hover: 0 2px 10px rgba(15, 23, 42, 0.07);
+  --sidebar-item-hover: #f1f5f9;
+  --sidebar-item-active-from: #e8f0ff;
+  --sidebar-item-active-to: #f7fbff;
+  --sidebar-item-active-shadow: 0 1px 3px rgba(37, 99, 235, 0.1);
+  --sidebar-badge-bg: #f1f5f9;
+  --sidebar-badge-text: #64748b;
+  --sidebar-divider: rgba(15, 23, 42, 0.07);
+  --sidebar-search-bg: #ffffff;
+  --sidebar-search-border: rgba(15, 23, 42, 0.1);
+  --sidebar-avatar-lightness: 52%;
+  --sidebar-avatar-text-lightness: 100%;
 }
