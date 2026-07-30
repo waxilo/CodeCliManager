@@ -518,35 +518,6 @@ body.is-sidebar-resizing {
   color: var(--color-text-secondary);
 }
 
-/* 工作区新建按钮（Hover 时出现） */
-.workspace-add-btn {
-  width: 22px;
-  height: 22px;
-  border: none;
-  background: transparent;
-  color: var(--color-text-muted);
-  border-radius: 5px;
-  cursor: pointer;
-  font-size: 16px;
-  font-weight: 400;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  flex-shrink: 0;
-  transition: opacity 0.15s ease, background 0.15s ease, color 0.15s ease;
-}
-
-.workspace-header:hover .workspace-add-btn {
-  opacity: 1;
-}
-
-.workspace-add-btn:hover {
-  background: var(--color-bg-surface-hover);
-  color: var(--color-accent);
-}
-
 /* 工作区会话容器：树线在 margin 处，内容起点与 Header 对齐 */
 .workspace-conversations {
   position: relative;

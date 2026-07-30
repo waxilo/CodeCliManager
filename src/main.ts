@@ -1886,7 +1886,6 @@ function renderConversationList(): string {
           </span>
           <span class="workspace-name" title="${escapeHtml(ws.path)}">${escapeHtml(ws.displayName)}</span>
           <span class="workspace-count">${ws.conversations.length}</span>
-          <button type="button" class="workspace-add-btn" data-action="new-chat-in-workspace" data-workspace="${escapeHtml(ws.path)}" title="在此工作区新建对话" aria-label="在此工作区新建对话">+</button>
         </div>
         ${isExpanded ? `
           <div class="workspace-conversations">
