@@ -58,12 +58,12 @@
   /* ── 侧边栏（AI 工作区导航）───────────────────────────────── */
   --sidebar-bg: #181825;
   --sidebar-header-bg: #181825;
-  --sidebar-card-bg: #1f1f2e;
-  --sidebar-card-bg-hover: #242434;
-  --sidebar-card-border: rgba(255, 255, 255, 0.05);
-  --sidebar-card-border-hover: rgba(255, 255, 255, 0.09);
-  --sidebar-card-shadow: 0 1px 2px rgba(0, 0, 0, 0.24);
-  --sidebar-card-shadow-hover: 0 2px 10px rgba(0, 0, 0, 0.3);
+  --sidebar-card-bg: transparent;
+  --sidebar-card-bg-hover: rgba(255, 255, 255, 0.035);
+  --sidebar-card-border: transparent;
+  --sidebar-card-border-hover: rgba(255, 255, 255, 0.05);
+  --sidebar-card-shadow: none;
+  --sidebar-card-shadow-hover: none;
   --sidebar-item-hover: #2c2c3e;
   --sidebar-item-active-from: rgba(137, 180, 250, 0.22);
   --sidebar-item-active-to: rgba(137, 180, 250, 0.06);
@@ -134,15 +134,15 @@
   --color-send-icon: #6366f1;
 
   /* ── 侧边栏（AI 工作区导航）───────────────────────────────── */
-  --sidebar-bg: #f8fafc;
-  --sidebar-header-bg: #f8fafc;
-  --sidebar-card-bg: #ffffff;
-  --sidebar-card-bg-hover: #ffffff;
-  --sidebar-card-border: rgba(15, 23, 42, 0.07);
-  --sidebar-card-border-hover: rgba(15, 23, 42, 0.11);
-  --sidebar-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
-  --sidebar-card-shadow-hover: 0 2px 10px rgba(15, 23, 42, 0.07);
-  --sidebar-item-hover: #f1f5f9;
+  --sidebar-bg: #f7f8fa;
+  --sidebar-header-bg: #f7f8fa;
+  --sidebar-card-bg: transparent;
+  --sidebar-card-bg-hover: rgba(15, 23, 42, 0.025);
+  --sidebar-card-border: transparent;
+  --sidebar-card-border-hover: rgba(15, 23, 42, 0.045);
+  --sidebar-card-shadow: none;
+  --sidebar-card-shadow-hover: none;
+  --sidebar-item-hover: rgba(15, 23, 42, 0.045);
   --sidebar-item-active-from: #e8f0ff;
   --sidebar-item-active-to: #f7fbff;
   --sidebar-item-active-shadow: 0 1px 3px rgba(37, 99, 235, 0.1);

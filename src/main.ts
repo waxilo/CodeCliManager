@@ -87,13 +87,6 @@ interface SessionEventPayload {
   last_model?: string | null;
 }
 
-interface PlatformConfig {
-  name: string;
-  command: string;
-  args: string[];
-  env_vars: Record<string, string>;
-}
-
 interface MessageChunkPayload {
   conversation_id: string;
   kind: string;
@@ -167,7 +160,6 @@ interface StreamingState {
 }
 
 let conversations: Conversation[] = [];
-let platforms: Record<string, PlatformConfig> = {};
 let currentPlatform = '';
 let activeConversationId = '';
 let editingConversationId: string | null = null;
@@ -1572,6 +1564,15 @@ async function openPathInFileManager(path: string): Promise<void> {
   }
 }
 
+async function openPathInShell(path: string): Promise<void> {
+  try {
+    await invoke('open_terminal', { projectDir: path });
+  } catch (e) {
+    console.error('[terminal] 打开 Shell 失败:', path, e);
+    showCopyToastMsg('打开 Shell 失败');
+  }
+}
+
 async function handleSessionIdClick() {
   const control = document.querySelector<HTMLButtonElement>('#session-id-copy');
   const sessionId = control?.dataset.sessionId?.trim();
@@ -2022,7 +2023,6 @@ async function loadData() {
   try {
     const raw = await invoke<(Conversation & { projectDir?: string | null })[]>('get_conversations');
     conversations = raw.map(normalizeConversation);
-    platforms = await invoke<Record<string, PlatformConfig>>('get_platforms');
     currentPlatform = await invoke<string>('get_current_platform');
     console.log('Current platform:', currentPlatform);
   } catch (e) {
@@ -2115,14 +2115,11 @@ const CONVERSATION_CHAT_ICON_SVG =
 const CONVERSATION_RUNNING_DOT_HTML =
   '<span class="conversation-status-dot" title="运行中" aria-label="运行中"></span>';
 
-/** 项目卡片元信息（AI 模型标签 + 最近使用时间 / 运行中状态）的内部 HTML */
+/** 项目卡片元信息（最近使用时间 / 运行中状态）的内部 HTML */
 function renderWorkspaceMetaInnerHtml(ws: SidebarWorkspaceView): string {
   const relTime = formatRelativeTime(ws.latestActivity);
 
   return [
-    ws.modelLabel
-      ? `<span class="workspace-model-tag" title="${escapeHtml(ws.modelLabel)}"><i class="workspace-model-dot" aria-hidden="true"></i>${escapeHtml(ws.modelLabel)}</span>`
-      : '',
     ws.runningCount > 0
       ? `<span class="workspace-live"><i class="workspace-live-dot" aria-hidden="true"></i>${ws.runningCount} 运行中</span>`
       : relTime
@@ -2166,11 +2163,6 @@ function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: boolean):
           <span class="workspace-meta">${renderWorkspaceMetaInnerHtml(ws)}</span>
         </span>
         <span class="workspace-actions">
-          ${ws.isUncategorized ? '' : `
-            <button type="button" class="ws-icon-btn" data-action="new-chat-in-workspace" data-workspace="${key}" title="在此目录新建会话" aria-label="在此目录新建会话">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            </button>
-          `}
           <button type="button" class="ws-icon-btn" data-action="workspace-more" data-workspace="${key}" title="项目操作" aria-label="项目操作">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
           </button>
@@ -2689,8 +2681,8 @@ function toggleWorkspaceMenu(workspacePath: string, anchorEl: HTMLElement, event
     <div class="conv-menu-dropdown ws-menu-dropdown">
       <button type="button" class="conv-menu-item" data-action="new-chat" data-workspace="${ws}">在此目录新建会话</button>
       <button type="button" class="conv-menu-item" data-action="open-dir" data-workspace="${ws}">在文件管理器中打开</button>
+      <button type="button" class="conv-menu-item" data-action="open-shell" data-workspace="${ws}">在 Shell 中打开</button>
       <button type="button" class="conv-menu-item" data-action="copy-path" data-workspace="${ws}">复制目录路径</button>
-      <button type="button" class="conv-menu-item" data-action="open-settings">设置…</button>
       <button type="button" class="conv-menu-item is-danger" data-action="delete-workspace" data-workspace="${ws}">删除目录下所有会话</button>
     </div>
   `;
@@ -2723,12 +2715,12 @@ function toggleWorkspaceMenu(workspacePath: string, anchorEl: HTMLElement, event
     closeMenu();
     if (action === 'new-chat' && dir) newChatInWorkspace(dir);
     if (action === 'open-dir' && dir) void openPathInFileManager(dir);
+    if (action === 'open-shell' && dir) void openPathInShell(dir);
     if (action === 'copy-path' && dir) {
       void copyTextToClipboard(dir).then((ok) => {
         if (ok) showCopyToastMsg('已复制目录路径');
       });
     }
-    if (action === 'open-settings') void openSettingsModal();
     if (action === 'delete-workspace' && dir) void deleteWorkspaceConversations(dir);
   });
 
@@ -4868,8 +4860,8 @@ function updateContextIndicator(): void {
 }
 
 function renderChatHeaderHtml(conversation: Conversation | undefined): string {
-  const title = conversation?.title || 'New Chat';
-  const platform = conversation?.platform || 'claude';
+  const hasMessages = (conversation?.messages.length ?? 0) > 0;
+  const title = hasMessages ? (conversation?.title || '新会话') : '新会话';
   const sessionId = conversation?.id || activeConversationId || '—';
   const canCopySessionId = sessionId !== '—';
   const projectDir = getEffectiveProjectDir();
@@ -4893,7 +4885,6 @@ function renderChatHeaderHtml(conversation: Conversation | undefined): string {
   return `
     <div class="chat-header-left">
       <h2>${escapeHtml(title)}</h2>
-      <span class="platform-badge">${platforms[platform]?.name || platform}</span>
     </div>
     <div class="chat-header-meta">
       ${
@@ -4941,6 +4932,23 @@ function buildDisplayMessages(conversation: Conversation | undefined): Message[]
   return messages;
 }
 
+function renderConversationMessagesInnerHtml(messages: Message[]): string {
+  const messageHtml = renderMessageListHtml(messages);
+  if (messageHtml) return messageHtml;
+
+  return `
+    <div class="conversation-empty-state">
+      <span class="conversation-empty-state-icon" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+        </svg>
+      </span>
+      <strong>会话内容已撤回</strong>
+      <span>在下方输入消息，重新开始这段会话</span>
+    </div>
+  `;
+}
+
 function renderChatContent(): string {
   const conversation = activeConversationId
     ? conversations.find((c) => c.id === activeConversationId)
@@ -4950,7 +4958,7 @@ function renderChatContent(): string {
 
   return `
     <div class="message-list" id="message-list">
-      ${renderMessageListHtml(messages)}
+      ${renderConversationMessagesInnerHtml(messages)}
     </div>
   `;
 }
@@ -5330,41 +5338,70 @@ async function abortSession() {
 
 /** 重新生成或撤回消息的统一入口 */
 async function invokeRetryMessage(mode: 'regenerate' | 'undo') {
-  if (!activeConversationId || isSendButtonLoading()) return;
+  if (!activeConversationId) {
+    showCopyToastMsg(mode === 'regenerate' ? '无法重新生成' : '无法撤回');
+    return;
+  }
+  if (isSendButtonLoading()) {
+    showCopyToastMsg(mode === 'regenerate' ? '请等待当前回复结束后再试' : '请等待当前回复结束后再撤回');
+    return;
+  }
 
+  const cid = activeConversationId;
   if (mode === 'regenerate') {
     setSendButtonLoading(true);
-    runningSessions.add(activeConversationId);
+    runningSessions.add(cid);
   } else {
     // 撤回：也设置 loading 状态防止双击，但不加入 runningSessions
     setSendButtonLoading(true);
   }
 
   try {
-    await invoke('retry_message', { conversationId: activeConversationId, mode });
+    await invoke('retry_message', { conversationId: cid, mode });
 
     if (mode === 'regenerate') {
       // 兜底超时：如果 session-ended 在 3 分钟内未到达，强制恢复 UI
-      const timeoutCid = activeConversationId;
       setTimeout(() => {
-        if (timeoutCid && runningSessions.has(timeoutCid)) {
+        if (runningSessions.has(cid)) {
           console.warn('[retry] regenerate 超时未收到 session-ended，强制恢复');
-          runningSessions.delete(timeoutCid);
+          runningSessions.delete(cid);
           hideSendingState();
         }
       }, 180_000);
     }
-    // undo 模式：invoke 同步完成后恢复按钮状态
+
+    // undo 模式：清理本地瞬时状态，并强制刷新（防止事件偶发丢失时残留气泡）
     if (mode === 'undo') {
+      if (pendingUserMessageConvId === cid) {
+        pendingUserMessage = null;
+        pendingUserMessageConvId = null;
+      }
+      clearStreamingState(cid);
+      runningSessions.delete(cid);
       setSendButtonLoading(false);
+      hideSendingState();
+      // messages-updated 通常已更新 conversations；再拉一次兜底
+      await refreshConversationFromBackend(cid);
+      if (activeConversationId === cid) {
+        refreshChatContent();
+        updateConversationListSpinner();
+      }
+      showCopyToastMsg('已撤回');
     }
   } catch (e) {
     console.error(`[${mode}] 操作失败:`, e);
     if (mode === 'regenerate') {
-      runningSessions.delete(activeConversationId);
+      runningSessions.delete(cid);
     }
     setSendButtonLoading(false);
-    showCopyToastMsg(mode === 'regenerate' ? '重新生成失败' : '撤回失败');
+    const detail = e instanceof Error ? e.message : String(e ?? '');
+    showCopyToastMsg(
+      mode === 'regenerate'
+        ? '重新生成失败'
+        : detail.includes('未找到可撤回')
+          ? '没有可撤回的消息'
+          : '撤回失败',
+    );
   }
 }
 
@@ -5532,7 +5569,7 @@ function refreshChatContent() {
   updateProjectDirDisplay();
   if (messageList) {
     const messages = buildDisplayMessages(conversation);
-    messageList.innerHTML = renderMessageListHtml(messages);
+    messageList.innerHTML = renderConversationMessagesInnerHtml(messages);
     // 后处理：代码复制按钮、思考块折叠事件、消息复制控件
     setupMessageListPostRender(messageList);
     if (isSendButtonLoading()) {
@@ -5547,6 +5584,11 @@ function refreshChatContent() {
 function handleKeydown(e: KeyboardEvent) {
   // 流式输出时，Enter 不发送消息
   if (isSendButtonLoading()) {
+    return;
+  }
+  // IME 组字中（如 macOS 拼音未选字）：Enter 用于上屏，不发送
+  // keyCode 229 是部分浏览器/输入法在组字期间的兼容标识
+  if (e.isComposing || e.keyCode === 229) {
     return;
   }
   // 文件建议列表可见且有待选项时，Enter 交给文件建议键盘处理逻辑（选择当前高亮项）
@@ -6391,6 +6433,10 @@ function handleFileSuggestionKeydown(e: KeyboardEvent) {
     const prevIdx = idx > 0 ? idx - 1 : items.length - 1;
     selectSuggestion(prevIdx);
   } else if (e.key === 'Enter' || e.key === 'Tab') {
+    // IME 组字中回车用于上屏，不插入文件引用
+    if (e.isComposing || e.keyCode === 229) {
+      return;
+    }
     const idx = getActiveSuggestionIndex();
     const items = container.querySelectorAll('.file-suggestion-item');
     if (idx >= 0 && idx < items.length) {

@@ -1142,6 +1142,97 @@ fn parse_claude_session_cached(path: &PathBuf) -> Option<Conversation> {
     Some(conv)
 }
 
+/// 会话文件被本地改写后必须失效缓存。
+/// mtime 精度只有秒级，同秒内连续写入（发送后立刻撤回）会命中旧缓存，导致 UI 看起来“没撤回”。
+fn invalidate_session_cache(path: &Path) {
+    let mut cache = SESSION_CACHE.lock().unwrap();
+    if let Some(map) = cache.as_mut() {
+        map.remove(path);
+    }
+}
+
+/// Claude JSONL 里工具回执也常写成 type=user / role=user，且 content 全是 tool_result。
+/// 这类行不能当作可撤回/可重试的「人类用户消息」。
+fn is_tool_result_only_user_message(message: &serde_json::Value) -> bool {
+    match message.get("content") {
+        Some(serde_json::Value::Array(blocks)) => {
+            !blocks.is_empty()
+                && blocks.iter().all(|block| {
+                    block.get("type").and_then(|t| t.as_str()) == Some("tool_result")
+                })
+        }
+        _ => false,
+    }
+}
+
+/// 判断 JSONL 行是否为真实人类用户消息（排除 meta / compact / 纯 tool_result）
+fn is_human_user_message_line(value: &serde_json::Value) -> bool {
+    if value.get("isMeta").and_then(|m| m.as_bool()) == Some(true) {
+        return false;
+    }
+    if value.get("isCompactSummary").and_then(|v| v.as_bool()) == Some(true) {
+        return false;
+    }
+    if value.get("type").and_then(|t| t.as_str()) != Some("user") {
+        return false;
+    }
+
+    let message = match value.get("message") {
+        Some(m) => m,
+        None => return false,
+    };
+    if message.get("role").and_then(|r| r.as_str()) != Some("user") {
+        return false;
+    }
+    if is_tool_result_only_user_message(message) {
+        return false;
+    }
+
+    match message.get("content") {
+        Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
+        Some(serde_json::Value::Array(blocks)) => blocks.iter().any(|block| {
+            matches!(
+                block.get("type").and_then(|t| t.as_str()),
+                Some("text") | Some("image") | Some("document") | Some("file")
+            )
+        }),
+        _ => false,
+    }
+}
+
+/// 从人类用户消息中提取可用于 regenerate 的文本 prompt
+fn extract_human_user_prompt(message: &serde_json::Value) -> Option<String> {
+    match message.get("content") {
+        Some(serde_json::Value::String(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(s.clone())
+            }
+        }
+        Some(serde_json::Value::Array(blocks)) => {
+            let texts: Vec<&str> = blocks
+                .iter()
+                .filter_map(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        block.get("text").and_then(|t| t.as_str())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            let joined = texts.join("\n");
+            if joined.trim().is_empty() {
+                None
+            } else {
+                Some(joined)
+            }
+        }
+        _ => None,
+    }
+}
+
 fn load_claude_history() -> Vec<Conversation> {
     let root = get_claude_history_path();
     if !root.exists() {
@@ -2608,6 +2699,7 @@ fn rewrite_session_model(session_id: &str, new_model: &str) -> Result<bool, Stri
         let new_content = new_lines.join("\n");
         std::fs::write(&path, new_content)
             .map_err(|e| format!("Failed to write session file: {}", e))?;
+        invalidate_session_cache(&path);
         eprintln!(
             "[rewrite_session_model] Updated model to '{}' in {}",
             new_model,
@@ -3107,7 +3199,7 @@ async fn abort_session(conversation_id: Option<String>) -> Result<bool, String> 
 
 /// 截断会话 JSONL 并触发"重新生成"或"撤回"
 /// mode: "regenerate" — 删除最后一条 AI 回复，用相同用户消息重发
-/// mode: "undo" — 删除最后一轮对话（最后一条用户消息及其后续），仅更新 UI 不回发
+/// mode: "undo" — 删除最后一轮对话（最后一条人类用户消息及其后续），仅更新 UI 不回发
 #[tauri::command]
 async fn retry_message(
     app: AppHandle,
@@ -3125,54 +3217,34 @@ async fn retry_message(
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("读取会话文件失败: {}", e))?;
 
-    // 3. 解析所有行，找到截断点，同时提取最后一条用户消息内容
+    // 3. 解析所有行，找到截断点；用户消息必须是「人类消息」，不能把 tool_result 当成用户提问
     let mut last_user_prompt: Option<String> = None;
     let mut last_user_line_idx: i64 = -1;
     let mut last_assistant_line_idx: i64 = -1;
     let lines: Vec<&str> = content.lines().collect();
 
     for (i, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() { continue; }
+        if line.trim().is_empty() {
+            continue;
+        }
         let value: serde_json::Value = match serde_json::from_str(line) {
             Ok(v) => v,
             Err(_) => continue,
         };
 
-        // 跳过元数据行
-        if value.get("isMeta").and_then(|m| m.as_bool()) == Some(true) { continue; }
-        let msg_type = value.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if is_human_user_message_line(&value) {
+            last_user_line_idx = i as i64;
+            if let Some(message) = value.get("message") {
+                last_user_prompt = extract_human_user_prompt(message);
+            }
+            continue;
+        }
 
-        let message = value.get("message");
-        let role = message
+        let role = value
+            .get("message")
             .and_then(|m| m.get("role"))
             .and_then(|r| r.as_str())
             .unwrap_or("");
-
-        // 提取用户消息文本（仅 real user message，排除 tool_result）
-        if role == "user" && msg_type == "user" {
-            if let Some(content_blocks) = message.and_then(|m| m.get("content")).and_then(|c| c.as_array()) {
-                let texts: Vec<&str> = content_blocks
-                    .iter()
-                    .filter_map(|block| {
-                        let block_type = block.get("type").and_then(|t| t.as_str());
-                        if block_type == Some("text") {
-                            block.get("text").and_then(|t| t.as_str())
-                        } else if block_type == Some("tool_result") {
-                            // tool_result 也可能包含用户反馈文本
-                            block.get("content").and_then(|c| c.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                let prompt_text = texts.join("\n");
-                if !prompt_text.trim().is_empty() {
-                    last_user_prompt = Some(prompt_text);
-                    last_user_line_idx = i as i64;
-                }
-            }
-        }
-
         if role == "assistant" {
             last_assistant_line_idx = i as i64;
         }
@@ -3190,8 +3262,8 @@ async fn retry_message(
             if last_assistant_line_idx <= last_user_line_idx {
                 return Err("数据异常：AI 回复在用户消息之前，无法重试".into());
             }
-            // 删除最后一条 assistant 及其之后的 tool_result 行
-            last_assistant_line_idx as usize
+            // 删除最后一轮中「最后一条人类消息之后」的全部内容，避免留下半截 tool 回合
+            (last_user_line_idx as usize) + 1
         }
         "undo" => {
             if last_user_line_idx < 0 {
@@ -3202,10 +3274,15 @@ async fn retry_message(
         _ => return Err(format!("未知模式: {}", mode)),
     };
 
-    // 5. 截断并写回 JSONL（使用切片 join 直接拼接，避免中间 Vec 分配）
-    let new_content = lines[..truncate_idx].join("\n");
+    // 5. 截断并写回 JSONL（保留末尾换行，符合 JSONL 习惯）
+    let new_content = if truncate_idx == 0 {
+        String::new()
+    } else {
+        format!("{}\n", lines[..truncate_idx].join("\n"))
+    };
     std::fs::write(&path, &new_content)
         .map_err(|e| format!("写入会话文件失败: {}", e))?;
+    invalidate_session_cache(&path);
 
     eprintln!(
         "[retry_message] 截断会话 {}（模式={}），保留 {} 行，删除了 {} 行",
@@ -3222,6 +3299,20 @@ async fn retry_message(
     if let Some(conv) = after_conv {
         let payload = conversation_to_payload(&conv);
         let _ = app.emit("messages-updated", payload);
+    } else {
+        // 文件被截空或暂无法解析时，仍推送空消息列表，避免前端残留旧气泡
+        let _ = app.emit(
+            "messages-updated",
+            SessionEventPayload {
+                conversation_id: conversation_id.clone(),
+                title: "Untitled".to_string(),
+                messages: Vec::new(),
+                project_dir: None,
+                updated_at: chrono::Utc::now().timestamp(),
+                context_tokens: None,
+                last_model: None,
+            },
+        );
     }
 
     // 7. "regenerate" 模式：用原用户消息重新发送
@@ -3344,6 +3435,66 @@ struct CommandResult {
     error: Option<String>,
 }
 
+/// 在新终端窗口中打开指定目录（仅 cd，不执行额外命令）
+#[tauri::command]
+fn open_terminal(project_dir: String) -> Result<(), String> {
+    let dir = project_dir.trim();
+    if dir.is_empty() {
+        return Err("项目目录为空".to_string());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+
+        std::process::Command::new("cmd")
+            .args(["/k", &format!("cd /d \"{}\"", dir)])
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map_err(|e| format!("启动终端失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // do script 会开新窗口，但默认不一定把 Terminal 提到前台，需显式 activate
+        let script = format!(
+            "tell application \"Terminal\"\n  do script \"cd '{}'\"\n  activate\nend tell",
+            dir.replace('\'', "'\\''")
+        );
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+            .map_err(|e| format!("启动终端失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let cmd_str = format!("cd \"{}\"; exec bash", dir);
+        let terminals = [
+            ("gnome-terminal", vec!["--working-directory", dir]),
+            ("konsole", vec!["--workdir", dir]),
+            ("xfce4-terminal", vec!["--working-directory", dir]),
+            ("x-terminal-emulator", vec!["-e", "bash", "-c", &cmd_str]),
+            ("xterm", vec!["-e", "bash", "-c", &cmd_str]),
+        ];
+
+        let mut launched = false;
+        for (term, args) in &terminals {
+            if std::process::Command::new(term).args(args).spawn().is_ok() {
+                launched = true;
+                break;
+            }
+        }
+
+        if !launched {
+            return Err("未找到可用的终端模拟器（gnome-terminal/konsole/xfce4-terminal/xterm）".to_string());
+        }
+    }
+
+    Ok(())
+}
+
 /// 在新终端窗口中 cd 到项目目录并执行 claude --resume <session_id>
 #[tauri::command]
 fn open_terminal_resume(project_dir: String, session_id: String) -> Result<(), String> {
@@ -3407,8 +3558,9 @@ fn open_terminal_resume(project_dir: String, session_id: String) -> Result<(), S
 
     #[cfg(target_os = "macos")]
     {
+        // do script 会开新窗口，但默认不一定把 Terminal 提到前台，需显式 activate
         let script = format!(
-            "tell app \"Terminal\" to do script \"cd '{}' && {} --resume {}\"",
+            "tell application \"Terminal\"\n  do script \"cd '{}' && {} --resume {}\"\n  activate\nend tell",
             dir.replace('\'', "'\\''"),
             claude_cmd,
             sid
@@ -3757,6 +3909,7 @@ pub fn run() {
             write_file_bytes,
             read_file_base64,
             import_external_path,
+            open_terminal,
             open_terminal_resume,
         ])
         .run(tauri::generate_context!())

@@ -194,22 +194,22 @@ body.is-sidebar-resizing {
   z-index: 2;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 7px;
   background: var(--sidebar-header-bg);
-  padding: 10px 10px 8px;
+  padding: 10px 10px 7px;
 }
 
-/* New Chat：主行动按钮（accent 实心） */
+/* New Chat：保留主行动层级，但降低大色块的视觉重量 */
 .new-chat-btn {
   width: 100%;
-  height: 36px;
+  height: 32px;
   padding: 0 12px;
   background: var(--color-accent);
   border: none;
-  border-radius: 10px;
+  border-radius: 8px;
   color: var(--color-on-accent);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 550;
   font-family: inherit;
   letter-spacing: 0.01em;
   cursor: pointer;
@@ -219,12 +219,12 @@ body.is-sidebar-resizing {
   justify-content: center;
   gap: 6px;
   white-space: nowrap;
-  box-shadow: 0 1px 2px var(--color-accent-ring);
+  box-shadow: none;
 }
 
 .new-chat-btn:hover {
   background: var(--color-accent-hover);
-  box-shadow: 0 2px 10px var(--color-accent-ring);
+  box-shadow: 0 2px 8px var(--color-accent-ring);
 }
 
 .new-chat-btn:active {
@@ -509,7 +509,7 @@ body.is-sidebar-resizing {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 4px 8px 12px;
+  padding: 3px 7px 12px;
   min-height: 0;
   min-width: 0;
   scrollbar-width: thin;
@@ -521,9 +521,9 @@ body.is-sidebar-resizing {
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 6px 6px 4px;
+  padding: 7px 7px 5px;
   font-size: 10.5px;
-  font-weight: 600;
+  font-weight: 550;
   letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--color-text-muted);
@@ -538,9 +538,9 @@ body.is-sidebar-resizing {
 
 /* ── Workspace 卡片（一级）───────────────────────────────────────── */
 .workspace-card {
-  margin-bottom: 6px;
+  margin-bottom: 2px;
   border: 1px solid var(--sidebar-card-border);
-  border-radius: 12px;
+  border-radius: 9px;
   background: var(--sidebar-card-bg);
   box-shadow: var(--sidebar-card-shadow);
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
@@ -555,15 +555,15 @@ body.is-sidebar-resizing {
 
 /* 卡片内含当前活跃会话时，用 accent 描边标记 */
 .workspace-card.has-active {
-  border-color: color-mix(in srgb, var(--color-accent) 38%, transparent);
+  border-color: color-mix(in srgb, var(--color-accent) 16%, transparent);
 }
 
 /* ── 卡片标题（项目行）──────────────────────────────────────────── */
 .workspace-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 8px 8px 6px;
+  gap: 7px;
+  padding: 7px 7px 7px 5px;
   cursor: pointer;
   user-select: none;
   background: transparent;
@@ -603,14 +603,14 @@ body.is-sidebar-resizing {
 /* 项目 icon：按路径生成稳定色相的首字母方块 */
 .workspace-avatar {
   flex-shrink: 0;
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   font-size: 10.5px;
-  font-weight: 700;
+  font-weight: 650;
   letter-spacing: 0.02em;
   line-height: 1;
   color: hsl(var(--ws-hue, 220) 70% var(--sidebar-avatar-text-lightness));
@@ -619,6 +619,8 @@ body.is-sidebar-resizing {
     hsl(var(--ws-hue, 220) 72% var(--sidebar-avatar-lightness)) 0%,
     hsl(calc(var(--ws-hue, 220) + 26) 72% calc(var(--sidebar-avatar-lightness) - 8%)) 100%
   );
+  filter: saturate(0.72);
+  opacity: 0.88;
 }
 
 .workspace-card.is-uncategorized .workspace-avatar {
@@ -662,9 +664,9 @@ body.is-sidebar-resizing {
 .workspace-count {
   flex-shrink: 0;
   font-size: 10.5px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--sidebar-badge-text);
-  background: var(--sidebar-badge-bg);
+  background: transparent;
   border-radius: 999px;
   padding: 0 6px;
   min-width: 18px;
@@ -677,7 +679,7 @@ body.is-sidebar-resizing {
 }
 
 .workspace-header:hover .workspace-count {
-  background: var(--color-bg-surface-hover);
+  background: var(--sidebar-badge-bg);
   color: var(--color-text-secondary);
 }
 
@@ -701,9 +703,9 @@ body.is-sidebar-resizing {
   padding: 0 5px;
   height: 15px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  background: transparent;
   color: color-mix(in srgb, var(--color-accent) 82%, var(--color-text));
-  font-weight: 600;
+  font-weight: 550;
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -715,6 +717,7 @@ body.is-sidebar-resizing {
   height: 5px;
   border-radius: 50%;
   background: currentColor;
+  opacity: 0.65;
 }
 
 .workspace-time {
@@ -799,7 +802,7 @@ body.is-sidebar-resizing {
 }
 
 .workspace-conversations {
-  padding: 2px 6px 6px;
+  padding: 1px 5px 5px 25px;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -902,9 +905,9 @@ body.is-sidebar-resizing {
   display: flex;
   align-items: center;
   gap: 7px;
-  min-height: 40px;
-  padding: 5px 6px 5px 9px;
-  border-radius: 10px;
+  min-height: 36px;
+  padding: 4px 6px 4px 8px;
+  border-radius: 8px;
   cursor: pointer;
   user-select: none;
   transition: background 0.15s ease, box-shadow 0.15s ease;
@@ -1523,6 +1526,47 @@ body.is-sidebar-resizing {
   min-width: 0;
   /* 为滚动到底部按钮留空间 */
   scroll-behavior: smooth;
+}
+
+/* 已创建但消息被全部撤回后的轻量空状态 */
+.conversation-empty-state {
+  flex: 1;
+  min-height: 220px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  color: var(--color-text-muted);
+  text-align: center;
+  user-select: none;
+}
+
+.conversation-empty-state-icon {
+  width: 38px;
+  height: 38px;
+  margin-bottom: 4px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 12px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-muted);
+}
+
+.conversation-empty-state-icon svg {
+  width: 19px;
+  height: 19px;
+}
+
+.conversation-empty-state strong {
+  color: var(--color-text-secondary);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.conversation-empty-state > span:last-child {
+  font-size: 12px;
 }
 
 /* 滚动到底部浮动按钮 */
