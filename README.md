@@ -83,17 +83,32 @@ npm run tauri build
 
 构建产物位于 `src-tauri/target/release/bundle/`。
 
-### 发布
+### 快速提交
 
 ```bash
 # macOS
 ./fast_push_mac.sh
+# 或指定提交说明
+./fast_push_mac.sh "fix: 说明"
 
 # Windows PowerShell
 .\fast_push_win.ps1
+.\fast_push_win.ps1 "fix: 说明"
 ```
 
-推送 `v*` 格式的 tag 后，GitHub Actions 会自动触发构建并创建 Release。
+只做暂存、提交、同步远程并推送，**不升版本、不打 tag**。
+
+### 发布新版本
+
+```bash
+# macOS
+./fast_release_mac.sh
+
+# Windows PowerShell
+.\fast_release_win.ps1
+```
+
+会递增 patch 版本、提交、推送并打 `v*` tag；GitHub Actions 随后自动构建并创建 Release。
 
 ## 🏗️ 技术架构
 

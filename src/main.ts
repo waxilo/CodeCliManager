@@ -199,6 +199,23 @@ const streamingBySession = new Map<string, StreamingState>();
 const pendingTextDelta = new Map<string, string>();
 /** 正在运行的会话 ID 集合（后台执行的任务也包含在内） */
 const runningSessions = new Set<string>();
+
+/** 待发送指令（可在当前任务执行期间入队，结束后自动执行） */
+interface QueuedCommand {
+  id: string;
+  /** 发给 CLI 的完整 prompt */
+  prompt: string;
+  /** 气泡展示内容 */
+  messageContent: string;
+  refs?: FileRef[];
+  model?: string;
+  createdAt: number;
+}
+
+/** 每会话独立指令队列（key 为 conversationId；新会话未建 ID 时用 pending） */
+const commandQueues = new Map<string, QueuedCommand[]>();
+/** 防止同一会话并发 drain */
+const queueDrainInFlight = new Set<string>();
 let streamRefreshRafId: number | null = null;
 let streamRefreshPending = false;
 let streamRefreshLastTime = 0;
@@ -1082,9 +1099,16 @@ async function setupEventListeners() {
 
       updateConversationListSpinner();
       updateContextIndicator();
+      refreshCommandQueueUI();
 
       if (isCurrentSession && (activeConversationId || transientSessionError)) {
         refreshChatContent();
+      }
+
+      // 当前任务结束后，自动执行该会话队列中的下一条
+      const drainId = endedSessionId || activeConversationId;
+      if (drainId) {
+        void processNextQueuedCommand(drainId);
       }
     });
   });
@@ -1140,6 +1164,7 @@ function handleMessageChunk(payload: MessageChunkPayload) {
     // pending -> 真实 session ID 转换
     runningSessions.delete('pending');
     runningSessions.add(sid);
+    migrateCommandQueue('pending', sid);
     // 仅在尚未激活会话时设置 activeConversationId，避免打断用户已切换的视图
     if (!activeConversationId) {
       activeConversationId = sid;
@@ -1166,6 +1191,7 @@ function handleMessageChunk(payload: MessageChunkPayload) {
     updateProjectDirDisplay();
     ensureChatViewVisible();
     updateConversationListSpinner();
+    refreshCommandQueueUI();
     // ensureChatViewVisible 可能调用了 render()，需要恢复按钮 loading 状态
     // 只有当 pending 消息属于此会话时才设置 loading（防止串会话）
     if (sid === activeConversationId || (!activeConversationId && pendingUserMessage && !pendingUserMessageConvId)) {
@@ -1487,12 +1513,76 @@ function isSendButtonLoading(): boolean {
   return sendBtn?.dataset.loading === 'true';
 }
 
+/** 当前会话是否忙碌（运行中或正在出队发送） */
+function isQueueKeyBusy(queueKey: string): boolean {
+  return (
+    runningSessions.has(queueKey) ||
+    (queueKey === 'pending' && runningSessions.has('pending')) ||
+    queueDrainInFlight.has(queueKey) ||
+    (activeConversationId === queueKey && isSendButtonLoading())
+  );
+}
+
+function getActiveQueueKey(): string {
+  return activeConversationId || 'pending';
+}
+
+function getCommandQueue(queueKey: string): QueuedCommand[] {
+  return commandQueues.get(queueKey) ?? [];
+}
+
+function setCommandQueue(queueKey: string, items: QueuedCommand[]): void {
+  if (items.length === 0) {
+    commandQueues.delete(queueKey);
+  } else {
+    commandQueues.set(queueKey, items);
+  }
+}
+
+function migrateCommandQueue(fromKey: string, toKey: string): void {
+  if (!fromKey || !toKey || fromKey === toKey) return;
+  const from = getCommandQueue(fromKey);
+  if (from.length === 0) return;
+  setCommandQueue(toKey, [...getCommandQueue(toKey), ...from]);
+  commandQueues.delete(fromKey);
+}
+
+function clearCommandQueue(queueKey: string): void {
+  commandQueues.delete(queueKey);
+  refreshCommandQueueUI();
+}
+
 function updateSendButtonState() {
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
-  if (!sendBtn || sendBtn.dataset.loading === 'true') {
+  if (!sendBtn) {
     return;
   }
-  sendBtn.disabled = !canSendMessage();
+
+  const loading = sendBtn.dataset.loading === 'true';
+  const sendIcon = sendBtn.querySelector('.send-icon') as SVGElement | null;
+  const stopIcon = sendBtn.querySelector('.stop-icon') as SVGElement | null;
+  const hasContent = canSendMessage();
+
+  if (loading) {
+    // 运行中：有内容 → 入队；无内容 → 停止
+    const enqueueMode = hasContent;
+    sendBtn.disabled = false;
+    sendBtn.classList.toggle('is-loading', !enqueueMode);
+    sendBtn.classList.toggle('is-queue', enqueueMode);
+    sendBtn.setAttribute('aria-label', enqueueMode ? '加入队列' : '停止');
+    sendBtn.title = enqueueMode ? '加入队列（当前任务结束后自动发送）' : '停止当前任务';
+    if (sendIcon) sendIcon.style.display = enqueueMode ? '' : 'none';
+    if (stopIcon) stopIcon.style.display = enqueueMode ? 'none' : '';
+    return;
+  }
+
+  sendBtn.classList.remove('is-queue');
+  sendBtn.classList.remove('is-loading');
+  sendBtn.disabled = !hasContent;
+  sendBtn.setAttribute('aria-label', '发送');
+  sendBtn.title = '发送';
+  if (sendIcon) sendIcon.style.display = '';
+  if (stopIcon) stopIcon.style.display = 'none';
 }
 
 function setSendButtonLoading(loading: boolean) {
@@ -1501,31 +1591,22 @@ function setSendButtonLoading(loading: boolean) {
     return;
   }
   sendBtn.dataset.loading = loading ? 'true' : 'false';
-  sendBtn.classList.toggle('is-loading', loading);
-  // loading 时按钮变为停止按钮，始终可点击；非 loading 时根据输入内容决定
-  sendBtn.disabled = loading ? false : !canSendMessage();
-  sendBtn.setAttribute('aria-label', loading ? '停止' : '发送');
 
-  // 切换图标
-  const sendIcon = sendBtn.querySelector('.send-icon') as SVGElement | null;
-  const stopIcon = sendBtn.querySelector('.stop-icon') as SVGElement | null;
-  if (sendIcon) sendIcon.style.display = loading ? 'none' : '';
-  if (stopIcon) stopIcon.style.display = loading ? '' : 'none';
-
-  // 流式输出时禁用输入框
+  // 运行中仍允许继续输入并入队，不禁用输入框
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   if (input) {
-    input.disabled = loading;
+    input.disabled = false;
     input.placeholder = loading
-      ? 'AI 正在回答中...'
-      : '输入你的问题，Enter 发送，Shift+Enter 换行...';
+      ? 'AI 正在回答中，输入下一条后 Enter 加入队列…'
+      : '输入你的问题，Enter 发送，Shift+Enter 换行，@ 引用文件，粘贴图片...';
   }
 
-  // 输入区域整体添加 loading 状态 class
   const inputArea = document.querySelector('.input-composer');
   if (inputArea) {
     inputArea.classList.toggle('is-loading', loading);
   }
+
+  updateSendButtonState();
 }
 
 function renderCopyIconHtml(className = 'toolbar-copy-icon'): string {
@@ -1682,6 +1763,7 @@ function renderProjectDirDisplayHtml(): string {
 function renderInputComposerHtml(): string {
   return `
     <div class="input-area">
+      <div id="command-queue" class="command-queue">${renderCommandQueueInnerHtml(getActiveQueueKey())}</div>
       <div id="paste-attachments-bar" class="paste-attachments-bar" style="display:none"></div>
       <div id="imported-file-bar" class="imported-file-bar" style="display:none"></div>
       <div class="input-composer">
@@ -1717,6 +1799,106 @@ function renderInputComposerHtml(): string {
       </div>
     </div>
   `;
+}
+
+function renderCommandQueueInnerHtml(queueKey: string): string {
+  const items = getCommandQueue(queueKey);
+  if (items.length === 0) return '';
+
+  const rows = items
+    .map((item, index) => {
+      const preview = item.messageContent.trim() || item.prompt.trim() || '(空消息)';
+      return `
+        <div class="command-queue-item" data-queue-id="${escapeHtml(item.id)}">
+          <span class="command-queue-index">${index + 1}</span>
+          <span class="command-queue-text" title="${escapeHtml(preview)}">${escapeHtml(preview)}</span>
+          <button
+            type="button"
+            class="command-queue-remove"
+            data-action="remove-queued-command"
+            data-queue-id="${escapeHtml(item.id)}"
+            title="从队列移除"
+            aria-label="从队列移除"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true">
+              <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+            </svg>
+          </button>
+        </div>
+      `;
+    })
+    .join('');
+
+  return `
+    <div class="command-queue-panel">
+      <div class="command-queue-header">
+        <span>待发送队列 · ${items.length}</span>
+        <button type="button" class="command-queue-clear" data-action="clear-command-queue">清空</button>
+      </div>
+      <div class="command-queue-list">${rows}</div>
+    </div>
+  `;
+}
+
+function refreshCommandQueueUI(): void {
+  const el = document.querySelector('#command-queue');
+  if (!el) return;
+  el.innerHTML = renderCommandQueueInnerHtml(getActiveQueueKey());
+}
+
+function bindCommandQueueEvents(): void {
+  const el = document.querySelector('#command-queue');
+  if (!el || (el as HTMLElement).dataset.bound === '1') return;
+  (el as HTMLElement).dataset.bound = '1';
+  el.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement;
+    const clearBtn = target.closest<HTMLElement>('[data-action="clear-command-queue"]');
+    if (clearBtn) {
+      clearCommandQueue(getActiveQueueKey());
+      showCopyToastMsg('已清空队列');
+      return;
+    }
+    const removeBtn = target.closest<HTMLElement>('[data-action="remove-queued-command"]');
+    if (!removeBtn) return;
+    const id = removeBtn.dataset.queueId;
+    if (!id) return;
+    removeQueuedCommand(getActiveQueueKey(), id);
+  });
+}
+
+function removeQueuedCommand(queueKey: string, commandId: string): void {
+  const next = getCommandQueue(queueKey).filter((item) => item.id !== commandId);
+  setCommandQueue(queueKey, next);
+  refreshCommandQueueUI();
+}
+
+function enqueueCommand(queueKey: string, command: QueuedCommand): void {
+  setCommandQueue(queueKey, [...getCommandQueue(queueKey), command]);
+  refreshCommandQueueUI();
+}
+
+async function processNextQueuedCommand(conversationId: string): Promise<void> {
+  if (!conversationId) return;
+  if (runningSessions.has(conversationId) || queueDrainInFlight.has(conversationId)) {
+    return;
+  }
+
+  const queue = getCommandQueue(conversationId);
+  if (queue.length === 0) {
+    refreshCommandQueueUI();
+    return;
+  }
+
+  const next = queue[0];
+  setCommandQueue(conversationId, queue.slice(1));
+  refreshCommandQueueUI();
+
+  queueDrainInFlight.add(conversationId);
+  try {
+    await executePreparedCommand(conversationId, next);
+  } finally {
+    queueDrainInFlight.delete(conversationId);
+  }
 }
 
 function normalizeConversation(
@@ -1963,6 +2145,7 @@ function newChatInWorkspace(workspacePath: string): void {
   pendingUserMessageConvId = null;
   transientSessionError = null;
   pendingProjectDir = workspacePath;
+  clearCommandQueue('pending');
   render();
   void refreshModelInfo();
 
@@ -2482,6 +2665,8 @@ function attachEventListeners() {
   }
 
   document.querySelector('#send-btn')?.addEventListener('click', handleSendButtonClick);
+  bindCommandQueueEvents();
+  refreshCommandQueueUI();
 
   // 右下角工作目录展示：点击在文件管理器中打开
   const projectDirDisplay = document.querySelector('#project-dir-display');
@@ -5153,9 +5338,6 @@ function renderNewChatDropdownContent(workspaces: WorkspaceGroup[]): string {
 
 // 发送消息：通过 invoke 到后端，后端启动 shell 并通过事件推送更新
 async function sendMessage() {
-  // 流式输出时禁止发送
-  if (isSendButtonLoading()) return;
-
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
 
@@ -5172,6 +5354,7 @@ async function sendMessage() {
 
   let content = input.value.trim();
   input.value = '';
+  updateSendButtonState();
 
   // 捕获导入的文件引用（在 clearImportedFileRefs 之前），用于构造发送给 CLI 的 prompt
   const capturedImportedRefs = importedFileRefs.map((e) => e.ref);
@@ -5231,24 +5414,55 @@ async function sendMessage() {
 
   // 存储的消息内容：@File[] 标签 + 干净文字（用于持久化和渲染芯片）
   const messageContent = (fileRefTagStr + (displayContent || '')).trim();
+  const model = getActiveChatModel() || undefined;
+  const queueKey = getActiveQueueKey();
+  const prepared: QueuedCommand = {
+    id: `q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    prompt: resolvedContent,
+    messageContent,
+    refs: allRefs.length > 0 ? allRefs : undefined,
+    model,
+    createdAt: Date.now(),
+  };
 
-  pendingUserMessage = resolvedContent;
+  // 当前会话忙碌：加入独立队列，等任务结束后自动发送
+  const busy = isQueueKeyBusy(queueKey) || isSendButtonLoading();
 
-  if (activeConversationId) {
-    runningSessions.add(activeConversationId);
-    const conv = conversations.find((c) => c.id === activeConversationId);
+  if (busy) {
+    enqueueCommand(queueKey, prepared);
+    showCopyToastMsg(`已加入队列（第 ${getCommandQueue(queueKey).length} 条）`);
+    input.focus();
+    return;
+  }
+
+  await executePreparedCommand(activeConversationId || null, prepared);
+}
+
+/** 立即执行一条已准备好的指令（新建会话时 conversationId 可为 null） */
+async function executePreparedCommand(
+  conversationId: string | null,
+  command: QueuedCommand,
+): Promise<void> {
+  pendingUserMessage = command.prompt;
+  pendingUserMessageConvId = conversationId;
+
+  if (conversationId) {
+    runningSessions.add(conversationId);
+    const conv = conversations.find((c) => c.id === conversationId);
     if (conv) {
       conv.messages.push({
         id: `user-${Date.now()}`,
         role: 'user',
-        content: messageContent,
-        refs: allRefs.length > 0 ? allRefs : undefined,
+        content: command.messageContent,
+        refs: command.refs,
         timestamp: Math.floor(Date.now() / 1000),
       });
       conv.updated_at = Math.floor(Date.now() / 1000);
     }
-    clearStreamingState(activeConversationId);
-    refreshChatContent();
+    clearStreamingState(conversationId);
+    if (activeConversationId === conversationId) {
+      refreshChatContent();
+    }
     updateConversationListSpinner();
   } else {
     // 新会话，session ID 尚未确定，先标记为 pending
@@ -5257,19 +5471,21 @@ async function sendMessage() {
   }
 
   // render() / refreshChatContent() 可能重建 DOM，需要在之后设置 loading 状态
-  setSendButtonLoading(true);
+  if (!conversationId || conversationId === activeConversationId) {
+    setSendButtonLoading(true);
+  }
   updateConversationListSpinner();
+  refreshCommandQueueUI();
 
   try {
-    const args: Record<string, string> = { prompt: resolvedContent };
-    if (activeConversationId) {
-      args.conversationId = activeConversationId;
+    const args: Record<string, string> = { prompt: command.prompt };
+    if (conversationId) {
+      args.conversationId = conversationId;
     }
-    const model = getActiveChatModel();
-    if (model) {
-      args.model = model;
+    if (command.model) {
+      args.model = command.model;
     }
-    if (!activeConversationId) {
+    if (!conversationId) {
       const projectDir = getEffectiveProjectDir();
       if (projectDir) {
         args.projectDir = projectDir;
@@ -5281,9 +5497,15 @@ async function sendMessage() {
     alert('Failed to send message: ' + String(e));
     pendingUserMessage = null;
     pendingUserMessageConvId = null;
-    runningSessions.delete(activeConversationId || 'pending');
-    hideSendingState();
+    runningSessions.delete(conversationId || 'pending');
+    if (!conversationId || conversationId === activeConversationId) {
+      hideSendingState();
+    }
     updateConversationListSpinner();
+    // 发送失败时继续尝试队列下一条，避免整队列卡住
+    if (conversationId) {
+      void processNextQueuedCommand(conversationId);
+    }
   }
 }
 
@@ -5319,6 +5541,7 @@ async function abortSession() {
         clearStreamingState(abortSessionId);
         hideSendingState();
         updateConversationListSpinner();
+        void processNextQueuedCommand(abortSessionId);
       } else if (isSendButtonLoading() && runningSessions.has(abortSessionId)) {
         // session-ended 完全未到达（进程可能还在），强制清理
         console.warn('[abort] session-ended 完全未到达，强制终止并清理');
@@ -5326,6 +5549,7 @@ async function abortSession() {
         clearStreamingState(abortSessionId);
         hideSendingState();
         updateConversationListSpinner();
+        void processNextQueuedCommand(abortSessionId);
       }
     }, 3000);
   } catch (e) {
@@ -5387,6 +5611,7 @@ async function invokeRetryMessage(mode: 'regenerate' | 'undo') {
         updateConversationListSpinner();
       }
       showCopyToastMsg('已撤回');
+      void processNextQueuedCommand(cid);
     }
   } catch (e) {
     console.error(`[${mode}] 操作失败:`, e);
@@ -5420,7 +5645,12 @@ function handleSendButtonClick() {
   if (!sendBtn) return;
 
   if (sendBtn.dataset.loading === 'true') {
-    void abortSession();
+    // 运行中：有输入内容则入队，否则停止当前任务
+    if (canSendMessage()) {
+      void sendMessage();
+    } else {
+      void abortSession();
+    }
   } else {
     void sendMessage();
   }
@@ -5582,10 +5812,6 @@ function refreshChatContent() {
 }
 
 function handleKeydown(e: KeyboardEvent) {
-  // 流式输出时，Enter 不发送消息
-  if (isSendButtonLoading()) {
-    return;
-  }
   // IME 组字中（如 macOS 拼音未选字）：Enter 用于上屏，不发送
   // keyCode 229 是部分浏览器/输入法在组字期间的兼容标识
   if (e.isComposing || e.keyCode === 229) {
@@ -5602,7 +5828,11 @@ function handleKeydown(e: KeyboardEvent) {
   }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    sendMessage();
+    // 运行中也允许 Enter：有内容则入队，无内容不触发停止
+    if (isSendButtonLoading() && !canSendMessage()) {
+      return;
+    }
+    void sendMessage();
   }
 }
 
@@ -5633,6 +5863,7 @@ function selectConversation(id: string) {
     const thisSessionRunning = runningSessions.has(id);
     setSendButtonLoading(thisSessionRunning);
     updateConversationListSpinner();
+    refreshCommandQueueUI();
 
     setTimeout(() => {
       // 滚动到底部（ScrollController 会临时禁用 smooth 避免长动画）
@@ -5660,6 +5891,7 @@ async function deleteConversation(id: string) {
     });
 
     clearStreamingState(id);
+    clearCommandQueue(id);
     pendingUserMessage = null;
     pendingUserMessageConvId = null;
     conversations = conversations.filter((c) => c.id !== id);

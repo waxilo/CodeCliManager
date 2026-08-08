@@ -2111,6 +2111,125 @@ body.is-sidebar-resizing {
   flex-shrink: 0;
 }
 
+/* ── 指令队列（每会话独立，运行中可入队）─────────────────────────── */
+.command-queue:empty {
+  display: none;
+}
+
+.command-queue-panel {
+  margin-bottom: 8px;
+  border: 1px solid var(--color-composer-border);
+  border-radius: 14px;
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+}
+
+.command-queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-composer-border);
+}
+
+.command-queue-clear {
+  border: none;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+
+.command-queue-clear:hover {
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+}
+
+.command-queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 148px;
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.command-queue-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  color: var(--color-text-secondary);
+}
+
+.command-queue-item:hover {
+  background: var(--color-bg-surface);
+}
+
+.command-queue-index {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text-muted);
+}
+
+.command-queue-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-queue-remove {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.55;
+}
+
+.command-queue-item:hover .command-queue-remove,
+.command-queue-remove:hover {
+  opacity: 1;
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.send-btn.is-queue {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.send-btn.is-queue:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
 .input-composer {
   position: relative;
   z-index: 20;
