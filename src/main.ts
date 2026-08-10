@@ -138,6 +138,7 @@ type ThemeMode = 'light' | 'dark';
 const THEME_STORAGE_KEY = 'codemanager-theme';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'codemanager-sidebar-width';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codemanager-sidebar-collapsed';
+const CLAUDE_UPDATE_DISMISS_KEY = 'codemanager-claude-update-dismissed';
 const DEFAULT_SIDEBAR_WIDTH = 280;
 /** 历史默认宽度：命中这些值时视为「用户从未手动调整」，自动迁移到新默认宽度 */
 const LEGACY_DEFAULT_SIDEBAR_WIDTHS = [320, 184];
@@ -185,6 +186,33 @@ let sidebarAutoCollapsed = false;
 let sidebarWasNarrow: boolean | null = null;
 /** 侧边栏会话搜索关键词 */
 let sidebarSearchQuery = '';
+/** 主界面是否正在展示 API 配置页（非弹窗） */
+let isApiConfigViewActive = false;
+/** 防止异步挂载与关闭竞态 */
+let apiConfigMountToken = 0;
+/** API 配置页 Escape 键监听（需在关闭时统一移除） */
+let apiConfigEscapeHandler: ((event: KeyboardEvent) => void) | null = null;
+
+interface ClaudeCodeUpdateInfo {
+  installed: string | null;
+  latest: string | null;
+  updateAvailable: boolean;
+  executablePath: string | null;
+  error: string | null;
+}
+
+type ClaudeUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'error';
+
+let claudeUpdateInfo: ClaudeCodeUpdateInfo | null = null;
+let claudeUpdateCheckStatus: ClaudeUpdateCheckStatus = 'idle';
+let claudeUpdateDismissedVersion: string | null = (() => {
+  try {
+    return localStorage.getItem(CLAUDE_UPDATE_DISMISS_KEY);
+  } catch {
+    return null;
+  }
+})();
+let claudeUpdateCheckPromise: Promise<void> | null = null;
 /** 新加入列表、需要播放淡入动画的会话 ID */
 const newConversationIds = new Set<string>();
 
@@ -955,6 +983,208 @@ async function init() {
   setupEventListeners();
   setupExternalLinkInterceptor();
   bindSidebarResponsive();
+  void checkClaudeCodeUpdate(false);
+}
+
+function syncClaudeUpdateButtonUI() {
+  const btn = document.querySelector('#claude-update-btn') as HTMLButtonElement | null;
+  if (!btn) return;
+  const showBadge = shouldShowClaudeUpdateBadge();
+  const checking = claudeUpdateCheckStatus === 'checking';
+  btn.classList.toggle('has-update', showBadge);
+  btn.classList.toggle('is-checking', checking);
+  const label = btn.querySelector('.toolbar-update-btn-label');
+  if (label) label.textContent = showBadge ? '有更新' : '版本';
+  let dot = btn.querySelector('.toolbar-update-btn-dot');
+  if (showBadge && !dot) {
+    dot = document.createElement('span');
+    dot.className = 'toolbar-update-btn-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    btn.appendChild(dot);
+  } else if (!showBadge && dot) {
+    dot.remove();
+  }
+  const title = getClaudeUpdateButtonTitle();
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+}
+
+async function checkClaudeCodeUpdate(force = false): Promise<void> {
+  if (claudeUpdateCheckPromise) {
+    if (!force) return claudeUpdateCheckPromise;
+  }
+
+  claudeUpdateCheckStatus = 'checking';
+  syncClaudeUpdateButtonUI();
+
+  claudeUpdateCheckPromise = (async () => {
+    try {
+      const info = await invoke<ClaudeCodeUpdateInfo>('check_claude_code_update');
+      claudeUpdateInfo = info;
+      claudeUpdateCheckStatus = info.error && !info.installed && !info.latest ? 'error' : 'ready';
+    } catch (e) {
+      claudeUpdateInfo = {
+        installed: null,
+        latest: null,
+        updateAvailable: false,
+        executablePath: null,
+        error: String(e),
+      };
+      claudeUpdateCheckStatus = 'error';
+    } finally {
+      syncClaudeUpdateButtonUI();
+      claudeUpdateCheckPromise = null;
+      // 若弹层开着，刷新内容
+      const panel = document.querySelector('#claude-update-popover');
+      if (panel) {
+        panel.innerHTML = renderClaudeUpdatePopoverBody();
+        bindClaudeUpdatePopoverEvents(panel);
+      }
+    }
+  })();
+
+  return claudeUpdateCheckPromise;
+}
+
+function dismissClaudeUpdateReminder() {
+  const latest = claudeUpdateInfo?.latest;
+  if (!latest) return;
+  claudeUpdateDismissedVersion = latest;
+  try {
+    localStorage.setItem(CLAUDE_UPDATE_DISMISS_KEY, latest);
+  } catch {
+    /* ignore */
+  }
+  syncClaudeUpdateButtonUI();
+  closeClaudeUpdatePopover();
+}
+
+function renderClaudeUpdatePopoverBody(): string {
+  const info = claudeUpdateInfo;
+  const checking = claudeUpdateCheckStatus === 'checking';
+
+  if (checking && !info) {
+    return `
+      <div class="claude-update-popover-header">
+        <strong>Claude Code 版本</strong>
+        <button type="button" class="claude-update-popover-close" aria-label="关闭">✕</button>
+      </div>
+      <p class="claude-update-popover-status">正在检查更新…</p>
+    `;
+  }
+
+  const installed = info?.installed || '未检测到';
+  const latest = info?.latest || '—';
+  const path = info?.executablePath || '';
+  const hasUpdate = Boolean(info?.updateAvailable && info.latest);
+  const error = info?.error || '';
+
+  return `
+    <div class="claude-update-popover-header">
+      <strong>Claude Code 版本</strong>
+      <button type="button" class="claude-update-popover-close" aria-label="关闭">✕</button>
+    </div>
+    <div class="claude-update-popover-rows">
+      <div class="claude-update-row">
+        <span class="claude-update-key">当前版本</span>
+        <span class="claude-update-value">${escapeHtml(installed)}</span>
+      </div>
+      <div class="claude-update-row">
+        <span class="claude-update-key">最新版本</span>
+        <span class="claude-update-value${hasUpdate ? ' is-newer' : ''}">${escapeHtml(latest)}</span>
+      </div>
+      ${path ? `
+      <div class="claude-update-row claude-update-row-path">
+        <span class="claude-update-key">安装路径</span>
+        <span class="claude-update-value" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
+      </div>` : ''}
+    </div>
+    ${hasUpdate
+      ? `<p class="claude-update-popover-hint">发现新版本，可在终端执行 <code>claude update</code> 升级。</p>`
+      : info?.installed && info.latest
+        ? `<p class="claude-update-popover-hint">已是最新版本。</p>`
+        : ''}
+    ${error ? `<p class="claude-update-popover-error">${escapeHtml(error)}</p>` : ''}
+    <div class="claude-update-popover-actions">
+      <button type="button" class="claude-update-action" data-action="recheck" ${checking ? 'disabled' : ''}>
+        ${checking ? '检查中…' : '重新检查'}
+      </button>
+      ${hasUpdate ? `
+        <button type="button" class="claude-update-action primary" data-action="update">终端更新</button>
+        <button type="button" class="claude-update-action" data-action="dismiss">稍后提醒</button>
+      ` : ''}
+    </div>
+  `;
+}
+
+function bindClaudeUpdatePopoverEvents(panel: Element) {
+  panel.querySelector('.claude-update-popover-close')?.addEventListener('click', () => {
+    closeClaudeUpdatePopover();
+  });
+
+  panel.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.action;
+      if (action === 'recheck') {
+        void checkClaudeCodeUpdate(true);
+      } else if (action === 'update') {
+        void (async () => {
+          try {
+            await invoke('open_claude_code_update_terminal');
+            showCopyToastMsg('已打开终端执行更新');
+            closeClaudeUpdatePopover();
+          } catch (e) {
+            alert('打开更新终端失败: ' + String(e));
+          }
+        })();
+      } else if (action === 'dismiss') {
+        dismissClaudeUpdateReminder();
+      }
+    });
+  });
+}
+
+function closeClaudeUpdatePopover() {
+  document.querySelector('.claude-update-popover-overlay')?.remove();
+  document.querySelector('#claude-update-popover')?.remove();
+}
+
+function toggleClaudeUpdatePopover() {
+  if (document.querySelector('#claude-update-popover')) {
+    closeClaudeUpdatePopover();
+    return;
+  }
+
+  const anchor = document.querySelector('#claude-update-btn') as HTMLElement | null;
+  if (!anchor) return;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'claude-update-popover-overlay';
+  overlay.addEventListener('click', closeClaudeUpdatePopover);
+
+  const panel = document.createElement('div');
+  panel.id = 'claude-update-popover';
+  panel.className = 'claude-update-popover';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', 'Claude Code 版本更新');
+  panel.innerHTML = renderClaudeUpdatePopoverBody();
+
+  document.body.appendChild(overlay);
+  document.body.appendChild(panel);
+  bindClaudeUpdatePopoverEvents(panel);
+
+  const rect = anchor.getBoundingClientRect();
+  const panelWidth = panel.offsetWidth || 300;
+  const left = Math.min(
+    Math.max(8, rect.right - panelWidth),
+    window.innerWidth - panelWidth - 8,
+  );
+  panel.style.top = `${rect.bottom + 6}px`;
+  panel.style.left = `${left}px`;
+
+  if (!claudeUpdateInfo || claudeUpdateCheckStatus === 'idle') {
+    void checkClaudeCodeUpdate(true);
+  }
 }
 
 // 设置事件监听器 - 监听后端发送的实时事件
@@ -1329,6 +1559,8 @@ function handleSessionError(payload: SessionErrorPayload) {
 }
 
 function ensureChatViewVisible() {
+  // API 配置页占用主区域时，不因后台流式事件强制切回聊天视图
+  if (isApiConfigViewActive) return;
   const mainContent = document.querySelector('.main-content');
   if (!mainContent) return;
   if (!document.querySelector('#message-list')) {
@@ -2139,6 +2371,7 @@ function groupConversationsByWorkspace(): { workspaces: WorkspaceGroup[]; uncate
 
 /** 在指定工作区快速新建对话（预设工作目录，跳过选目录步骤） */
 function newChatInWorkspace(workspacePath: string): void {
+  dismissApiConfigViewState();
   activeConversationId = '';
   invalidateFileCache();
   pendingUserMessage = null;
@@ -2401,6 +2634,7 @@ function renderConversationList(): string {
 
 /** 局部重渲染侧边栏会话列表 */
 function refreshConversationListDom(): void {
+  if (isApiConfigViewActive) return;
   const list = document.querySelector('#conversation-list');
   if (list) list.innerHTML = renderConversationList();
 }
@@ -2492,9 +2726,50 @@ function renderApiConfigIcon(): string {
   `;
 }
 
-function renderTitlebarActions(): string {
+function shouldShowClaudeUpdateBadge(): boolean {
+  if (!claudeUpdateInfo?.updateAvailable || !claudeUpdateInfo.latest) return false;
+  return claudeUpdateDismissedVersion !== claudeUpdateInfo.latest;
+}
+
+function getClaudeUpdateButtonTitle(): string {
+  if (claudeUpdateCheckStatus === 'checking') return '正在检查 Claude Code 更新…';
+  if (shouldShowClaudeUpdateBadge() && claudeUpdateInfo?.latest) {
+    return `Claude Code 有新版本 ${claudeUpdateInfo.latest}`;
+  }
+  if (claudeUpdateInfo?.installed) {
+    return `Claude Code ${claudeUpdateInfo.installed}`;
+  }
+  return '检查 Claude Code 更新';
+}
+
+function renderClaudeUpdateIcon(): string {
   return `
-    <button type="button" class="toolbar-settings-btn settings-btn" id="settings-btn" title="管理 Claude Code API 配置" aria-label="API 配置">
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+      <path d="M3 3v5h5"/>
+      <path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+      <path d="M16 16h5v5"/>
+    </svg>
+  `;
+}
+
+function renderTitlebarActions(): string {
+  const showBadge = shouldShowClaudeUpdateBadge();
+  const checking = claudeUpdateCheckStatus === 'checking';
+  return `
+    <button
+      type="button"
+      class="toolbar-update-btn${showBadge ? ' has-update' : ''}${checking ? ' is-checking' : ''}"
+      id="claude-update-btn"
+      title="${escapeHtml(getClaudeUpdateButtonTitle())}"
+      aria-label="${escapeHtml(getClaudeUpdateButtonTitle())}"
+      aria-haspopup="dialog"
+    >
+      <span class="toolbar-update-btn-icon" aria-hidden="true">${renderClaudeUpdateIcon()}</span>
+      <span class="toolbar-update-btn-label">${showBadge ? '有更新' : '版本'}</span>
+      ${showBadge ? '<span class="toolbar-update-btn-dot" aria-hidden="true"></span>' : ''}
+    </button>
+    <button type="button" class="toolbar-settings-btn settings-btn${isApiConfigViewActive ? ' is-active' : ''}" id="settings-btn" title="管理 Claude Code API 配置" aria-label="API 配置" aria-pressed="${isApiConfigViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderApiConfigIcon()}</span>
       <span class="toolbar-settings-btn-label">API 配置</span>
     </button>
@@ -2502,6 +2777,83 @@ function renderTitlebarActions(): string {
       ${getThemeToggleIcon()}
     </button>
   `;
+}
+
+function renderApiConfigSidebarHtml(): string {
+  return `
+    <div class="api-config-sidebar">
+      <div class="settings-profiles-header">
+        <span>已保存配置</span>
+        <span class="settings-profiles-hint">左键查看 · 右键应用 / 删除</span>
+      </div>
+      <div class="settings-profile-list"></div>
+      <div class="api-config-sidebar-actions">
+        <button type="button" class="settings-add-profile">+ 新建</button>
+        <button type="button" class="settings-import-cc-switch">从 CC Switch 导入</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderApiConfigViewHtml(): string {
+  return `
+    <div class="api-config-view" id="api-config-view" data-profile-id="">
+      <div class="settings-header">
+        <div>
+          <h3 class="settings-title">Claude Code API 配置</h3>
+          <p class="settings-subtitle">保存多套 API 配置，一键切换并写入 Claude Code</p>
+        </div>
+        <button type="button" class="settings-close-btn" aria-label="返回聊天">✕</button>
+      </div>
+      <form class="settings-form" id="settings-form">
+        <label class="settings-field">
+          <span>配置名称</span>
+          <input type="text" name="profileName" placeholder="例如：DeepSeek / 官方 Anthropic" />
+        </label>
+        <label class="settings-field">
+          <span>API Base URL</span>
+          <input type="url" name="baseUrl" placeholder="https://api.anthropic.com" />
+        </label>
+        <div class="settings-field">
+          <span>API Key</span>
+          <div class="settings-apikey-box" data-mode="empty">
+            <span class="settings-apikey-display">
+              <span class="settings-apikey-display-label">当前：</span>
+              <code class="settings-apikey-display-value"></code>
+            </span>
+            <input type="password" name="apiKey" class="settings-apikey-input" placeholder="sk-..." autocomplete="off" />
+            <div class="settings-apikey-actions">
+              <button type="button" class="settings-apikey-btn" data-action="edit" title="编辑密钥">编辑</button>
+              <button type="button" class="settings-apikey-btn" data-action="copy" title="复制完整密钥">复制</button>
+              <button type="button" class="settings-apikey-btn" data-action="cancel" title="取消编辑" hidden>取消</button>
+            </div>
+          </div>
+        </div>
+        <label class="settings-field">
+          <span>模型配置</span>
+          <input
+            type="text"
+            class="settings-model-input settings-model-config-summary"
+            placeholder="点击配置模型"
+            readonly
+          />
+        </label>
+        <p class="settings-model-config-hint">配置展示模型与自定义模型列表，点击输入框管理</p>
+        <p class="settings-path settings-live-path"></p>
+      </form>
+      <div class="settings-footer">
+        <div class="settings-footer-actions">
+          <button type="button" class="settings-btn-secondary settings-apply-profile">应用</button>
+          <button type="button" class="settings-btn-secondary settings-close-footer">返回</button>
+          <button type="button" class="settings-btn-primary save-only">保存</button>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function getSettingsProfileListEl(): HTMLElement | null {
+  return document.querySelector('.settings-profile-list');
 }
 
 function render() {
@@ -2526,8 +2878,9 @@ function render() {
           ${renderTitlebarActions()}
         </div>
       </header>
-      <div class="app-container${isSidebarCollapsed ? ' is-sidebar-collapsed' : ''}">
-      <div class="sidebar">
+      <div class="app-container${isSidebarCollapsed ? ' is-sidebar-collapsed' : ''}${isApiConfigViewActive ? ' is-api-config' : ''}">
+      <div class="sidebar${isApiConfigViewActive ? ' is-api-config' : ''}">
+        ${isApiConfigViewActive ? renderApiConfigSidebarHtml() : `
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
             <div class="new-chat-btn-wrapper">
@@ -2566,6 +2919,7 @@ function render() {
         <div class="conversation-list" id="conversation-list">
           ${renderConversationList()}
         </div>
+        `}
       </div>
       <div
         class="sidebar-resizer"
@@ -2574,7 +2928,8 @@ function render() {
         aria-orientation="vertical"
         aria-label="调整侧边栏宽度"
       ></div>
-      <div class="main-content">
+      <div class="main-content${isApiConfigViewActive ? ' is-api-config' : ''}">
+        ${isApiConfigViewActive ? renderApiConfigViewHtml() : `
         <div class="drop-zone-overlay" id="drop-zone-overlay">
           <div class="drop-zone-content">
             <div class="drop-zone-icon" aria-hidden="true">
@@ -2597,6 +2952,7 @@ function render() {
         ` : ''}
         ${activeConversationId || pendingUserMessage ? renderChatContent() : renderEmptyState()}
         ${renderInputComposerHtml()}
+        `}
       </div>
       </div>
     </div>
@@ -2686,12 +3042,25 @@ function attachEventListeners() {
   syncSidebarResponsiveState();
   syncSidebarCollapsedUI();
   document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
+  document.querySelector('#claude-update-btn')?.addEventListener('click', () => {
+    toggleClaudeUpdatePopover();
+  });
   document.querySelector('#settings-btn')?.addEventListener('click', () => {
-    void openSettingsModal();
+    if (isApiConfigViewActive) {
+      closeApiConfigView();
+    } else {
+      openApiConfigView();
+    }
   });
 
-  // 拖拽文件自动引用
-  bindDragDropFileRefs();
+  if (isApiConfigViewActive) {
+    void mountApiConfigView();
+  }
+
+  // 拖拽文件自动引用（API 配置页无输入区，跳过）
+  if (!isApiConfigViewActive) {
+    bindDragDropFileRefs();
+  }
 
   // 导入外部文件/文件夹按钮（点击弹出选择菜单）
   document.querySelector('#btn-import')?.addEventListener('click', (e) => {
@@ -3314,7 +3683,7 @@ async function refreshSettingsModal(
   // 不要回退到第一个 API 配置，否则会把别的配置的模型/详情显示成「官方默认」
   const officialActive = !selectedProfileId && !state.activeProfileId;
   if (officialActive) {
-    const listEl = overlay.querySelector('.settings-profile-list');
+    const listEl = getSettingsProfileListEl();
     if (listEl) {
       listEl.innerHTML = renderSettingsProfileList(state.profiles, OFFICIAL_PROFILE_ID);
     }
@@ -3331,7 +3700,7 @@ async function refreshSettingsModal(
     state.profiles[0]?.id ||
     null;
 
-  const listEl = overlay.querySelector('.settings-profile-list');
+  const listEl = getSettingsProfileListEl();
   if (listEl) {
     listEl.innerHTML = renderSettingsProfileList(state.profiles, resolvedSelectedId);
   }
@@ -3354,86 +3723,56 @@ async function refreshSettingsModal(
   return { state, selectedProfileId: resolvedSelectedId };
 }
 
-async function openSettingsModal() {
-  const overlay = document.createElement('div');
-  overlay.className = 'settings-overlay';
-  overlay.innerHTML = `
-    <div class="settings-dialog settings-dialog-wide" role="dialog" aria-modal="true">
-      <div class="settings-header">
-        <div>
-          <h3 class="settings-title">Claude Code API 配置</h3>
-          <p class="settings-subtitle">保存多套 API 配置，一键切换并写入 Claude Code</p>
-        </div>
-        <button type="button" class="settings-close-btn" aria-label="关闭">✕</button>
-      </div>
-      <div class="settings-body">
-        <aside class="settings-profiles">
-          <div class="settings-profiles-header">
-            <span>已保存配置</span>
-            <span class="settings-profiles-hint">左键查看 · 右键应用 / 删除</span>
-          </div>
-          <div class="settings-profile-list"></div>
-        </aside>
-        <form class="settings-form" id="settings-form">
-          <label class="settings-field">
-            <span>配置名称</span>
-            <input type="text" name="profileName" placeholder="例如：DeepSeek / 官方 Anthropic" />
-          </label>
-          <label class="settings-field">
-            <span>API Base URL</span>
-            <input type="url" name="baseUrl" placeholder="https://api.anthropic.com" />
-          </label>
-          <div class="settings-field">
-            <span>API Key</span>
-            <div class="settings-apikey-box" data-mode="empty">
-              <span class="settings-apikey-display">
-                <span class="settings-apikey-display-label">当前：</span>
-                <code class="settings-apikey-display-value"></code>
-              </span>
-              <input type="password" name="apiKey" class="settings-apikey-input" placeholder="sk-..." autocomplete="off" />
-              <div class="settings-apikey-actions">
-                <button type="button" class="settings-apikey-btn" data-action="edit" title="编辑密钥">编辑</button>
-                <button type="button" class="settings-apikey-btn" data-action="copy" title="复制完整密钥">复制</button>
-                <button type="button" class="settings-apikey-btn" data-action="cancel" title="取消编辑" hidden>取消</button>
-              </div>
-            </div>
-          </div>
-          <label class="settings-field">
-            <span>模型配置</span>
-            <input
-              type="text"
-              class="settings-model-input settings-model-config-summary"
-              placeholder="点击配置模型"
-              readonly
-            />
-          </label>
-          <p class="settings-model-config-hint">配置展示模型与自定义模型列表，点击输入框管理</p>
-          <p class="settings-path settings-live-path"></p>
-        </form>
-      </div>
-      <div class="settings-footer">
-        <div class="settings-footer-left">
-          <button type="button" class="settings-add-profile">+ 新建</button>
-          <button type="button" class="settings-import-cc-switch">从 CC Switch 导入</button>
-        </div>
-        <div class="settings-footer-actions">
-          <button type="button" class="settings-btn-secondary settings-apply-profile">应用</button>
-          <button type="button" class="settings-btn-secondary settings-close-footer">取消</button>
-          <button type="button" class="settings-btn-primary save-only">保存</button>
-        </div>
-      </div>
-    </div>
-  `;
+function openApiConfigView() {
+  if (isApiConfigViewActive) return;
+  // 配置列表在左侧栏，收起时先展开以免看不见
+  if (isSidebarCollapsed) {
+    setSidebarCollapsed(false);
+  }
+  isApiConfigViewActive = true;
+  render();
+}
+
+/** 退出 API 配置页状态（不触发 render，供即将全量重绘的路径使用） */
+function dismissApiConfigViewState() {
+  if (!isApiConfigViewActive && !apiConfigEscapeHandler) return;
+  if (apiConfigEscapeHandler) {
+    document.removeEventListener('keydown', apiConfigEscapeHandler);
+    apiConfigEscapeHandler = null;
+  }
+  apiConfigMountToken += 1;
+  closeProfileContextMenu();
+  document.querySelector('.model-picker-overlay')?.remove();
+  isApiConfigViewActive = false;
+}
+
+function closeApiConfigView() {
+  if (!isApiConfigViewActive) {
+    dismissApiConfigViewState();
+    return;
+  }
+  dismissApiConfigViewState();
+  render();
+  void loadChatModelOptions();
+  if (!activeConversationId) {
+    void refreshModelInfo();
+  }
+}
+
+async function mountApiConfigView() {
+  const overlay = document.querySelector('#api-config-view') as HTMLElement | null;
+  if (!overlay || !isApiConfigViewActive) return;
+
+  const mountToken = ++apiConfigMountToken;
+  const isMountCurrent = () => mountToken === apiConfigMountToken && isApiConfigViewActive;
 
   const close = () => {
-    closeProfileContextMenu();
-    document.removeEventListener('keydown', onEscapeKey);
-    overlay.remove();
-    void loadChatModelOptions();
+    closeApiConfigView();
   };
 
   const onEscapeKey = (event: KeyboardEvent) => {
     if (event.key !== 'Escape') return;
+    if (!isMountCurrent()) return;
 
     const modelPicker = document.querySelector('.model-picker-overlay');
     if (modelPicker) {
@@ -3456,6 +3795,10 @@ async function openSettingsModal() {
     close();
   };
 
+  if (apiConfigEscapeHandler) {
+    document.removeEventListener('keydown', apiConfigEscapeHandler);
+  }
+  apiConfigEscapeHandler = onEscapeKey;
   document.addEventListener('keydown', onEscapeKey);
   const livePathEl = overlay.querySelector('.settings-live-path') as HTMLElement | null;
   let fetchedModels: FetchedModel[] = [];
@@ -4116,7 +4459,7 @@ async function openSettingsModal() {
   };
 
   const bindProfileListEvents = () => {
-    const list = overlay.querySelector('.settings-profile-list') as HTMLElement | null;
+    const list = getSettingsProfileListEl();
     if (!list || list.dataset.bound === 'true') {
       return;
     }
@@ -4258,9 +4601,6 @@ async function openSettingsModal() {
 
   overlay.querySelector('.settings-close-btn')?.addEventListener('click', close);
   overlay.querySelector('.settings-close-footer')?.addEventListener('click', close);
-  overlay.addEventListener('click', (event) => {
-    if (event.target === overlay) close();
-  });
 
   // API Key 单框：编辑 / 取消 / 复制
   const apiKeyBox = overlay.querySelector('.settings-apikey-box') as HTMLElement | null;
@@ -4418,7 +4758,7 @@ async function openSettingsModal() {
     }
   });
 
-  overlay.querySelector('.settings-add-profile')?.addEventListener('click', () => {
+  document.querySelector('.settings-add-profile')?.addEventListener('click', () => {
     fillSettingsForm(
       overlay,
       {
@@ -4435,7 +4775,7 @@ async function openSettingsModal() {
       '',
       null,
     );
-    overlay.querySelectorAll('.settings-profile-item').forEach((item) => {
+    document.querySelectorAll('.settings-profile-item').forEach((item) => {
       item.classList.remove('selected');
     });
     fetchedModels = [];
@@ -4445,8 +4785,8 @@ async function openSettingsModal() {
     (overlay.querySelector('input[name="profileName"]') as HTMLInputElement | null)?.focus();
   });
 
-  overlay.querySelector('.settings-import-cc-switch')?.addEventListener('click', async () => {
-    const importBtn = overlay.querySelector('.settings-import-cc-switch') as HTMLButtonElement | null;
+  document.querySelector('.settings-import-cc-switch')?.addEventListener('click', async () => {
+    const importBtn = document.querySelector('.settings-import-cc-switch') as HTMLButtonElement | null;
     if (importBtn) {
       importBtn.disabled = true;
       importBtn.textContent = '导入中...';
@@ -4485,20 +4825,22 @@ async function openSettingsModal() {
     }
   });
 
-  document.body.appendChild(overlay);
-
   try {
+    if (!isMountCurrent()) return;
     const initial = await refreshSettingsModal(overlay, null, handleProfileConfigLoaded);
+    if (!isMountCurrent()) return;
     if (livePathEl) {
       livePathEl.textContent = `配置文件：${initial.state.current.configPath}`;
     }
     bindProfileListEvents();
     bindModelConfigEvents();
   } catch (e) {
+    if (!isMountCurrent()) return;
     alert('加载 API 配置失败: ' + String(e));
     close();
   }
 }
+
 
 // ============================================================
 // 工具消息渲染系统
@@ -5186,7 +5528,7 @@ async function refreshModelInfo() {
         `
       : `
           <div class="model-info-row"><span class="model-info-key">当前模型</span><span class="model-info-value model-info-model">官方默认（Claude 订阅）</span></div>
-          <div class="model-info-empty-text">正在使用 Claude 官方登录 / 订阅。如需改用第三方 API，点击右上角「API 配置」选择并「应用」。</div>
+          <div class="model-info-empty-text">正在使用 Claude 官方登录 / 订阅。如需改用第三方 API，点击右上角「API 配置」进入配置页并「应用」。</div>
         `;
 
     container.innerHTML = `
@@ -5292,6 +5634,7 @@ async function pickNewWorkspaceDirectory(): Promise<void> {
     return;
   }
   // 完成选目录后执行创建新会话
+  dismissApiConfigViewState();
   activeConversationId = '';
   invalidateFileCache();
   pendingUserMessage = null;
@@ -5852,6 +6195,7 @@ function escapeHtml(text: string): string {
 
 // 全局函数 - 用于 HTML 模板中调用
 function selectConversation(id: string) {
+  dismissApiConfigViewState();
   activeConversationId = id;
   invalidateFileCache();
 

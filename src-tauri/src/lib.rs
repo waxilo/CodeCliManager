@@ -2068,6 +2068,260 @@ fn resolve_claude_executable() -> PathBuf {
     }
 }
 
+/// 从 `claude -v` 输出中提取版本号，例如 `2.1.138 (Claude Code)` → `2.1.138`
+fn parse_claude_version_output(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let token = trimmed
+        .split_whitespace()
+        .next()
+        .unwrap_or(trimmed)
+        .trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
+    if token.is_empty() || !token.chars().next()?.is_ascii_digit() {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+fn parse_semver_parts(version: &str) -> Option<Vec<u64>> {
+    let core = version.split('-').next().unwrap_or(version).trim();
+    if core.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    for part in core.split('.') {
+        let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            return None;
+        }
+        parts.push(digits.parse::<u64>().ok()?);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
+}
+
+fn is_version_newer(latest: &str, installed: &str) -> bool {
+    let Some(latest_parts) = parse_semver_parts(latest) else {
+        return latest != installed;
+    };
+    let Some(installed_parts) = parse_semver_parts(installed) else {
+        return true;
+    };
+    let len = latest_parts.len().max(installed_parts.len());
+    for i in 0..len {
+        let l = latest_parts.get(i).copied().unwrap_or(0);
+        let r = installed_parts.get(i).copied().unwrap_or(0);
+        if l != r {
+            return l > r;
+        }
+    }
+    false
+}
+
+fn read_installed_claude_version() -> Result<(String, String), String> {
+    let claude_bin = resolve_claude_executable();
+    let mut cmd = Command::new(&claude_bin);
+    apply_cli_runtime_env(&mut cmd);
+    cmd.arg("-v");
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("无法执行 Claude Code（{}）: {}", claude_bin.display(), e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{}\n{}", stdout, stderr);
+    let version = parse_claude_version_output(&combined).ok_or_else(|| {
+        if combined.trim().is_empty() {
+            format!(
+                "无法读取 Claude Code 版本（退出码 {}）",
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            format!("无法解析 Claude Code 版本输出: {}", combined.trim())
+        }
+    })?;
+
+    Ok((version, claude_bin.display().to_string()))
+}
+
+fn fetch_latest_claude_version() -> Result<String, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(12))
+        .user_agent("CodeCliManager")
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
+
+    let response = client
+        .get("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")
+        .send()
+        .map_err(|e| format!("查询 npm 最新版本失败: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("查询 npm 最新版本失败: HTTP {}", response.status()));
+    }
+
+    #[derive(Deserialize)]
+    struct NpmLatest {
+        version: String,
+    }
+
+    let payload: NpmLatest = response
+        .json()
+        .map_err(|e| format!("解析 npm 响应失败: {}", e))?;
+    let version = payload.version.trim().to_string();
+    if version.is_empty() {
+        return Err("npm 未返回有效版本号".to_string());
+    }
+    Ok(version)
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCodeUpdateInfo {
+    installed: Option<String>,
+    latest: Option<String>,
+    update_available: bool,
+    executable_path: Option<String>,
+    error: Option<String>,
+}
+
+/// 检查本机 Claude Code 版本与 npm 最新版
+#[tauri::command]
+fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
+    let installed_result = read_installed_claude_version();
+    let latest_result = fetch_latest_claude_version();
+
+    match (installed_result, latest_result) {
+        (Ok((installed, path)), Ok(latest)) => ClaudeCodeUpdateInfo {
+            update_available: is_version_newer(&latest, &installed),
+            installed: Some(installed),
+            latest: Some(latest),
+            executable_path: Some(path),
+            error: None,
+        },
+        (Ok((installed, path)), Err(err)) => ClaudeCodeUpdateInfo {
+            update_available: false,
+            installed: Some(installed),
+            latest: None,
+            executable_path: Some(path),
+            error: Some(err),
+        },
+        (Err(err), Ok(latest)) => ClaudeCodeUpdateInfo {
+            update_available: false,
+            installed: None,
+            latest: Some(latest),
+            executable_path: None,
+            error: Some(err),
+        },
+        (Err(installed_err), Err(latest_err)) => ClaudeCodeUpdateInfo {
+            update_available: false,
+            installed: None,
+            latest: None,
+            executable_path: None,
+            error: Some(format!("{}; {}", installed_err, latest_err)),
+        },
+    }
+}
+
+/// 在系统终端中执行 `claude update`
+#[tauri::command]
+fn open_claude_code_update_terminal() -> Result<(), String> {
+    let claude_path = resolve_claude_executable();
+    let claude_cmd = if claude_path.exists() {
+        #[cfg(target_os = "windows")]
+        {
+            format!("\"{}\"", claude_path.display())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            format!("{}", claude_path.display())
+        }
+    } else {
+        "claude".to_string()
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::io::Write;
+        use std::os::windows::process::CommandExt;
+        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+
+        let bat_content = format!(
+            "@echo off\r\necho [Claude Code] 正在检查并安装更新...\r\necho.\r\n{} update\r\necho.\r\npause\r\n",
+            claude_cmd
+        );
+        let bat_path = std::env::temp_dir().join("ccm_claude_update.bat");
+        let mut file = std::fs::File::create(&bat_path)
+            .map_err(|e| format!("创建临时脚本失败: {}", e))?;
+        file.write_all(bat_content.as_bytes())
+            .map_err(|e| format!("写入临时脚本失败: {}", e))?;
+        file.flush()
+            .map_err(|e| format!("写入临时脚本失败: {}", e))?;
+        drop(file);
+
+        std::process::Command::new("cmd")
+            .arg("/k")
+            .arg(bat_path.to_string_lossy().as_ref())
+            .creation_flags(CREATE_NEW_CONSOLE)
+            .spawn()
+            .map_err(|e| format!("启动终端失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "tell application \"Terminal\"\n  do script \"echo '[Claude Code] 正在检查并安装更新...' && {} update\"\n  activate\nend tell",
+            claude_cmd.replace('\'', "'\\''")
+        );
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .spawn()
+            .map_err(|e| format!("启动终端失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let cmd_str = format!(
+            "echo '[Claude Code] 正在检查并安装更新...'; {}; echo; exec bash",
+            claude_cmd
+        );
+        let xfce_arg = format!("bash -c {}", shell_quote_linux(&cmd_str));
+        let terminals: [(&str, Vec<&str>); 5] = [
+            ("gnome-terminal", vec!["--", "bash", "-c", &cmd_str]),
+            ("konsole", vec!["-e", "bash", "-c", &cmd_str]),
+            ("xfce4-terminal", vec!["-e", &xfce_arg]),
+            ("x-terminal-emulator", vec!["-e", "bash", "-c", &cmd_str]),
+            ("xterm", vec!["-e", "bash", "-c", &cmd_str]),
+        ];
+
+        let mut launched = false;
+        for (term, args) in &terminals {
+            if std::process::Command::new(term).args(args).spawn().is_ok() {
+                launched = true;
+                break;
+            }
+        }
+        if !launched {
+            return Err("未找到可用终端（gnome-terminal / konsole / xterm 等）".to_string());
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn shell_quote_linux(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\"'\"'"))
+}
+
 fn apply_cli_runtime_env(cmd: &mut Command) {
     cmd.env("PATH", extended_path_for_cli());
     if let Some(home) = dirs::home_dir() {
@@ -3911,6 +4165,8 @@ pub fn run() {
             import_external_path,
             open_terminal,
             open_terminal_resume,
+            check_claude_code_update,
+            open_claude_code_update_terminal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")
