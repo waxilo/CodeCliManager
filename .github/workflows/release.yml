@@ -140,16 +140,9 @@ jobs:
           copy_or_fail "$X64_TAR" "CodeCliManager-${RELEASE_TAG}-macOS-x64.app.tar.gz"
           copy_or_fail "${X64_TAR}.sig" "CodeCliManager-${RELEASE_TAG}-macOS-x64.app.tar.gz.sig"
 
-          # Windows：NSIS 安装包签名；自动更新使用 nsis.zip（或变体）更新包
+          # Windows：自动更新直接使用 NSIS setup.exe + 其签名（tauri 不生成 zip 更新包）
           WIN_SETUP_SIG="$(find_installer Windows-x64 '*-setup.exe.sig')"
           copy_or_fail "$WIN_SETUP_SIG" "CodeCliManager-${RELEASE_TAG}-Windows-x64-setup.exe.sig"
-
-          WIN_UPDATER_ZIP="$(find_installer Windows-x64 '*-setup.nsis.zip')"
-          if [ -z "$WIN_UPDATER_ZIP" ]; then
-            WIN_UPDATER_ZIP="$(find_installer Windows-x64 '*-setup.exe.zip')"
-          fi
-          copy_or_fail "$WIN_UPDATER_ZIP" "CodeCliManager-${RELEASE_TAG}-Windows-x64-update.zip"
-          copy_or_fail "${WIN_UPDATER_ZIP}.sig" "CodeCliManager-${RELEASE_TAG}-Windows-x64-update.zip.sig"
 
           ls -la release-assets/
 
@@ -190,8 +183,8 @@ jobs:
                 url: `${base}/CodeCliManager-${tag}-macOS-x64.app.tar.gz`,
               },
               'windows-x86_64': {
-                signature: read(`CodeCliManager-${tag}-Windows-x64-update.zip.sig`),
-                url: `${base}/CodeCliManager-${tag}-Windows-x64-update.zip`,
+                signature: read(`CodeCliManager-${tag}-Windows-x64-setup.exe.sig`),
+                url: `${base}/CodeCliManager-${tag}-Windows-x64-setup.exe`,
               },
             },
           };
