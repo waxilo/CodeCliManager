@@ -55,7 +55,8 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
-        run: npm run tauri build -- ${{ matrix.args }}
+        # CI 无签名私钥，临时关闭 updater 产物以避免签名失败；Release 工作流才生成并签名
+        run: npm run tauri build -- --config '{"bundle":{"createUpdaterArtifacts":false}}' ${{ matrix.args }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

@@ -2,6 +2,8 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open, save } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { getVersion } from '@tauri-apps/api/app';
+import { check as checkAppUpdateRemote, type Update as AppUpdate } from '@tauri-apps/plugin-updater';
 import { renderMarkdown as _renderMarkdown, initCodeCopyButtons, copyToClipboard as _copyToClipboard } from './markdown';
 
 /** 后端 import_external_path 返回值 */
@@ -139,6 +141,7 @@ const THEME_STORAGE_KEY = 'codemanager-theme';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'codemanager-sidebar-width';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codemanager-sidebar-collapsed';
 const CLAUDE_UPDATE_DISMISS_KEY = 'codemanager-claude-update-dismissed';
+const APP_UPDATE_DISMISS_KEY = 'codemanager-app-update-dismissed';
 const DEFAULT_SIDEBAR_WIDTH = 280;
 /** 历史默认宽度：命中这些值时视为「用户从未手动调整」，自动迁移到新默认宽度 */
 const LEGACY_DEFAULT_SIDEBAR_WIDTHS = [320, 184];
@@ -245,6 +248,36 @@ let claudeUpdateDismissedVersion: string | null = (() => {
   }
 })();
 let claudeUpdateCheckPromise: Promise<void> | null = null;
+
+type AppUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'downloading' | 'error';
+
+interface AppUpdateInfo {
+  currentVersion: string | null;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  body: string | null;
+  error: string | null;
+}
+
+/** 应用自身（CodeCliManager）的更新状态 */
+let appUpdate: AppUpdate | null = null;
+let appUpdateInfo: AppUpdateInfo = {
+  currentVersion: null,
+  latestVersion: null,
+  updateAvailable: false,
+  body: null,
+  error: null,
+};
+let appUpdateCheckStatus: AppUpdateCheckStatus = 'idle';
+let appUpdateProgress: { downloaded: number; total: number } | null = null;
+let appUpdateDismissedVersion: string | null = (() => {
+  try {
+    return localStorage.getItem(APP_UPDATE_DISMISS_KEY);
+  } catch {
+    return null;
+  }
+})();
+let appUpdateCheckPromise: Promise<void> | null = null;
 /** 新加入列表、需要播放淡入动画的会话 ID */
 const newConversationIds = new Set<string>();
 
@@ -1023,6 +1056,7 @@ async function init() {
   setupExternalLinkInterceptor();
   bindSidebarResponsive();
   void checkClaudeCodeUpdate(false);
+  void initAppUpdate();
 }
 
 function syncClaudeUpdateButtonUI() {
@@ -1196,6 +1230,7 @@ function toggleClaudeUpdatePopover() {
 
   const anchor = document.querySelector('#claude-update-btn') as HTMLElement | null;
   if (!anchor) return;
+  closeAppUpdatePopover();
 
   const overlay = document.createElement('div');
   overlay.className = 'claude-update-popover-overlay';
@@ -1223,6 +1258,298 @@ function toggleClaudeUpdatePopover() {
 
   if (!claudeUpdateInfo || claudeUpdateCheckStatus === 'idle') {
     void checkClaudeCodeUpdate(true);
+  }
+}
+
+// ── 应用自身更新（tauri-plugin-updater 拉取 GitHub Releases） ──────────
+
+function shouldShowAppUpdateBadge(): boolean {
+  if (!appUpdateInfo.updateAvailable || !appUpdateInfo.latestVersion) return false;
+  return appUpdateDismissedVersion !== appUpdateInfo.latestVersion;
+}
+
+function getAppUpdateButtonTitle(): string {
+  if (appUpdateCheckStatus === 'checking') return '正在检查应用更新…';
+  if (appUpdateCheckStatus === 'downloading') return '正在下载更新…';
+  if (shouldShowAppUpdateBadge() && appUpdateInfo.latestVersion) {
+    return `发现新版本 ${appUpdateInfo.latestVersion}`;
+  }
+  if (appUpdateInfo.currentVersion) {
+    return `当前版本 ${appUpdateInfo.currentVersion}`;
+  }
+  return '检查应用更新';
+}
+
+function renderAppUpdateIcon(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+      <polyline points="7 10 12 15 17 10"/>
+      <line x1="12" y1="15" x2="12" y2="3"/>
+    </svg>
+  `;
+}
+
+function syncAppUpdateButtonUI(): void {
+  const btn = document.querySelector('#app-update-btn') as HTMLButtonElement | null;
+  if (!btn) return;
+  const showBadge = shouldShowAppUpdateBadge();
+  const checking = appUpdateCheckStatus === 'checking';
+  const downloading = appUpdateCheckStatus === 'downloading';
+  btn.classList.toggle('has-update', showBadge);
+  btn.classList.toggle('is-checking', checking || downloading);
+  const label = btn.querySelector('.toolbar-update-btn-label');
+  if (label) label.textContent = showBadge ? '有更新' : '更新';
+  let dot = btn.querySelector('.toolbar-update-btn-dot');
+  if (showBadge && !dot) {
+    dot = document.createElement('span');
+    dot.className = 'toolbar-update-btn-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    btn.appendChild(dot);
+  } else if (!showBadge && dot) {
+    dot.remove();
+  }
+  const title = getAppUpdateButtonTitle();
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+}
+
+async function initAppUpdate(): Promise<void> {
+  try {
+    appUpdateInfo.currentVersion = await getVersion();
+  } catch {
+    /* 获取当前版本失败时保持 null，不阻塞更新检查 */
+  }
+  syncAppUpdateButtonUI();
+  void checkAppUpdate(false);
+}
+
+async function checkAppUpdate(force = false): Promise<void> {
+  if (appUpdateCheckPromise) {
+    if (!force) return appUpdateCheckPromise;
+  }
+
+  appUpdateCheckStatus = 'checking';
+  syncAppUpdateButtonUI();
+
+  appUpdateCheckPromise = (async () => {
+    try {
+      const update = await checkAppUpdateRemote();
+      appUpdate = update;
+      appUpdateInfo.latestVersion = update?.version ?? null;
+      appUpdateInfo.updateAvailable = Boolean(update);
+      appUpdateInfo.body = update?.body ?? null;
+      appUpdateInfo.error = null;
+      appUpdateCheckStatus = 'ready';
+    } catch (e) {
+      appUpdateInfo.error = String(e);
+      appUpdateCheckStatus = 'error';
+    } finally {
+      syncAppUpdateButtonUI();
+      appUpdateCheckPromise = null;
+      // 若弹层开着，刷新内容
+      const panel = document.querySelector('#app-update-popover');
+      if (panel) {
+        panel.innerHTML = renderAppUpdatePopoverBody();
+        bindAppUpdatePopoverEvents(panel);
+      }
+    }
+  })();
+
+  return appUpdateCheckPromise;
+}
+
+function dismissAppUpdateReminder(): void {
+  const latest = appUpdateInfo.latestVersion;
+  if (!latest) return;
+  appUpdateDismissedVersion = latest;
+  try {
+    localStorage.setItem(APP_UPDATE_DISMISS_KEY, latest);
+  } catch {
+    /* ignore */
+  }
+  syncAppUpdateButtonUI();
+  closeAppUpdatePopover();
+}
+
+function renderAppUpdateNotes(body: string): string {
+  const html = renderMarkdown(body);
+  return `<div class="markdown-body app-update-notes-body">${html}</div>`;
+}
+
+function renderAppUpdateProgressHtml(): string {
+  const pct = appUpdateProgress && appUpdateProgress.total > 0
+    ? Math.min(100, Math.round((appUpdateProgress.downloaded / appUpdateProgress.total) * 100))
+    : 0;
+  return `
+    <div class="app-update-progress">
+      <div class="app-update-progress-track">
+        <div class="app-update-progress-bar" style="width:${pct}%"></div>
+      </div>
+      <span class="app-update-progress-pct">${pct}%</span>
+    </div>
+  `;
+}
+
+function renderAppUpdatePopoverBody(): string {
+  const checking = appUpdateCheckStatus === 'checking';
+  const downloading = appUpdateCheckStatus === 'downloading';
+  const hasUpdate = Boolean(appUpdateInfo.updateAvailable && appUpdateInfo.latestVersion);
+  const current = appUpdateInfo.currentVersion || '—';
+  const latest = appUpdateInfo.latestVersion || '—';
+  const error = appUpdateInfo.error || '';
+
+  return `
+    <div class="claude-update-popover-header">
+      <strong>应用更新</strong>
+      <button type="button" class="claude-update-popover-close" aria-label="关闭">✕</button>
+    </div>
+    <div class="claude-update-popover-rows">
+      <div class="claude-update-row">
+        <span class="claude-update-key">当前版本</span>
+        <span class="claude-update-value">${escapeHtml(current)}</span>
+      </div>
+      <div class="claude-update-row">
+        <span class="claude-update-key">最新版本</span>
+        <span class="claude-update-value${hasUpdate ? ' is-newer' : ''}">${escapeHtml(latest)}</span>
+      </div>
+    </div>
+    ${checking ? `<p class="claude-update-popover-status">正在检查更新…</p>` : ''}
+    ${hasUpdate && appUpdateInfo.body ? renderAppUpdateNotes(appUpdateInfo.body) : ''}
+    ${downloading ? renderAppUpdateProgressHtml() : ''}
+    ${error && !downloading ? `<p class="claude-update-popover-error">${escapeHtml(error)}</p>` : ''}
+    <div class="claude-update-popover-actions">
+      <button type="button" class="claude-update-action" data-action="recheck" ${checking || downloading ? 'disabled' : ''}>
+        ${checking ? '检查中…' : '重新检查'}
+      </button>
+      ${hasUpdate && !downloading ? `
+        <button type="button" class="claude-update-action primary" data-action="install">下载并安装</button>
+        <button type="button" class="claude-update-action" data-action="dismiss">稍后提醒</button>
+      ` : ''}
+    </div>
+  `;
+}
+
+function bindAppUpdatePopoverEvents(panel: Element) {
+  panel.querySelector('.claude-update-popover-close')?.addEventListener('click', () => {
+    closeAppUpdatePopover();
+  });
+
+  panel.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.action;
+      if (action === 'recheck') {
+        void checkAppUpdate(true);
+      } else if (action === 'install') {
+        void installAppUpdate();
+      } else if (action === 'dismiss') {
+        dismissAppUpdateReminder();
+      }
+    });
+  });
+}
+
+function closeAppUpdatePopover() {
+  document.querySelector('.claude-update-popover-overlay')?.remove();
+  document.querySelector('#app-update-popover')?.remove();
+}
+
+function toggleAppUpdatePopover() {
+  if (document.querySelector('#app-update-popover')) {
+    closeAppUpdatePopover();
+    return;
+  }
+
+  const anchor = document.querySelector('#app-update-btn') as HTMLElement | null;
+  if (!anchor) return;
+  closeClaudeUpdatePopover();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'claude-update-popover-overlay';
+  overlay.addEventListener('click', closeAppUpdatePopover);
+
+  const panel = document.createElement('div');
+  panel.id = 'app-update-popover';
+  panel.className = 'claude-update-popover';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', '应用更新');
+  panel.innerHTML = renderAppUpdatePopoverBody();
+
+  document.body.appendChild(overlay);
+  document.body.appendChild(panel);
+  bindAppUpdatePopoverEvents(panel);
+
+  const rect = anchor.getBoundingClientRect();
+  const panelWidth = panel.offsetWidth || 300;
+  const left = Math.min(
+    Math.max(8, rect.right - panelWidth),
+    window.innerWidth - panelWidth - 8,
+  );
+  panel.style.top = `${rect.bottom + 6}px`;
+  panel.style.left = `${left}px`;
+
+  if (appUpdateCheckStatus === 'idle') {
+    void checkAppUpdate(true);
+  }
+}
+
+async function installAppUpdate(): Promise<void> {
+  if (!appUpdate) return;
+  appUpdateCheckStatus = 'downloading';
+  appUpdateProgress = { downloaded: 0, total: 0 };
+  syncAppUpdateButtonUI();
+  const panel = document.querySelector('#app-update-popover');
+  if (panel) {
+    panel.innerHTML = renderAppUpdatePopoverBody();
+    bindAppUpdatePopoverEvents(panel);
+  }
+
+  try {
+    await appUpdate.downloadAndInstall((event) => {
+      if (event.event === 'Started') {
+        appUpdateProgress = { downloaded: 0, total: event.data.contentLength ?? 0 };
+      } else if (event.event === 'Progress') {
+        appUpdateProgress = {
+          downloaded: (appUpdateProgress?.downloaded ?? 0) + event.data.chunkLength,
+          total: appUpdateProgress?.total ?? 0,
+        };
+      } else if (event.event === 'Finished') {
+        // 下载完成，等待安装
+      }
+      const progressPanel = document.querySelector('#app-update-popover');
+      if (progressPanel) {
+        const bar = progressPanel.querySelector('.app-update-progress-bar') as HTMLElement | null;
+        const pctEl = progressPanel.querySelector('.app-update-progress-pct') as HTMLElement | null;
+        const pct = appUpdateProgress && appUpdateProgress.total > 0
+          ? Math.min(100, Math.round((appUpdateProgress.downloaded / appUpdateProgress.total) * 100))
+          : 0;
+        if (bar) bar.style.width = `${pct}%`;
+        if (pctEl) pctEl.textContent = `${pct}%`;
+      }
+    });
+    // 安装完成，进程可能已重启；此处提示
+    showCopyToastMsg('更新已安装，应用即将重启');
+    closeAppUpdatePopover();
+  } catch (e) {
+    appUpdateCheckStatus = 'error';
+    appUpdateInfo.error = String(e);
+    const panel = document.querySelector('#app-update-popover');
+    if (panel) {
+      panel.innerHTML = renderAppUpdatePopoverBody();
+      bindAppUpdatePopoverEvents(panel);
+    }
+  } finally {
+    appUpdateProgress = null;
+    syncAppUpdateButtonUI();
+    // 释放 updater 资源（安装完成后对象已失效，忽略关闭失败）
+    if (appUpdate) {
+      try {
+        void appUpdate.close();
+      } catch {
+        /* ignore */
+      }
+      appUpdate = null;
+    }
   }
 }
 
@@ -2828,9 +3155,23 @@ function renderMcpIcon(): string {
 }
 
 function renderTitlebarActions(): string {
+  const appShowBadge = shouldShowAppUpdateBadge();
+  const appChecking = appUpdateCheckStatus === 'checking' || appUpdateCheckStatus === 'downloading';
   const showBadge = shouldShowClaudeUpdateBadge();
   const checking = claudeUpdateCheckStatus === 'checking';
   return `
+    <button
+      type="button"
+      class="toolbar-update-btn${appShowBadge ? ' has-update' : ''}${appChecking ? ' is-checking' : ''}"
+      id="app-update-btn"
+      title="${escapeHtml(getAppUpdateButtonTitle())}"
+      aria-label="${escapeHtml(getAppUpdateButtonTitle())}"
+      aria-haspopup="dialog"
+    >
+      <span class="toolbar-update-btn-icon" aria-hidden="true">${renderAppUpdateIcon()}</span>
+      <span class="toolbar-update-btn-label">${appShowBadge ? '有更新' : '更新'}</span>
+      ${appShowBadge ? '<span class="toolbar-update-btn-dot" aria-hidden="true"></span>' : ''}
+    </button>
     <button
       type="button"
       class="toolbar-update-btn${showBadge ? ' has-update' : ''}${checking ? ' is-checking' : ''}"
@@ -3459,6 +3800,9 @@ function attachEventListeners() {
   syncSidebarResponsiveState();
   syncSidebarCollapsedUI();
   document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
+  document.querySelector('#app-update-btn')?.addEventListener('click', () => {
+    toggleAppUpdatePopover();
+  });
   document.querySelector('#claude-update-btn')?.addEventListener('click', () => {
     toggleClaudeUpdatePopover();
   });

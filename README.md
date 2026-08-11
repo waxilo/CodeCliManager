@@ -21,6 +21,7 @@
 
 ### 交互体验
 
+- **⬆️ 应用自动更新** — 从 GitHub Releases 拉取新版本，右上角「更新」按钮一键下载并安装
 - **📝 Markdown 渲染** — 代码语法高亮（highlight.js），代码块一键复制
 - **📁 工作目录** — 每个会话可选择独立的工作目录，支持 @ 引用拖入文件
 - **📎 文件导入** — 拖拽或点击导入文件/文件夹到工作目录
@@ -52,6 +53,12 @@
 ### Windows
 
 从 [Releases](https://github.com/sloanwang/CodeCliManager/releases) 下载 `.msi` 或 `.exe` 安装包。
+
+### 自动更新
+
+已安装的旧版本可在应用右上角「更新」按钮检查 GitHub Releases 上的新版本，一键下载并自动安装（macOS 更新时需输入管理员密码）。
+
+> ⚠️ 自动更新依赖 Tauri updater 签名：**私钥必须作为 GitHub Actions Secrets 配置**，否则 Release 构建会在签名步骤失败。详见下方「发布新版本」。
 
 ## 🚀 开发
 
@@ -109,6 +116,25 @@ npm run tauri build
 ```
 
 会递增 patch 版本、提交、推送并打 `v*` tag；GitHub Actions 随后自动构建并创建 Release。
+
+#### 自动更新签名密钥（一次性配置）
+
+自动更新使用 Tauri updater 对安装包签名，需要一对密钥：
+
+```bash
+# 生成密钥（私钥写入 ~/.tauri/，公钥需填入 src-tauri/tauri.conf.json 的 plugins.updater.pubkey）
+npx tauri signer generate --ci -p "你的私钥密码" -w ~/.tauri/codecli-manager.key
+cat ~/.tauri/codecli-manager.key.pub
+```
+
+将私钥添加到 GitHub 仓库 Secrets（Settings → Secrets and variables → Actions）：
+
+```bash
+gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/.tauri/codecli-manager.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body "你的私钥密码"
+```
+
+> ⚠️ 私钥和密码请妥善保管，丢失后将无法再发布带自动更新的版本。
 
 ## 🏗️ 技术架构
 

@@ -60,6 +60,10 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
+        env:
+          # 生成 updater 签名产物需要私钥；未配置时打包会在签名步骤失败
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- ${{ matrix.args }}
 
       - name: Upload build artifacts
@@ -127,7 +131,76 @@ jobs:
           copy_or_fail "$WIN_MSI" "CodeCliManager-${RELEASE_TAG}-Windows-x64.msi"
           copy_or_fail "$WIN_EXE" "CodeCliManager-${RELEASE_TAG}-Windows-x64-setup.exe"
 
+          # —— updater 产物（应用内自动更新使用）——
+          # macOS：应用自动更新使用 .app.tar.gz + .sig（dmg 不参与自动更新）
+          ARM64_TAR="$(find_installer macOS-ARM64 '*.app.tar.gz')"
+          X64_TAR="$(find_installer macOS-x64 '*.app.tar.gz')"
+          copy_or_fail "$ARM64_TAR" "CodeCliManager-${RELEASE_TAG}-macOS-ARM64.app.tar.gz"
+          copy_or_fail "${ARM64_TAR}.sig" "CodeCliManager-${RELEASE_TAG}-macOS-ARM64.app.tar.gz.sig"
+          copy_or_fail "$X64_TAR" "CodeCliManager-${RELEASE_TAG}-macOS-x64.app.tar.gz"
+          copy_or_fail "${X64_TAR}.sig" "CodeCliManager-${RELEASE_TAG}-macOS-x64.app.tar.gz.sig"
+
+          # Windows：NSIS 安装包签名；自动更新使用 nsis.zip（或变体）更新包
+          WIN_SETUP_SIG="$(find_installer Windows-x64 '*-setup.exe.sig')"
+          copy_or_fail "$WIN_SETUP_SIG" "CodeCliManager-${RELEASE_TAG}-Windows-x64-setup.exe.sig"
+
+          WIN_UPDATER_ZIP="$(find_installer Windows-x64 '*-setup.nsis.zip')"
+          if [ -z "$WIN_UPDATER_ZIP" ]; then
+            WIN_UPDATER_ZIP="$(find_installer Windows-x64 '*-setup.exe.zip')"
+          fi
+          copy_or_fail "$WIN_UPDATER_ZIP" "CodeCliManager-${RELEASE_TAG}-Windows-x64-update.zip"
+          copy_or_fail "${WIN_UPDATER_ZIP}.sig" "CodeCliManager-${RELEASE_TAG}-Windows-x64-update.zip.sig"
+
           ls -la release-assets/
+
+      - name: Generate updater manifest
+        env:
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          # 变更说明：优先取附注 tag 正文，其次取被打 tag 提交的正文
+          git fetch --tags --force >/dev/null 2>&1 || true
+          CHANGELOG="$(git tag -l --format='%(contents:body)' "$RELEASE_TAG" 2>/dev/null || true)"
+          if [ -z "$CHANGELOG" ]; then
+            CHANGELOG="$(git log -1 --format=%b "$RELEASE_TAG" 2>/dev/null || true)"
+          fi
+          printf '%s' "$CHANGELOG" > .release-changelog.txt
+
+          # 用 Node 生成 latest.json，避免 bash 手工拼接 JSON 的转义问题
+          node <<'NODE'
+          const fs = require('fs');
+          const tag = process.env.RELEASE_TAG;
+          const repo = process.env.GITHUB_REPOSITORY;
+          const read = (name) => fs.readFileSync(`release-assets/${name}`, 'utf8').trim();
+          const notes = fs.readFileSync('.release-changelog.txt', 'utf8').trim();
+          const base = `https://github.com/${repo}/releases/download/${tag}`;
+          const manifest = {
+            version: tag.replace(/^v/, ''),
+            notes: notes || null,
+            pub_date: new Date().toISOString(),
+            platforms: {
+              'darwin-aarch64': {
+                signature: read(`CodeCliManager-${tag}-macOS-ARM64.app.tar.gz.sig`),
+                url: `${base}/CodeCliManager-${tag}-macOS-ARM64.app.tar.gz`,
+              },
+              'darwin-x86_64': {
+                signature: read(`CodeCliManager-${tag}-macOS-x64.app.tar.gz.sig`),
+                url: `${base}/CodeCliManager-${tag}-macOS-x64.app.tar.gz`,
+              },
+              'windows-x86_64': {
+                signature: read(`CodeCliManager-${tag}-Windows-x64-update.zip.sig`),
+                url: `${base}/CodeCliManager-${tag}-Windows-x64-update.zip`,
+              },
+            },
+          };
+          fs.writeFileSync('release-assets/latest.json', JSON.stringify(manifest, null, 2));
+          console.log('Generated release-assets/latest.json');
+          NODE
+
+          echo "--- latest.json ---"
+          cat release-assets/latest.json
 
       - name: Create GitHub Release
         env:
@@ -160,6 +233,9 @@ jobs:
             echo "### Windows"
             echo "- \`CodeCliManager-${RELEASE_TAG}-Windows-x64.msi\`"
             echo "- \`CodeCliManager-${RELEASE_TAG}-Windows-x64-setup.exe\`"
+            echo
+            echo "### 自动更新"
+            echo "已安装的旧版本可在应用右上角「更新」按钮一键下载并安装本版本。"
             echo
             echo "> 首次在 macOS 打开若提示未验证开发者，请在「系统设置 → 隐私与安全性」中允许运行。"
           } > release-notes.md
