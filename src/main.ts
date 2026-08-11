@@ -1254,7 +1254,7 @@ async function setupEventListeners() {
     // 只在会话数据已包含用户消息时才清空 pendingUserMessage
     // 同时确保只清除属于当前会话的 pending 消息（防止串会话）
     if (pendingUserMessage && pendingUserMessageConvId === payload.conversation_id && payload.messages.some(
-      (m: Message) => m.role === 'user' && m.content === pendingUserMessage
+      (m: Message) => m.role === 'user' && normalizeMessageForCompare(m.content) === normalizeMessageForCompare(pendingUserMessage)
     )) {
       pendingUserMessage = null;
       pendingUserMessageConvId = null;
@@ -1280,7 +1280,7 @@ async function setupEventListeners() {
     // （Claude CLI 仅在完成响应后才写入会话文件，首条用户消息可能不在其中）
     // 同时确保只清除属于当前会话的 pending 消息（防止串会话）
     if (pendingUserMessage && pendingUserMessageConvId === payload.conversation_id && payload.messages.some(
-      (m: Message) => m.role === 'user' && m.content === pendingUserMessage
+      (m: Message) => m.role === 'user' && normalizeMessageForCompare(m.content) === normalizeMessageForCompare(pendingUserMessage)
     )) {
       pendingUserMessage = null;
       pendingUserMessageConvId = null;
@@ -2071,7 +2071,7 @@ function renderCommandQueueInnerHtml(queueKey: string): string {
 
   const rows = items
     .map((item, index) => {
-      const preview = item.messageContent.trim() || item.prompt.trim() || '(空消息)';
+      const preview = stripFileRefTags(stripFileRefsFromDisplay(item.messageContent)).trim() || item.prompt.trim() || '(空消息)';
       return `
         <div class="command-queue-item" data-queue-id="${escapeHtml(item.id)}">
           <span class="command-queue-index">${index + 1}</span>
@@ -5841,7 +5841,7 @@ function buildDisplayMessages(conversation: Conversation | undefined): Message[]
   // 只有当 pendingUserMessage 属于当前会话时才显示（防止串会话）
   const pendingBelongsToThisConv = pendingUserMessage &&
     (pendingUserMessageConvId === activeConversationId || (!pendingUserMessageConvId && !activeConversationId));
-  if (pendingBelongsToThisConv && pendingUserMessage && !messages.some((m) => m.role === 'user' && m.content === pendingUserMessage)) {
+  if (pendingBelongsToThisConv && pendingUserMessage && !messages.some((m) => m.role === 'user' && normalizeMessageForCompare(m.content) === normalizeMessageForCompare(pendingUserMessage))) {
     messages.push({
       id: `pending-user-${Date.now()}`,
       role: 'user',
@@ -6133,8 +6133,14 @@ async function sendMessage() {
 
   // 从 prompt 中提取 @File[] 标签，剩余文本交给 resolveFileReferences 处理 @path 引用
   const fileRefTagStr = capturedImportedRefs.length > 0 ? capturedImportedRefs.join(' ') + ' ' : '';
-  // 先剥离 @File[] 标签，避免 resolveFileReferences 将其当作 @引用重复处理
-  const promptForResolve = stripFileRefTags(promptWithPaste);
+  // 先剥离 @File[] 标签与粘贴图片的 @绝对路径，避免 resolveFileReferences 将其当作 @引用重复处理
+  // （粘贴图片是「始终不解析、原样交给 CLI」的附件，由下方单独拼回 prompt）
+  let promptForResolve = stripFileRefTags(promptWithPaste);
+  for (const att of pasteRefs) {
+    const escaped = att.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    promptForResolve = promptForResolve.replace(new RegExp(`@${escaped}\\s*`, 'g'), '');
+  }
+  promptForResolve = promptForResolve.trim();
 
   const { prompt: resolvedFromAtPaths, displayPrompt, refs: fileRefs } = await resolveFileReferences(promptForResolve);
 
@@ -6145,19 +6151,18 @@ async function sendMessage() {
     }
   }
 
-  // 最终发送给 CLI 的 prompt：@File[] 标签 + resolveFileReferences 处理后的内容
-  const resolvedContent = fileRefTagStr + resolvedFromAtPaths;
+  // 最终发送给 CLI 的 prompt：粘贴图片 @绝对路径 + @File[] 标签 + resolveFileReferences 处理后的内容
+  const pasteRefStr = pasteRefs.map((a) => `@${a.path}`).join(' ');
+  const resolvedContent = [pasteRefStr, fileRefTagStr, resolvedFromAtPaths].filter(Boolean).join(' ');
 
-  // 展示用内容：剥离 @path 引用和粘贴图片引用，保留 @File[] 标签用于消息渲染
-  let displayContent = stripFileRefsFromDisplay(displayPrompt);
-  for (const att of pasteRefs) {
-    const escaped = att.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    displayContent = displayContent.replace(new RegExp(`@${escaped}\\s*`, 'g'), '');
-  }
-  displayContent = displayContent.trim();
+  // 展示用内容：剥离 @path 引用，保留 @File[] 标签用于消息渲染
+  const displayContent = stripFileRefsFromDisplay(displayPrompt).trim();
 
-  // 存储的消息内容：@File[] 标签 + 干净文字（用于持久化和渲染芯片）
-  const messageContent = (fileRefTagStr + (displayContent || '')).trim();
+  // 存储的消息内容：粘贴图片转为 @File[] 标签 + 导入文件 @File[] 标签 + 干净文字
+  // @File[] 标签可被 parseFileRefs 解析为文件芯片，并随消息内容持久化，
+  // 避免后端回传时 refs 字段丢失（Rust Message 无 refs 字段）导致图片不再展示
+  const pasteRefTagStr = pasteRefs.map((a) => `@File[${a.path}]`).join(' ');
+  const messageContent = ((pasteRefTagStr ? pasteRefTagStr + ' ' : '') + fileRefTagStr + (displayContent || '')).trim();
   const model = getActiveChatModel() || undefined;
   const queueKey = getActiveQueueKey();
   const prepared: QueuedCommand = {
@@ -6187,7 +6192,9 @@ async function executePreparedCommand(
   conversationId: string | null,
   command: QueuedCommand,
 ): Promise<void> {
-  pendingUserMessage = command.prompt;
+  // 用展示内容而非原始 prompt 作为 pending 消息，与 push 到会话的 messageContent 保持一致，
+  // 否则含粘贴图片/文件引用时两者不一致，buildDisplayMessages 的去重守卫会误判并多显示一条
+  pendingUserMessage = command.messageContent;
   pendingUserMessageConvId = conversationId;
 
   if (conversationId) {
@@ -6853,7 +6860,9 @@ async function handlePaste(e: ClipboardEvent) {
         await invoke('write_file_bytes', { filePath, data: Array.from(new Uint8Array(buf)) });
 
         const objectUrl = URL.createObjectURL(new Blob([buf], { type: item.type }));
-        pasteAttachments.push({ path: `.clipboard-uploads/${fileName}`, name: fileName, objectUrl });
+        // 保存绝对路径：prompt、消息内容与文件芯片均使用绝对路径，
+        // 避免切换会话（不同项目目录）后相对路径解析到错误位置
+        pasteAttachments.push({ path: filePath, name: fileName, objectUrl });
         renderPasteAttachmentsBar();
       } catch (e) {
         console.error('Failed to save pasted image:', e);
@@ -6925,15 +6934,35 @@ function unwrapFileRef(ref: string): string {
   return m ? m[1] : ref;
 }
 
-/** 解析文本中所有 @File[path] 引用，返回 FileRef 数组 */
+/** 解析文本中所有 @File[path] 与 @path 引用，返回 FileRef 数组 */
 function parseFileRefs(text: string): FileRef[] {
   const results: FileRef[] = [];
-  const pattern = /@File\[([^\]]+)]/g;
-  let match;
-  while ((match = pattern.exec(text)) !== null) {
-    const path = match[1];
-    results.push({ path: path.replace(/\/$/, ''), isImage: isImageFile(path) });
+  const seen = new Set<string>();
+
+  // @File[path] 标签（导入文件 / 粘贴图片的持久化形式）
+  const tagPattern = /@File\[([^\]]+)]/g;
+  let match: RegExpExecArray | null;
+  while ((match = tagPattern.exec(text)) !== null) {
+    const path = match[1].replace(/\/$/, '');
+    if (!seen.has(path)) {
+      seen.add(path);
+      results.push({ path, isImage: isImageFile(path) });
+    }
   }
+
+  // @path 形式（粘贴图片走 CLI 时以 @绝对路径 写入会话文件，如 @/abs/project/.clipboard-uploads/pasted-1.png），
+  // 路径需包含分隔符，避免把 @user、@mention 等误判为文件引用
+  const pathPattern = /@([^\s@]+[/\\][^\s@]*)/g;
+  while ((match = pathPattern.exec(text)) !== null) {
+    const raw = match[1];
+    if (raw.startsWith('File[')) continue; // @File[...] 已在上方处理
+    const path = raw.replace(/\/$/, '');
+    if (path && !seen.has(path)) {
+      seen.add(path);
+      results.push({ path, isImage: isImageFile(path) });
+    }
+  }
+
   return results;
 }
 
@@ -7242,6 +7271,21 @@ function hideFileSuggestions() {
  */
 function stripFileRefsFromDisplay(text: string): string {
   return text.replace(/@[^\s@]*[/\\][^\s@]*/g, '').replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
+ * 去重比较用归一化：剥离 @File[] 标签与 @path 文件引用，得到纯文本。
+ * 发送时展示内容（command.messageContent）与会话文件回传内容（command.prompt）
+ * 在引用形式上不一致（@File[] vs @相对路径），直接比较会误判为两条消息，
+ * 归一化后可正确识别为同一条用户消息，避免“发送两遍”的重复气泡。
+ */
+function normalizeMessageForCompare(content: string | null | undefined): string {
+  const clean = stripFileRefTags(stripFileRefsFromDisplay(content || '')).trim();
+  if (clean) return clean;
+  // 纯附件消息（如图片）无文字可比较，改用附件路径作键，
+  // 避免两条不同图片消息都被归一化为空串而误判为同一消息
+  const refs = parseFileRefs(content || '');
+  return refs.length > 0 ? refs.map((r) => r.path).sort().join('|') : '';
 }
 
 /**
