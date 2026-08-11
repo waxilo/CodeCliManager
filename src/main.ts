@@ -192,6 +192,16 @@ let isApiConfigViewActive = false;
 let apiConfigMountToken = 0;
 /** API 配置页 Escape 键监听（需在关闭时统一移除） */
 let apiConfigEscapeHandler: ((event: KeyboardEvent) => void) | null = null;
+/** 主界面是否正在展示 MCP 管理页（非弹窗） */
+let isMcpViewActive = false;
+/** 防止 MCP 页异步挂载与关闭竞态 */
+let mcpMountToken = 0;
+/** MCP 管理页 Escape 键监听（需在关闭时统一移除） */
+let mcpEscapeHandler: ((event: KeyboardEvent) => void) | null = null;
+/** 当前 MCP 服务器列表（由后端 get_mcp_servers 返回） */
+let mcpServers: McpServerEntry[] = [];
+/** MCP 配置文件路径（用于页脚展示） */
+let mcpConfigPath = '';
 
 interface ClaudeCodeUpdateInfo {
   installed: string | null;
@@ -199,6 +209,28 @@ interface ClaudeCodeUpdateInfo {
   updateAvailable: boolean;
   executablePath: string | null;
   error: string | null;
+}
+
+/** MCP 服务器配置（对应 ~/.claude.json mcpServers 中单个服务器的结构） */
+interface McpServerConfig {
+  type?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+}
+
+/** MCP 服务器列表条目 */
+interface McpServerEntry {
+  name: string;
+  config: McpServerConfig;
+  parseError?: string | null;
+}
+
+/** get_mcp_servers / upsert / delete 的返回值 */
+interface McpServersState {
+  servers: McpServerEntry[];
+  configPath: string;
 }
 
 type ClaudeUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'error';
@@ -2753,6 +2785,17 @@ function renderClaudeUpdateIcon(): string {
   `;
 }
 
+function renderMcpIcon(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="3" width="20" height="14" rx="2"/>
+      <line x1="8" y1="21" x2="16" y2="21"/>
+      <line x1="12" y1="17" x2="12" y2="21"/>
+      <path d="M7 7h2v2H7zM11 7h2v2h-2zM15 7h2v2h-2z"/>
+    </svg>
+  `;
+}
+
 function renderTitlebarActions(): string {
   const showBadge = shouldShowClaudeUpdateBadge();
   const checking = claudeUpdateCheckStatus === 'checking';
@@ -2772,6 +2815,10 @@ function renderTitlebarActions(): string {
     <button type="button" class="toolbar-settings-btn settings-btn${isApiConfigViewActive ? ' is-active' : ''}" id="settings-btn" title="管理 Claude Code API 配置" aria-label="API 配置" aria-pressed="${isApiConfigViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderApiConfigIcon()}</span>
       <span class="toolbar-settings-btn-label">API 配置</span>
+    </button>
+    <button type="button" class="toolbar-settings-btn settings-btn mcp-btn${isMcpViewActive ? ' is-active' : ''}" id="mcp-btn" title="管理 Claude Code MCP 服务器" aria-label="MCP 管理" aria-pressed="${isMcpViewActive}">
+      <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderMcpIcon()}</span>
+      <span class="toolbar-settings-btn-label">MCP</span>
     </button>
     <button type="button" class="toolbar-icon-btn theme-toggle-btn" id="theme-toggle-btn" title="${escapeHtml(getThemeToggleTitle())}" aria-label="${escapeHtml(getThemeToggleTitle())}">
       ${getThemeToggleIcon()}
@@ -2856,6 +2903,345 @@ function getSettingsProfileListEl(): HTMLElement | null {
   return document.querySelector('.settings-profile-list');
 }
 
+function renderMcpViewHtml(): string {
+  return `
+    <div class="mcp-view" id="mcp-view">
+      <div class="settings-header mcp-view-header">
+        <div>
+          <h3 class="settings-title">MCP 服务器管理</h3>
+          <p class="settings-subtitle">管理 Claude Code 用户级 MCP 服务器，配置写入 ~/.claude.json</p>
+        </div>
+        <button type="button" class="settings-close-btn" aria-label="返回聊天">✕</button>
+      </div>
+      <div class="mcp-toolbar">
+        <button type="button" class="settings-btn-primary mcp-add-btn" id="mcp-add-btn">+ 添加服务器</button>
+        <span class="mcp-config-path" title="${escapeHtml(mcpConfigPath)}">${escapeHtml(mcpConfigPath ? `配置文件：${mcpConfigPath}` : '')}</span>
+      </div>
+      <div class="mcp-list" id="mcp-list">
+        <div class="mcp-loading">加载中…</div>
+      </div>
+    </div>
+  `;
+}
+
+function openMcpView() {
+  if (isMcpViewActive) return;
+  // 两个全屏设置页互斥：打开 MCP 管理页前先退出 API 配置页
+  if (isApiConfigViewActive) {
+    dismissApiConfigViewState();
+  }
+  isMcpViewActive = true;
+  render();
+}
+
+/** 退出 MCP 管理页状态（不触发 render，供即将全量重绘的路径使用） */
+function dismissMcpViewState() {
+  if (!isMcpViewActive && !mcpEscapeHandler) return;
+  if (mcpEscapeHandler) {
+    document.removeEventListener('keydown', mcpEscapeHandler);
+    mcpEscapeHandler = null;
+  }
+  mcpMountToken += 1;
+  document.querySelector('.mcp-dialog-overlay')?.remove();
+  isMcpViewActive = false;
+}
+
+function closeMcpView() {
+  if (!isMcpViewActive) {
+    dismissMcpViewState();
+    return;
+  }
+  dismissMcpViewState();
+  render();
+}
+
+async function loadMcpServers(): Promise<void> {
+  const listEl = document.querySelector('#mcp-list');
+  if (!listEl) return;
+  listEl.innerHTML = '<div class="mcp-loading">加载中…</div>';
+  try {
+    const state = await invoke<McpServersState>('get_mcp_servers');
+    mcpServers = state.servers;
+    mcpConfigPath = state.configPath;
+    const pathEl = document.querySelector('.mcp-config-path');
+    if (pathEl) pathEl.textContent = `配置文件：${state.configPath}`;
+    renderMcpList();
+  } catch (err) {
+    listEl.innerHTML = `<div class="mcp-empty mcp-error">加载失败：${escapeHtml(String(err))}</div>`;
+  }
+}
+
+function renderMcpList(): void {
+  const listEl = document.querySelector('#mcp-list');
+  if (!listEl) return;
+  if (mcpServers.length === 0) {
+    listEl.innerHTML = `
+      <div class="mcp-empty">
+        <p class="mcp-empty-title">尚未配置任何 MCP 服务器</p>
+        <p class="mcp-empty-hint">点击上方「+ 添加服务器」创建你的第一个 MCP 服务器</p>
+      </div>
+    `;
+    return;
+  }
+  listEl.innerHTML = mcpServers.map((entry) => renderMcpServerCard(entry)).join('');
+  listEl.querySelectorAll<HTMLElement>('[data-mcp-action]').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const action = btn.dataset.mcpAction;
+      const name = btn.dataset.mcpName || '';
+      if (action === 'edit') {
+        openMcpEditorDialog(name);
+      } else if (action === 'delete') {
+        void deleteMcpServer(name);
+      }
+    });
+  });
+}
+
+function renderMcpServerCard(entry: McpServerEntry): string {
+  const config = entry.config || {};
+  const type = config.type || 'stdio';
+  const argsCount = (config.args || []).length;
+  const envCount = Object.keys(config.env || {}).length;
+  let meta = '';
+  if (type === 'stdio') {
+    meta = escapeHtml([config.command || '', ...(config.args || [])].filter(Boolean).join(' '));
+  } else {
+    meta = escapeHtml(config.url || '');
+  }
+  const badges = [
+    `<span class="mcp-badge mcp-badge-type">${escapeHtml(type)}</span>`,
+    argsCount > 0 ? `<span class="mcp-badge">${argsCount} 个参数</span>` : '',
+    envCount > 0 ? `<span class="mcp-badge">${envCount} 个环境变量</span>` : '',
+  ].filter(Boolean).join('');
+  return `
+    <div class="mcp-server-card">
+      <div class="mcp-server-main">
+        <div class="mcp-server-name-row">
+          <span class="mcp-server-name">${escapeHtml(entry.name)}</span>
+          <div class="mcp-badges">${badges}</div>
+        </div>
+        ${entry.parseError
+          ? `<p class="mcp-server-error">${escapeHtml(entry.parseError)}</p>`
+          : meta
+            ? `<p class="mcp-server-meta">${meta}</p>`
+            : '<p class="mcp-server-meta mcp-server-meta-empty">（无启动命令）</p>'}
+      </div>
+      <div class="mcp-server-actions">
+        <button type="button" class="mcp-server-btn" data-mcp-action="edit" data-mcp-name="${escapeHtml(entry.name)}" title="编辑">编辑</button>
+        <button type="button" class="mcp-server-btn danger" data-mcp-action="delete" data-mcp-name="${escapeHtml(entry.name)}" title="删除">删除</button>
+      </div>
+    </div>
+  `;
+}
+
+async function deleteMcpServer(name: string): Promise<void> {
+  const confirmed = await showConfirmDialog({
+    title: '删除 MCP 服务器',
+    message: `确定要删除「${name}」吗？`,
+    sub: '将从 ~/.claude.json 中移除该服务器配置。',
+    confirmLabel: '删除',
+  });
+  if (!confirmed) return;
+  try {
+    const state = await invoke<McpServersState>('delete_mcp_server', { name });
+    mcpServers = state.servers;
+    mcpConfigPath = state.configPath;
+    renderMcpList();
+    showCopyToastMsg('已删除');
+  } catch (err) {
+    showCopyToastMsg(`删除失败：${String(err)}`);
+  }
+}
+
+function openMcpEditorDialog(name: string | null): void {
+  const existing = document.querySelector('.mcp-dialog-overlay');
+  if (existing) existing.remove();
+
+  const isEdit = name !== null;
+  const entry = isEdit ? mcpServers.find((s) => s.name === name) : undefined;
+  const config = entry?.config || {};
+  const type = config.type || 'stdio';
+  const command = config.command || '';
+  const argsText = (config.args || []).join('\n');
+  const envText = Object.entries(config.env || {})
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n');
+  const url = config.url || '';
+
+  const overlay = document.createElement('div');
+  overlay.className = 'mcp-dialog-overlay';
+  overlay.innerHTML = `
+    <div class="mcp-dialog" role="dialog" aria-modal="true">
+      <div class="mcp-dialog-header">
+        <h3>${isEdit ? '编辑服务器' : '添加服务器'}</h3>
+        <button type="button" class="settings-close-btn mcp-dialog-close" aria-label="关闭">✕</button>
+      </div>
+      <form class="mcp-dialog-form" id="mcp-dialog-form">
+        <label class="settings-field">
+          <span>服务器名称</span>
+          <input type="text" name="name" placeholder="例如：cv-builder" value="${escapeHtml(isEdit ? entry!.name : '')}" ${isEdit ? 'readonly' : ''} required />
+        </label>
+        <label class="settings-field">
+          <span>类型</span>
+          <select name="type">
+            <option value="stdio" ${type === 'stdio' ? 'selected' : ''}>stdio（本地命令）</option>
+            <option value="sse" ${type === 'sse' ? 'selected' : ''}>sse（远程 SSE）</option>
+            <option value="http" ${type === 'http' ? 'selected' : ''}>http（流式 HTTP）</option>
+          </select>
+        </label>
+        <label class="settings-field mcp-field-stdio">
+          <span>启动命令</span>
+          <input type="text" name="command" placeholder="例如：npx" value="${escapeHtml(command)}" />
+        </label>
+        <label class="settings-field mcp-field-stdio">
+          <span>参数（每行一个）</span>
+          <textarea name="args" rows="3" placeholder="-y&#10;@waxilo/cv-mcp">${escapeHtml(argsText)}</textarea>
+        </label>
+        <label class="settings-field mcp-field-remote">
+          <span>服务器 URL</span>
+          <input type="url" name="url" placeholder="https://example.com/mcp" value="${escapeHtml(url)}" />
+        </label>
+        <details class="mcp-env-details">
+          <summary>环境变量（可选，每行一个 KEY=value）</summary>
+          <textarea name="env" rows="3" placeholder="API_KEY=sk-...">${escapeHtml(envText)}</textarea>
+        </details>
+        <div class="mcp-dialog-actions">
+          <button type="button" class="mcp-dialog-btn cancel">取消</button>
+          <button type="submit" class="mcp-dialog-btn primary">保存</button>
+        </div>
+      </form>
+    </div>
+  `;
+
+  const cleanup = () => {
+    overlay.remove();
+  };
+
+  overlay.querySelector('.mcp-dialog-close')?.addEventListener('click', cleanup);
+  overlay.querySelector('.mcp-dialog-btn.cancel')?.addEventListener('click', cleanup);
+  overlay.addEventListener('click', (event) => {
+    if (event.target === overlay) cleanup();
+  });
+
+  const typeSelect = overlay.querySelector<HTMLSelectElement>('select[name="type"]');
+  const syncTypeFields = () => {
+    const isStdio = typeSelect?.value === 'stdio';
+    overlay.querySelectorAll<HTMLElement>('.mcp-field-stdio').forEach((el) => {
+      el.style.display = isStdio ? '' : 'none';
+    });
+    overlay.querySelectorAll<HTMLElement>('.mcp-field-remote').forEach((el) => {
+      el.style.display = isStdio ? 'none' : '';
+    });
+  };
+  typeSelect?.addEventListener('change', syncTypeFields);
+  syncTypeFields();
+
+  overlay.querySelector<HTMLFormElement>('#mcp-dialog-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.currentTarget as HTMLFormElement;
+    const fd = new FormData(form);
+    const serverName = String(fd.get('name') || '').trim();
+    if (!serverName) {
+      showCopyToastMsg('请填写服务器名称');
+      return;
+    }
+    const serverType = String(fd.get('type') || 'stdio');
+    const cmd = String(fd.get('command') || '').trim();
+    const argsRaw = String(fd.get('args') || '').trim();
+    const urlRaw = String(fd.get('url') || '').trim();
+    const envRaw = String(fd.get('env') || '').trim();
+
+    const args = argsRaw ? argsRaw.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+    const env: Record<string, string> = {};
+    if (envRaw) {
+      for (const line of envRaw.split('\n')) {
+        const idx = line.indexOf('=');
+        if (idx <= 0) continue;
+        const key = line.slice(0, idx).trim();
+        const value = line.slice(idx + 1).trim();
+        if (key) env[key] = value;
+      }
+    }
+
+    const config: McpServerConfig = { type: serverType, args, env };
+    if (serverType === 'stdio') {
+      if (!cmd) {
+        showCopyToastMsg('请填写启动命令');
+        return;
+      }
+      config.command = cmd;
+    } else {
+      if (!urlRaw) {
+        showCopyToastMsg('请填写服务器 URL');
+        return;
+      }
+      config.url = urlRaw;
+    }
+
+    const saveBtn = overlay.querySelector('.mcp-dialog-btn.primary') as HTMLButtonElement;
+    saveBtn.disabled = true;
+    saveBtn.textContent = '保存中…';
+    try {
+      const state = await invoke<McpServersState>('upsert_mcp_server', {
+        name: serverName,
+        config,
+      });
+      mcpServers = state.servers;
+      mcpConfigPath = state.configPath;
+      renderMcpList();
+      cleanup();
+      showCopyToastMsg(isEdit ? '已保存' : '已添加');
+    } catch (err) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = '保存';
+      showCopyToastMsg(`保存失败：${String(err)}`);
+    }
+  });
+
+  document.body.appendChild(overlay);
+  const nameInput = overlay.querySelector<HTMLInputElement>('input[name="name"]');
+  if (nameInput && !isEdit) nameInput.focus();
+}
+
+async function mountMcpView() {
+  const view = document.querySelector('#mcp-view');
+  if (!view || !isMcpViewActive) return;
+
+  const mountToken = ++mcpMountToken;
+  const isMountCurrent = () => mountToken === mcpMountToken && isMcpViewActive;
+
+  const close = () => closeMcpView();
+
+  const onEscapeKey = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return;
+    if (!isMountCurrent()) return;
+    // 确认框打开时交由确认框处理（删除确认）
+    if (document.querySelector('.confirm-overlay')) {
+      return;
+    }
+    const dialog = document.querySelector('.mcp-dialog-overlay');
+    if (dialog) {
+      dialog.remove();
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    close();
+  };
+
+  if (mcpEscapeHandler) {
+    document.removeEventListener('keydown', mcpEscapeHandler);
+  }
+  mcpEscapeHandler = onEscapeKey;
+  document.addEventListener('keydown', onEscapeKey);
+
+  view.querySelector('.settings-close-btn')?.addEventListener('click', close);
+  view.querySelector('#mcp-add-btn')?.addEventListener('click', () => openMcpEditorDialog(null));
+
+  await loadMcpServers();
+}
+
 function render() {
   app.innerHTML = `
     <div class="app-shell">
@@ -2878,9 +3264,9 @@ function render() {
           ${renderTitlebarActions()}
         </div>
       </header>
-      <div class="app-container${isSidebarCollapsed ? ' is-sidebar-collapsed' : ''}${isApiConfigViewActive ? ' is-api-config' : ''}">
+      <div class="app-container${isSidebarCollapsed ? ' is-sidebar-collapsed' : ''}${isApiConfigViewActive ? ' is-api-config' : isMcpViewActive ? ' is-mcp' : ''}">
       <div class="sidebar${isApiConfigViewActive ? ' is-api-config' : ''}">
-        ${isApiConfigViewActive ? renderApiConfigSidebarHtml() : `
+        ${isApiConfigViewActive ? renderApiConfigSidebarHtml() : isMcpViewActive ? '' : `
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
             <div class="new-chat-btn-wrapper">
@@ -2928,8 +3314,8 @@ function render() {
         aria-orientation="vertical"
         aria-label="调整侧边栏宽度"
       ></div>
-      <div class="main-content${isApiConfigViewActive ? ' is-api-config' : ''}">
-        ${isApiConfigViewActive ? renderApiConfigViewHtml() : `
+      <div class="main-content${isApiConfigViewActive ? ' is-api-config' : isMcpViewActive ? ' is-mcp' : ''}">
+        ${isApiConfigViewActive ? renderApiConfigViewHtml() : isMcpViewActive ? renderMcpViewHtml() : `
         <div class="drop-zone-overlay" id="drop-zone-overlay">
           <div class="drop-zone-content">
             <div class="drop-zone-icon" aria-hidden="true">
@@ -3052,9 +3438,20 @@ function attachEventListeners() {
       openApiConfigView();
     }
   });
+  document.querySelector('#mcp-btn')?.addEventListener('click', () => {
+    if (isMcpViewActive) {
+      closeMcpView();
+    } else {
+      openMcpView();
+    }
+  });
 
   if (isApiConfigViewActive) {
     void mountApiConfigView();
+  }
+
+  if (isMcpViewActive) {
+    void mountMcpView();
   }
 
   // 拖拽文件自动引用（API 配置页无输入区，跳过）
@@ -3725,6 +4122,10 @@ async function refreshSettingsModal(
 
 function openApiConfigView() {
   if (isApiConfigViewActive) return;
+  // 两个全屏设置页互斥：打开 API 配置前先退出 MCP 管理页
+  if (isMcpViewActive) {
+    dismissMcpViewState();
+  }
   // 配置列表在左侧栏，收起时先展开以免看不见
   if (isSidebarCollapsed) {
     setSidebarCollapsed(false);

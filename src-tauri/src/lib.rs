@@ -273,6 +273,165 @@ fn write_claude_settings_json(settings: &serde_json::Value) -> Result<(), String
     fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))
 }
 
+// ── MCP 服务器管理（用户级配置位于 ~/.claude.json 的 mcpServers 字段） ─────
+
+fn get_claude_global_config_path() -> PathBuf {
+    let mut path = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    path.push(".claude.json");
+    path
+}
+
+fn read_claude_global_config() -> serde_json::Value {
+    let path = get_claude_global_config_path();
+    if !path.exists() {
+        return serde_json::json!({});
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+fn write_claude_global_config(config: &serde_json::Value) -> Result<(), String> {
+    let path = get_claude_global_config_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
+    }
+    let content =
+        serde_json::to_string_pretty(config).map_err(|e| format!("Failed to encode config: {e}"))?;
+    fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct McpServerConfig {
+    #[serde(rename = "type", default)]
+    server_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    url: Option<String>,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        McpServerConfig {
+            server_type: "stdio".to_string(),
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            url: None,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct McpServerEntry {
+    name: String,
+    config: McpServerConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parse_error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServersState {
+    servers: Vec<McpServerEntry>,
+    config_path: String,
+}
+
+fn build_mcp_servers_state() -> McpServersState {
+    let global = read_claude_global_config();
+    let mut servers = Vec::new();
+    if let Some(map) = global.get("mcpServers").and_then(|v| v.as_object()) {
+        for (name, value) in map {
+            let entry = match serde_json::from_value::<McpServerConfig>(value.clone()) {
+                Ok(config) => McpServerEntry {
+                    name: name.clone(),
+                    config,
+                    parse_error: None,
+                },
+                Err(_) => McpServerEntry {
+                    name: name.clone(),
+                    config: McpServerConfig::default(),
+                    parse_error: Some("无法解析该服务器配置（格式不受支持）".to_string()),
+                },
+            };
+            servers.push(entry);
+        }
+    }
+    servers.sort_by(|a, b| a.name.cmp(&b.name));
+    McpServersState {
+        servers,
+        config_path: get_claude_global_config_path().display().to_string(),
+    }
+}
+
+#[tauri::command]
+fn get_mcp_servers() -> McpServersState {
+    build_mcp_servers_state()
+}
+
+#[tauri::command]
+fn upsert_mcp_server(name: String, config: McpServerConfig) -> Result<McpServersState, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("服务器名称不能为空".to_string());
+    }
+    // 归一化：stdio 只保留 command，远程类型只保留 url
+    let mut config = config;
+    if config.server_type == "stdio" {
+        config.url = None;
+        if config.command.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            config.command = None;
+        }
+    } else {
+        config.command = None;
+        if config.url.as_deref().map(str::trim).unwrap_or("").is_empty() {
+            config.url = None;
+        }
+    }
+    let mut global = read_claude_global_config();
+    if !global.is_object() {
+        global = serde_json::json!({});
+    }
+    let obj = global
+        .as_object_mut()
+        .ok_or_else(|| "配置文件格式异常".to_string())?;
+    let servers = obj
+        .entry("mcpServers")
+        .or_insert_with(|| serde_json::json!({}));
+    let map = servers
+        .as_object_mut()
+        .ok_or_else(|| "mcpServers 配置格式异常".to_string())?;
+    let value =
+        serde_json::to_value(config).map_err(|e| format!("配置序列化失败: {e}"))?;
+    map.insert(trimmed.to_string(), value);
+    write_claude_global_config(&global)?;
+    Ok(build_mcp_servers_state())
+}
+
+#[tauri::command]
+fn delete_mcp_server(name: String) -> Result<McpServersState, String> {
+    let mut global = read_claude_global_config();
+    if !global.is_object() {
+        return Ok(build_mcp_servers_state());
+    }
+    let obj = global
+        .as_object_mut()
+        .ok_or_else(|| "配置文件格式异常".to_string())?;
+    if let Some(map) = obj.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+        map.remove(&name);
+    }
+    write_claude_global_config(&global)?;
+    Ok(build_mcp_servers_state())
+}
+
 fn env_string(env: &serde_json::Map<String, serde_json::Value>, key: &str) -> String {
     env.get(key)
         .and_then(|value| value.as_str())
@@ -4158,6 +4317,9 @@ pub fn run() {
             delete_api_profile,
             import_cc_switch_profiles,
             fetch_api_models,
+            get_mcp_servers,
+            upsert_mcp_server,
+            delete_mcp_server,
             list_project_files,
             read_file_content,
             write_file_bytes,
