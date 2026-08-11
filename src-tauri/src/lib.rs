@@ -4305,16 +4305,26 @@ const KIRO_DEFAULT_MODEL: &str = "claude-opus-5";
 
 pub struct KiroProxyState {
     inner: Arc<Mutex<Option<kiro::server::ProxyHandle>>>,
-    key: Mutex<Option<String>>,
-    port: Mutex<Option<u16>>,
+    key: Arc<Mutex<Option<String>>>,
+    port: Arc<Mutex<Option<u16>>>,
+}
+
+impl Clone for KiroProxyState {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+            key: Arc::clone(&self.key),
+            port: Arc::clone(&self.port),
+        }
+    }
 }
 
 impl Default for KiroProxyState {
     fn default() -> Self {
         Self {
             inner: Arc::new(Mutex::new(None)),
-            key: Mutex::new(None),
-            port: Mutex::new(None),
+            key: Arc::new(Mutex::new(None)),
+            port: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -4330,7 +4340,7 @@ struct KiroStatus {
     profile_arn: Option<String>,
 }
 
-fn build_kiro_status(state: &tauri::State<'_, KiroProxyState>) -> KiroStatus {
+fn build_kiro_status_from(state: &KiroProxyState) -> KiroStatus {
     let running = state.inner.lock().map(|inner| inner.is_some()).unwrap_or(false);
     let port = state.port.lock().ok().and_then(|p| *p);
     let has_key = state.key.lock().map(|k| k.is_some()).unwrap_or(false);
@@ -4348,6 +4358,10 @@ fn build_kiro_status(state: &tauri::State<'_, KiroProxyState>) -> KiroStatus {
         expires_at: auth.get_sso_token_expiry(),
         profile_arn: auth.get_sso_profile_arn(),
     }
+}
+
+fn build_kiro_status(state: &tauri::State<'_, KiroProxyState>) -> KiroStatus {
+    build_kiro_status_from(state)
 }
 
 /// 创建或更新名为「Kiro」的 API profile 并激活它。
@@ -4395,19 +4409,19 @@ fn ensure_kiro_profile(port: u16, api_key: &str, default_model: &str) -> Result<
     Ok(build_api_profiles_state(&store))
 }
 
-/// 查询 Kiro 反代状态。
-#[tauri::command]
-fn kiro_status(state: tauri::State<'_, KiroProxyState>) -> KiroStatus {
-    build_kiro_status(&state)
+/// 本地是否已有 Kiro SSO 凭据文件（快速判断，不发起网络请求）。
+fn has_kiro_credential_file() -> bool {
+    kiro_sso_cache_dir().join("kiro-auth-token.json").is_file()
 }
 
-/// 启动 Kiro 反代代理并自动接入 Claude Code。
-#[tauri::command]
-fn kiro_start(
-    state: tauri::State<'_, KiroProxyState>,
-    port: Option<u16>,
-) -> Result<KiroStatus, String> {
-    // 先停掉已有的代理
+/// 启动 Kiro 反代核心逻辑（命令与自动启动共用）。
+fn start_kiro_proxy(state: &KiroProxyState, port: Option<u16>) -> Result<KiroStatus, String> {
+    // 已在运行则直接返回当前状态
+    if state.inner.lock().map(|inner| inner.is_some()).unwrap_or(false) {
+        return Ok(build_kiro_status_from(state));
+    }
+
+    // 先停掉已有的代理（防御性清理）
     if let Some(mut existing) = state.inner.lock().map_err(|_| "lock failed".to_string())?.take() {
         existing.stop();
     }
@@ -4461,7 +4475,135 @@ fn kiro_start(
         eprintln!("[kiro] profile setup failed: {e}");
     }
 
-    Ok(build_kiro_status(&state))
+    // 启动后从反代 /v1/models 拉取可用模型，写入 Kiro profile 展示列表
+    match sync_kiro_profile_models(actual_port, &key) {
+        Ok(ids) => {
+            eprintln!("[kiro] synced {} models after start", ids.len());
+        }
+        Err(e) => {
+            eprintln!("[kiro] sync models after start failed: {e}");
+        }
+    }
+
+    Ok(build_kiro_status_from(state))
+}
+
+/// 从本地 Kiro 反代拉取模型 ID 列表。
+fn fetch_kiro_proxy_model_ids(port: u16, api_key: &str) -> Result<Vec<String>, String> {
+    let url = format!("http://127.0.0.1:{port}/v1/models");
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(45))
+        .build()
+        .map_err(|e| format!("创建 HTTP 客户端失败: {e}"))?;
+
+    let mut last_err = String::from("unknown");
+    // 代理线程刚起来或上游 ListAvailableModels 较慢时，短暂重试
+    for attempt in 1..=4u32 {
+        match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {api_key}"))
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+        {
+            Ok(response) => {
+                let status = response.status();
+                if !status.is_success() {
+                    let body = response.text().unwrap_or_default();
+                    last_err = format!("HTTP {status}: {body}");
+                } else {
+                    let data: serde_json::Value = response
+                        .json()
+                        .map_err(|e| format!("解析模型列表失败: {e}"))?;
+                    let mut ids: Vec<String> = data
+                        .get("data")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|item| item.get("id").and_then(|v| v.as_str()))
+                                .map(|s| s.trim().to_string())
+                                .filter(|s| !s.is_empty())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    ids.sort();
+                    ids.dedup();
+                    if ids.is_empty() {
+                        last_err = "模型列表为空".to_string();
+                    } else {
+                        return Ok(ids);
+                    }
+                }
+            }
+            Err(e) => {
+                last_err = e.to_string();
+            }
+        }
+        if attempt < 4 {
+            thread::sleep(Duration::from_millis(400 * u64::from(attempt)));
+        }
+    }
+    Err(format!("拉取 Kiro 模型失败: {last_err}"))
+}
+
+/// 把反代返回的模型写入名为「Kiro」的 profile.display_models。
+fn sync_kiro_profile_models(port: u16, api_key: &str) -> Result<Vec<String>, String> {
+    let ids = fetch_kiro_proxy_model_ids(port, api_key)?;
+    let mut store = load_api_profiles_store();
+    let Some(profile) = store.profiles.iter_mut().find(|p| p.name == "Kiro") else {
+        return Err("未找到 Kiro profile".to_string());
+    };
+    profile.display_models = ids.clone();
+    // 若当前默认模型不在列表里，切到第一个可用模型
+    if !ids.is_empty() && !ids.iter().any(|id| id == &profile.default_model) {
+        let first = ids[0].clone();
+        profile.default_model = first.clone();
+        profile.haiku_model = first.clone();
+        profile.sonnet_model = first.clone();
+        profile.opus_model = first;
+    }
+    profile.updated_at = chrono::Utc::now().timestamp();
+    let profile_snapshot = profile.clone();
+    apply_save_config_to_settings(&profile_to_save_config(&profile_snapshot))?;
+    save_api_profiles_store(&store)?;
+    Ok(ids)
+}
+
+/// 后台检测本地 Kiro 凭据，存在则自动启动反代（不阻塞 UI）。
+fn spawn_kiro_autostart(app: AppHandle, state: KiroProxyState) {
+    thread::spawn(move || {
+        if !has_kiro_credential_file() {
+            eprintln!("[kiro] autostart skipped: no credential file");
+            return;
+        }
+        match start_kiro_proxy(&state, None) {
+            Ok(status) => {
+                eprintln!(
+                    "[kiro] autostart ok: running={} port={:?}",
+                    status.running, status.port
+                );
+                let _ = app.emit("kiro-ready", &status);
+            }
+            Err(e) => {
+                eprintln!("[kiro] autostart failed: {e}");
+            }
+        }
+    });
+}
+
+/// 查询 Kiro 反代状态。
+#[tauri::command]
+fn kiro_status(state: tauri::State<'_, KiroProxyState>) -> KiroStatus {
+    build_kiro_status(&state)
+}
+
+/// 启动 Kiro 反代代理并自动接入 Claude Code。
+#[tauri::command]
+fn kiro_start(
+    state: tauri::State<'_, KiroProxyState>,
+    port: Option<u16>,
+) -> Result<KiroStatus, String> {
+    start_kiro_proxy(&state, port)
 }
 
 /// 停止 Kiro 反代代理。
@@ -4485,6 +4627,8 @@ pub fn run() {
         .setup(|app| {
             updater_manifest::start_updater_manifest_proxy();
             apply_responsive_window_size(app);
+            let kiro_state = app.state::<KiroProxyState>().inner().clone();
+            spawn_kiro_autostart(app.handle().clone(), kiro_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

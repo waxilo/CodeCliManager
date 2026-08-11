@@ -1069,6 +1069,46 @@ async function init() {
   bindSidebarResponsive();
   void checkClaudeCodeUpdate(false);
   void initAppUpdate();
+  void setupKiroAutostartListener();
+}
+
+/** Kiro 后台自动启动并同步模型后，刷新前端状态与模型选择器 */
+async function setupKiroAutostartListener(): Promise<void> {
+  try {
+    await listen<KiroStatusData>('kiro-ready', async (event) => {
+      renderKiroCard(event.payload);
+      try {
+        await loadChatModelOptions();
+      } catch (e) {
+        console.error('[kiro] 自动启动后刷新模型失败:', e);
+      }
+      // 若 API 配置页正开着，顺带刷新表单里的模型与 Kiro 卡片
+      const overlay = document.querySelector('#api-config-view') as HTMLElement | null;
+      if (overlay && isApiConfigViewActive) {
+        try {
+          await refreshKiroStatus();
+          const state = await invoke<ApiProfilesState>('get_api_profiles_state');
+          const kiroId =
+            state.profiles.find((p) => p.name === 'Kiro')?.id || state.activeProfileId || null;
+          await refreshSettingsModal(overlay, kiroId);
+        } catch (e) {
+          console.error('[kiro] 自动启动后刷新设置页失败:', e);
+        }
+      }
+    });
+    // 若自动启动已先于监听完成，补一次刷新
+    try {
+      const status = await invoke<KiroStatusData>('kiro_status');
+      if (status.running) {
+        renderKiroCard(status);
+        await loadChatModelOptions();
+      }
+    } catch {
+      // ignore
+    }
+  } catch (e) {
+    console.error('[kiro] 注册自动启动监听失败:', e);
+  }
 }
 
 function syncClaudeUpdateButtonUI() {
