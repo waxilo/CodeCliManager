@@ -32,7 +32,11 @@
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM5ODk2NEJDRDE4RThFQTQKUldTa2pvN1J2R1NKT1V0bTltQnRMSHNQempVdzFIdVN0Ym1Gd0d4aDBxdW1MVWJhRTVSVmlwNzEK",
+      "dangerousInsecureTransportProtocol": true,
       "endpoints": [
+        "http://127.0.0.1:47865/latest.json",
+        "https://ghfast.top/https://github.com/waxilo/CodeCliManager/releases/latest/download/latest.json",
+        "https://gh-proxy.com/https://github.com/waxilo/CodeCliManager/releases/latest/download/latest.json",
         "https://github.com/waxilo/CodeCliManager/releases/latest/download/latest.json"
       ]
     }

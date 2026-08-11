@@ -130,6 +130,16 @@ interface CcSwitchImportResult {
   state: ApiProfilesState;
 }
 
+/** 后端 kiro_status 返回值（字段与 Rust KiroStatus 一一对应） */
+interface KiroStatusData {
+  running: boolean;
+  port: number | null;
+  hasKey: boolean;
+  authSource: string;
+  expiresAt: string | null;
+  profileArn: string | null;
+}
+
 interface FetchedModel {
   id: string;
   ownedBy?: string | null;
@@ -195,6 +205,8 @@ let isApiConfigViewActive = false;
 let apiConfigMountToken = 0;
 /** API 配置页 Escape 键监听（需在关闭时统一移除） */
 let apiConfigEscapeHandler: ((event: KeyboardEvent) => void) | null = null;
+/** Kiro 反代代理状态（由后端 kiro_status 返回） */
+let kiroStatus: KiroStatusData | null = null;
 /** 主界面是否正在展示 MCP 管理页（非弹窗） */
 let isMcpViewActive = false;
 /** 防止 MCP 页异步挂载与关闭竞态 */
@@ -1334,7 +1346,8 @@ async function checkAppUpdate(force = false): Promise<void> {
 
   appUpdateCheckPromise = (async () => {
     try {
-      const update = await checkAppUpdateRemote();
+      // 本机清单代理会改写 GitHub 下载地址为镜像；超时放宽避免慢网误判
+      const update = await checkAppUpdateRemote({ timeout: 60_000 });
       appUpdate = update;
       appUpdateInfo.latestVersion = update?.version ?? null;
       appUpdateInfo.updateAvailable = Boolean(update);
@@ -1342,7 +1355,11 @@ async function checkAppUpdate(force = false): Promise<void> {
       appUpdateInfo.error = null;
       appUpdateCheckStatus = 'ready';
     } catch (e) {
-      appUpdateInfo.error = String(e);
+      const raw = String(e);
+      const timedOut = /timed?\s*out|timeout|连接超时|error sending request/i.test(raw);
+      appUpdateInfo.error = timedOut
+        ? `检查更新超时（无法访问 GitHub Releases）。请确认网络或稍后重试。\n${raw}`
+        : raw;
       appUpdateCheckStatus = 'error';
     } finally {
       syncAppUpdateButtonUI();
@@ -1526,13 +1543,17 @@ async function installAppUpdate(): Promise<void> {
         if (bar) bar.style.width = `${pct}%`;
         if (pctEl) pctEl.textContent = `${pct}%`;
       }
-    });
+    }, { timeout: 300_000 });
     // 安装完成，进程可能已重启；此处提示
     showCopyToastMsg('更新已安装，应用即将重启');
     closeAppUpdatePopover();
   } catch (e) {
     appUpdateCheckStatus = 'error';
-    appUpdateInfo.error = String(e);
+    const raw = String(e);
+    const timedOut = /timed?\s*out|timeout|连接超时|error sending request/i.test(raw);
+    appUpdateInfo.error = timedOut
+      ? `下载更新超时。请检查网络后重试。\n${raw}`
+      : raw;
     const panel = document.querySelector('#app-update-popover');
     if (panel) {
       panel.innerHTML = renderAppUpdatePopoverBody();
@@ -3260,6 +3281,22 @@ function renderApiConfigViewHtml(): string {
         <p class="settings-model-config-hint">配置展示模型与自定义模型列表，点击输入框管理</p>
         <p class="settings-path settings-live-path"></p>
       </form>
+      <section class="kiro-card" id="kiro-card">
+        <div class="kiro-card-head">
+          <div class="kiro-card-title-wrap">
+            <span class="kiro-card-badge">Kiro</span>
+            <span class="kiro-card-status" data-kiro-status="unknown">检测中…</span>
+          </div>
+          <button type="button" class="settings-btn-primary kiro-toggle-btn" data-kiro-running="false" disabled>启动</button>
+        </div>
+        <div class="kiro-card-body">
+          <div class="kiro-card-row"><span class="kiro-card-label">代理地址</span><code class="kiro-card-value" data-kiro-port>未运行</code></div>
+          <div class="kiro-card-row"><span class="kiro-card-label">凭据来源</span><span class="kiro-card-value" data-kiro-auth>—</span></div>
+          <div class="kiro-card-row"><span class="kiro-card-label">Token 过期</span><span class="kiro-card-value" data-kiro-expires>—</span></div>
+          <div class="kiro-card-row kiro-card-row-profile"><span class="kiro-card-label">Profile ARN</span><span class="kiro-card-value kiro-card-value-arn" data-kiro-arn>—</span></div>
+        </div>
+        <p class="kiro-card-hint">将本地代理暴露为 Anthropic API，配合 Kiro IDE 免费额度的 Claude 使用；开关仅影响本机代理，不影响上方 API 配置。</p>
+      </section>
       <div class="settings-footer">
         <div class="settings-footer-actions">
           <button type="button" class="settings-btn-secondary settings-apply-profile">应用</button>
@@ -4535,6 +4572,108 @@ function closeApiConfigView() {
   }
 }
 
+function formatKiroExpiry(expiresAt: string | null): string {
+  if (!expiresAt) return '—';
+  const ms = Date.parse(expiresAt);
+  if (Number.isNaN(ms)) return expiresAt;
+  const remaining = ms - Date.now();
+  if (remaining <= 0) return '已过期';
+  const minutes = Math.floor(remaining / 60000);
+  if (minutes < 60) return `${minutes} 分钟后`;
+  const hours = Math.floor(minutes / 60);
+  const leftMin = minutes % 60;
+  return `${hours} 小时${leftMin > 0 ? ` ${leftMin} 分` : ''}后`;
+}
+
+/** 把后端 kiro_status 结果渲染到卡片 DOM（无卡片时仅更新全局状态） */
+function renderKiroCard(status: KiroStatusData | null) {
+  kiroStatus = status;
+  const card = document.querySelector('#kiro-card');
+  if (!card || !status) return;
+
+  const statusEl = card.querySelector('[data-kiro-status]') as HTMLElement | null;
+  const toggleBtn = card.querySelector('.kiro-toggle-btn') as HTMLButtonElement | null;
+  const portEl = card.querySelector('[data-kiro-port]') as HTMLElement | null;
+  const authEl = card.querySelector('[data-kiro-auth]') as HTMLElement | null;
+  const expiresEl = card.querySelector('[data-kiro-expires]') as HTMLElement | null;
+  const arnEl = card.querySelector('[data-kiro-arn]') as HTMLElement | null;
+
+  if (statusEl) {
+    if (status.running) {
+      statusEl.textContent = '运行中';
+      statusEl.dataset.kiroStatus = 'running';
+    } else {
+      statusEl.textContent = '已停止';
+      statusEl.dataset.kiroStatus = 'stopped';
+    }
+  }
+
+  if (toggleBtn) {
+    toggleBtn.dataset.kiroRunning = status.running ? 'true' : 'false';
+    toggleBtn.textContent = status.running ? '停止' : '启动';
+    toggleBtn.disabled = false;
+  }
+
+  if (portEl) {
+    portEl.textContent = status.running && status.port != null ? `http://127.0.0.1:${status.port}` : '未运行';
+  }
+  if (authEl) {
+    authEl.textContent = status.authSource || '—';
+  }
+  if (expiresEl) {
+    expiresEl.textContent = formatKiroExpiry(status.expiresAt);
+  }
+  if (arnEl) {
+    arnEl.textContent = status.profileArn || '—';
+    arnEl.title = status.profileArn || '';
+  }
+}
+
+async function refreshKiroStatus(): Promise<void> {
+  try {
+    const status = await invoke<KiroStatusData>('kiro_status');
+    renderKiroCard(status);
+  } catch (e) {
+    console.error('获取 Kiro 状态失败:', e);
+  }
+}
+
+async function toggleKiroProxy(overlay: HTMLElement): Promise<void> {
+  const btn = overlay.querySelector('.kiro-toggle-btn') as HTMLButtonElement | null;
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '处理中…';
+  }
+  try {
+    if (kiroStatus?.running) {
+      await invoke<KiroStatusData>('kiro_stop');
+    } else {
+      await invoke<KiroStatusData>('kiro_start', { port: null });
+    }
+    await refreshKiroStatus();
+    // 启动成功后代理已写入 Kiro profile 并激活，把表单与左侧列表切到 Kiro 配置
+    if (kiroStatus?.running) {
+      const state = await invoke<ApiProfilesState>('get_api_profiles_state');
+      const kiroId = state.profiles.find((p) => p.name === 'Kiro')?.id || state.activeProfileId || null;
+      const refreshed = await refreshSettingsModal(overlay, kiroId);
+      const pathEl = overlay.querySelector('.settings-live-path') as HTMLElement | null;
+      if (pathEl) {
+        pathEl.textContent = `配置文件：${refreshed.state.current.configPath}`;
+      }
+      await loadChatModelOptions();
+    }
+  } catch (e) {
+    console.error('切换 Kiro 代理失败:', e);
+    alert('Kiro 代理操作失败: ' + String(e));
+    await refreshKiroStatus();
+  } finally {
+    const currentBtn = overlay.querySelector('.kiro-toggle-btn') as HTMLButtonElement | null;
+    if (currentBtn) {
+      currentBtn.disabled = false;
+    }
+  }
+}
+
 async function mountApiConfigView() {
   const overlay = document.querySelector('#api-config-view') as HTMLElement | null;
   if (!overlay || !isApiConfigViewActive) return;
@@ -5601,6 +5740,10 @@ async function mountApiConfigView() {
     }
   });
 
+  overlay.querySelector('.kiro-toggle-btn')?.addEventListener('click', () => {
+    void toggleKiroProxy(overlay);
+  });
+
   try {
     if (!isMountCurrent()) return;
     const initial = await refreshSettingsModal(overlay, null, handleProfileConfigLoaded);
@@ -5610,6 +5753,8 @@ async function mountApiConfigView() {
     }
     bindProfileListEvents();
     bindModelConfigEvents();
+    // 填充 Kiro 卡片状态（放在绑定事件之后，避免异步返回时覆盖按钮状态）
+    await refreshKiroStatus();
   } catch (e) {
     if (!isMountCurrent()) return;
     alert('加载 API 配置失败: ' + String(e));

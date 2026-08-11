@@ -3592,6 +3592,93 @@ body.is-sidebar-resizing {
   margin-left: 0;
 }
 
+/* Kiro 反代卡片 */
+.kiro-card {
+  margin-top: 16px;
+  padding: 14px 16px;
+  max-width: 640px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 10px;
+  background: var(--color-bg-surface);
+  flex-shrink: 0;
+}
+
+.kiro-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kiro-card-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kiro-card-badge {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--color-accent-ring, color-mix(in srgb, var(--color-accent) 14%, transparent));
+  color: var(--color-accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.kiro-card-status {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.kiro-card-status[data-kiro-status='running'] {
+  color: #3fb950;
+}
+
+.kiro-card-status[data-kiro-status='stopped'] {
+  color: var(--color-text-muted);
+}
+
+.kiro-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.kiro-card-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.kiro-card-label {
+  flex-shrink: 0;
+  width: 88px;
+  color: var(--color-text-muted);
+}
+
+.kiro-card-value {
+  color: var(--color-text);
+  word-break: break-all;
+  min-width: 0;
+}
+
+.kiro-card-value-arn {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+
+.kiro-card-hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
+
 .sidebar.is-api-config {
   background: var(--sidebar-bg);
 }

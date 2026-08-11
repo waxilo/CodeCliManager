@@ -15,7 +15,9 @@ use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
+mod kiro;
 mod model_fetch;
+mod updater_manifest;
 
 // ── 全局进程注册表：用于支持 abort（取消正在运行的任务） ──────────────
 static ACTIVE_PROCESSES: Mutex<Option<HashMap<String, Arc<Mutex<Child>>>>> = Mutex::new(None);
@@ -604,6 +606,14 @@ fn resolve_profile_env_model(profile: &ApiProfile) -> String {
                 .iter()
                 .find(|model| !model.trim().is_empty())
                 .cloned()
+        })
+        .or_else(|| {
+            let default = profile.default_model.trim();
+            if default.is_empty() {
+                None
+            } else {
+                Some(default.to_string())
+            }
         })
         .unwrap_or_default()
 }
@@ -4278,13 +4288,202 @@ fn apply_responsive_window_size(app: &tauri::App) {
     schedule_main_window_layout(window, app.handle().clone());
 }
 
+// ── Kiro 反代代理：内置本地代理，把 Kiro 额度翻译成 Anthropic API ──────────
+
+fn kiro_sso_cache_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".aws")
+        .join("sso")
+        .join("cache")
+}
+
+const KIRO_RUNTIME_URL: &str = "https://runtime.us-east-1.kiro.dev/";
+const KIRO_MANAGEMENT_URL: &str = "https://management.us-east-1.kiro.dev/";
+/// Kiro 默认模型：仅在无法查询账户可用模型时兜底（部分账户套餐不含 Claude 模型）。
+const KIRO_DEFAULT_MODEL: &str = "claude-opus-5";
+
+pub struct KiroProxyState {
+    inner: Arc<Mutex<Option<kiro::server::ProxyHandle>>>,
+    key: Mutex<Option<String>>,
+    port: Mutex<Option<u16>>,
+}
+
+impl Default for KiroProxyState {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(None)),
+            key: Mutex::new(None),
+            port: Mutex::new(None),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct KiroStatus {
+    running: bool,
+    port: Option<u16>,
+    has_key: bool,
+    auth_source: String,
+    expires_at: Option<String>,
+    profile_arn: Option<String>,
+}
+
+fn build_kiro_status(state: &tauri::State<'_, KiroProxyState>) -> KiroStatus {
+    let running = state.inner.lock().map(|inner| inner.is_some()).unwrap_or(false);
+    let port = state.port.lock().ok().and_then(|p| *p);
+    let has_key = state.key.lock().map(|k| k.is_some()).unwrap_or(false);
+    let auth = kiro::auth::Auth::new(
+        kiro_sso_cache_dir(),
+        None,
+        KIRO_RUNTIME_URL.to_string(),
+        KIRO_MANAGEMENT_URL.to_string(),
+    );
+    KiroStatus {
+        running,
+        port,
+        has_key,
+        auth_source: auth.describe_auth_source(),
+        expires_at: auth.get_sso_token_expiry(),
+        profile_arn: auth.get_sso_profile_arn(),
+    }
+}
+
+/// 创建或更新名为「Kiro」的 API profile 并激活它。
+fn ensure_kiro_profile(port: u16, api_key: &str, default_model: &str) -> Result<ApiProfilesState, String> {
+    let mut store = load_api_profiles_store();
+    let base_url = format!("http://127.0.0.1:{port}");
+    let now = chrono::Utc::now().timestamp();
+
+    let profile = match store.profiles.iter_mut().find(|p| p.name == "Kiro") {
+        Some(existing) => {
+            existing.base_url = base_url;
+            existing.api_key = api_key.to_string();
+            existing.default_model = default_model.to_string();
+            existing.haiku_model = default_model.to_string();
+            existing.sonnet_model = default_model.to_string();
+            existing.opus_model = default_model.to_string();
+            // 用账户实际可用模型覆盖旧的 Claude 展示项，避免 Claude Code 继续请求无额度模型
+            existing.display_models = vec![default_model.to_string()];
+            existing.updated_at = now;
+            existing.clone()
+        }
+        None => {
+            let profile = ApiProfile {
+                id: uuid::Uuid::new_v4().to_string(),
+                name: "Kiro".to_string(),
+                base_url,
+                api_key: api_key.to_string(),
+                default_model: default_model.to_string(),
+                haiku_model: default_model.to_string(),
+                sonnet_model: default_model.to_string(),
+                opus_model: default_model.to_string(),
+                display_models: vec![default_model.to_string()],
+                custom_models: Vec::new(),
+                created_at: now,
+                updated_at: now,
+            };
+            store.profiles.push(profile.clone());
+            profile
+        }
+    };
+
+    apply_save_config_to_settings(&profile_to_save_config(&profile))?;
+    store.active_profile_id = Some(profile.id.clone());
+    save_api_profiles_store(&store)?;
+    Ok(build_api_profiles_state(&store))
+}
+
+/// 查询 Kiro 反代状态。
+#[tauri::command]
+fn kiro_status(state: tauri::State<'_, KiroProxyState>) -> KiroStatus {
+    build_kiro_status(&state)
+}
+
+/// 启动 Kiro 反代代理并自动接入 Claude Code。
+#[tauri::command]
+fn kiro_start(
+    state: tauri::State<'_, KiroProxyState>,
+    port: Option<u16>,
+) -> Result<KiroStatus, String> {
+    // 先停掉已有的代理
+    if let Some(mut existing) = state.inner.lock().map_err(|_| "lock failed".to_string())?.take() {
+        existing.stop();
+    }
+
+    // 校验 Kiro 凭据存在（避免启动一个用不了的代理）
+    let auth = kiro::auth::Auth::new(
+        kiro_sso_cache_dir(),
+        None,
+        KIRO_RUNTIME_URL.to_string(),
+        KIRO_MANAGEMENT_URL.to_string(),
+    );
+    let auth_ok = match auth.get_authorization() {
+        Ok(Some(_)) => true,
+        Ok(None) => false,
+        Err(_) => false,
+    };
+    if !auth_ok {
+        return Err(
+            "未找到 Kiro 凭据：请先安装并登录 Kiro IDE，确认 ~/.aws/sso/cache/kiro-auth-token.json 存在后再试。"
+                .to_string(),
+        );
+    }
+
+    // 优先使用账户实际可用的模型（部分套餐不含 Claude 模型），失败时兜底内置默认
+    let default_model = auth
+        .pick_available_default_model()
+        .unwrap_or_else(|| KIRO_DEFAULT_MODEL.to_string());
+
+    // 生成代理密钥并启动
+    let key = format!("ccm-kiro-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    let config = kiro::server::ProxyConfig {
+        host: "127.0.0.1".to_string(),
+        port: port.unwrap_or(5050),
+        proxy_api_key: Some(key.clone()),
+        default_model: default_model.clone(),
+        runtime_url: KIRO_RUNTIME_URL.to_string(),
+        management_url: KIRO_MANAGEMENT_URL.to_string(),
+        sso_cache_dir: kiro_sso_cache_dir(),
+        profile_arn_override: None,
+    };
+    let handle = kiro::server::start_proxy(config)?;
+    let actual_port = handle.port;
+
+    *state.key.lock().map_err(|_| "lock failed".to_string())? = Some(key.clone());
+    *state.port.lock().map_err(|_| "lock failed".to_string())? = Some(actual_port);
+    *state.inner.lock().map_err(|_| "lock failed".to_string())? = Some(handle);
+
+    // 自动创建并激活 Kiro profile
+    let profile_result = ensure_kiro_profile(actual_port, &key, &default_model);
+    if let Err(e) = profile_result {
+        eprintln!("[kiro] profile setup failed: {e}");
+    }
+
+    Ok(build_kiro_status(&state))
+}
+
+/// 停止 Kiro 反代代理。
+#[tauri::command]
+fn kiro_stop(state: tauri::State<'_, KiroProxyState>) -> Result<KiroStatus, String> {
+    if let Some(mut handle) = state.inner.lock().map_err(|_| "lock failed".to_string())?.take() {
+        handle.stop();
+    }
+    *state.port.lock().map_err(|_| "lock failed".to_string())? = None;
+    *state.key.lock().map_err(|_| "lock failed".to_string())? = None;
+    Ok(build_kiro_status(&state))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(KiroProxyState::default())
         .setup(|app| {
+            updater_manifest::start_updater_manifest_proxy();
             apply_responsive_window_size(app);
             Ok(())
         })
@@ -4318,6 +4517,9 @@ pub fn run() {
             delete_api_profile,
             import_cc_switch_profiles,
             fetch_api_models,
+            kiro_status,
+            kiro_start,
+            kiro_stop,
             get_mcp_servers,
             upsert_mcp_server,
             delete_mcp_server,
