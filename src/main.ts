@@ -340,6 +340,13 @@ class ScrollController {
     this._updateButton();
   }
 
+  /** 消息列表重建后恢复用户滚动位置：autoScroll=false 表示用户在阅读上方内容，不强制置底 */
+  restorePosition(scrollTop: number, autoScroll: boolean): void {
+    this.autoScroll = autoScroll;
+    this.el.scrollTop = scrollTop;
+    this._updateButton();
+  }
+
   /** 销毁：移除监听器和按钮 */
   destroy(): void {
     this.el.removeEventListener('wheel', this._onWheel);
@@ -1264,8 +1271,16 @@ async function setupEventListeners() {
 
     if (isViewingThis) {
       hideSendingState();
+      // 输出结束后重建消息列表：若用户此前已上滑阅读上方消息，重建后保持原位
+      const scrollSnap = captureScrollState();
       render();
-      setTimeout(() => answerScroller?.scrollToBottom(), 100);
+      restoreScrollState(scrollSnap);
+      setTimeout(() => {
+        // 仅在用户仍位于底部时置底，避免打断阅读上方内容
+        if (answerScroller?.autoScroll) {
+          answerScroller.scrollToBottom();
+        }
+      }, 100);
     } else {
       // 用户在看别的会话或新聊天页，只更新侧边栏
       updateConversationListSpinner();
@@ -1740,6 +1755,22 @@ function initAnswerScroller(): void {
     leavePx: 80,
     createButton: true,
   });
+}
+
+/** 捕获消息列表重建前的滚动状态，用于输出结束后恢复（不打断用户阅读上方消息） */
+function captureScrollState(): { autoScroll: boolean; scrollTop: number } | null {
+  if (!answerScroller) return null;
+  return { autoScroll: answerScroller.autoScroll, scrollTop: answerScroller.el.scrollTop };
+}
+
+/** 重建后恢复滚动状态：用户此前在底部 → 置底；否则保持其阅读位置，不强制跳回 */
+function restoreScrollState(snap: { autoScroll: boolean; scrollTop: number } | null): void {
+  if (!answerScroller) return;
+  if (!snap || snap.autoScroll) {
+    answerScroller.scrollToBottom();
+  } else {
+    answerScroller.restorePosition(snap.scrollTop, false);
+  }
 }
 
 function isNewChatSession(): boolean {
@@ -6549,6 +6580,8 @@ function refreshChatContent() {
   updateSendButtonState();
   updateProjectDirDisplay();
   if (messageList) {
+    // 重建前记录滚动状态：输出结束时若用户在阅读上方消息，重建后不应强制跳回底部
+    const scrollSnap = captureScrollState();
     const messages = buildDisplayMessages(conversation);
     messageList.innerHTML = renderConversationMessagesInnerHtml(messages);
     // 后处理：代码复制按钮、思考块折叠事件、消息复制控件
@@ -6558,7 +6591,8 @@ function refreshChatContent() {
     } else {
       removePendingAssistantIndicator();
     }
-    answerScroller?.scrollToBottom();
+    // 恢复滚动状态（最后执行，覆盖 showPendingAssistantIndicator 的置底）
+    restoreScrollState(scrollSnap);
   }
 }
 
