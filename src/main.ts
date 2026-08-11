@@ -4,6 +4,7 @@ import { open, save } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { getVersion } from '@tauri-apps/api/app';
 import { check as checkAppUpdateRemote, type Update as AppUpdate } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 import { renderMarkdown as _renderMarkdown, initCodeCopyButtons, copyToClipboard as _copyToClipboard } from './markdown';
 
 /** 后端 import_external_path 返回值 */
@@ -1550,6 +1551,21 @@ function toggleAppUpdatePopover() {
   }
 }
 
+/** macOS 上 downloadAndInstall 可能卡在 Finished 后不 resolve；超时后强制 relaunch */
+const MAC_UPDATE_INSTALL_STALL_MS = 12_000;
+
+async function relaunchAfterUpdate(): Promise<void> {
+  showCopyToastMsg('更新已安装，应用即将重启');
+  closeAppUpdatePopover();
+  // Windows NSIS 安装器通常会自行退出；macOS/Linux 必须显式 relaunch
+  try {
+    await relaunch();
+  } catch (e) {
+    console.error('[updater] relaunch failed:', e);
+    showCopyToastMsg('请手动重启应用以完成更新');
+  }
+}
+
 async function installAppUpdate(): Promise<void> {
   if (!appUpdate) return;
   appUpdateCheckStatus = 'downloading';
@@ -1561,6 +1577,15 @@ async function installAppUpdate(): Promise<void> {
     bindAppUpdatePopoverEvents(panel);
   }
 
+  let installResolved = false;
+  let stallTimer: ReturnType<typeof setTimeout> | null = null;
+  const clearStallTimer = () => {
+    if (stallTimer !== null) {
+      clearTimeout(stallTimer);
+      stallTimer = null;
+    }
+  };
+
   try {
     await appUpdate.downloadAndInstall((event) => {
       if (event.event === 'Started') {
@@ -1571,7 +1596,14 @@ async function installAppUpdate(): Promise<void> {
           total: appUpdateProgress?.total ?? 0,
         };
       } else if (event.event === 'Finished') {
-        // 下载完成，等待安装
+        // macOS：bundle 可能已替换完成，但 Promise 偶发不返回；启动看门狗强制重启
+        if (stallTimer === null && navigator.platform.toLowerCase().includes('mac')) {
+          stallTimer = setTimeout(() => {
+            if (installResolved) return;
+            console.warn('[updater] macOS install stall, forcing relaunch');
+            void relaunchAfterUpdate();
+          }, MAC_UPDATE_INSTALL_STALL_MS);
+        }
       }
       const progressPanel = document.querySelector('#app-update-popover');
       if (progressPanel) {
@@ -1584,10 +1616,23 @@ async function installAppUpdate(): Promise<void> {
         if (pctEl) pctEl.textContent = `${pct}%`;
       }
     }, { timeout: 300_000 });
-    // 安装完成，进程可能已重启；此处提示
-    showCopyToastMsg('更新已安装，应用即将重启');
-    closeAppUpdatePopover();
+    installResolved = true;
+    clearStallTimer();
+    appUpdateProgress = null;
+    // 重启前先释放 updater 资源，避免 macOS 上 close 与 relaunch 竞态
+    if (appUpdate) {
+      try {
+        void appUpdate.close();
+      } catch {
+        /* ignore */
+      }
+      appUpdate = null;
+    }
+    syncAppUpdateButtonUI();
+    await relaunchAfterUpdate();
   } catch (e) {
+    installResolved = true;
+    clearStallTimer();
     appUpdateCheckStatus = 'error';
     const raw = String(e);
     const timedOut = /timed?\s*out|timeout|连接超时|error sending request/i.test(raw);
@@ -1599,10 +1644,8 @@ async function installAppUpdate(): Promise<void> {
       panel.innerHTML = renderAppUpdatePopoverBody();
       bindAppUpdatePopoverEvents(panel);
     }
-  } finally {
     appUpdateProgress = null;
     syncAppUpdateButtonUI();
-    // 释放 updater 资源（安装完成后对象已失效，忽略关闭失败）
     if (appUpdate) {
       try {
         void appUpdate.close();
@@ -1611,6 +1654,8 @@ async function installAppUpdate(): Promise<void> {
       }
       appUpdate = null;
     }
+  } finally {
+    clearStallTimer();
   }
 }
 
