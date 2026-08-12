@@ -4239,8 +4239,11 @@ fn open_terminal(project_dir: String) -> Result<(), String> {
         use std::os::windows::process::CommandExt;
         const CREATE_NEW_CONSOLE: u32 = 0x00000010;
 
+        // 通过 current_dir 设置工作目录，避免把 Windows 路径拼进 cmd 命令后
+        // 被 &, 括号等特殊字符重新解析，导致终端落到错误目录。
         std::process::Command::new("cmd")
-            .args(["/k", &format!("cd /d \"{}\"", dir)])
+            .arg("/k")
+            .current_dir(dir)
             .creation_flags(CREATE_NEW_CONSOLE)
             .spawn()
             .map_err(|e| format!("启动终端失败: {}", e))?;
