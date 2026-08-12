@@ -602,6 +602,7 @@ pub(crate) fn force_kill_process_tree(child: &mut Child) {
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
+        use std::process::Stdio;
         let pid = child.id();
         let _ = std::process::Command::new("taskkill")
             .args(["/T", "/F", "/PID", &pid.to_string()])
