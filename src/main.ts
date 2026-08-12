@@ -224,7 +224,16 @@ interface ClaudeCodeUpdateInfo {
   latest: string | null;
   updateAvailable: boolean;
   executablePath: string | null;
+  canSilentUpdate: boolean;
   error: string | null;
+}
+
+interface ClaudeCodeSilentUpdateResult {
+  success: boolean;
+  message: string;
+  installed: string | null;
+  latest: string | null;
+  usedElevation: boolean;
 }
 
 /** MCP 服务器配置（对应 ~/.claude.json mcpServers 中单个服务器的结构） */
@@ -249,7 +258,7 @@ interface McpServersState {
   configPath: string;
 }
 
-type ClaudeUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'error';
+type ClaudeUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'updating' | 'error';
 
 let claudeUpdateInfo: ClaudeCodeUpdateInfo | null = null;
 let claudeUpdateCheckStatus: ClaudeUpdateCheckStatus = 'idle';
@@ -261,6 +270,7 @@ let claudeUpdateDismissedVersion: string | null = (() => {
   }
 })();
 let claudeUpdateCheckPromise: Promise<void> | null = null;
+let claudeUpdateError: string | null = null;
 
 type AppUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'downloading' | 'error';
 
@@ -1119,11 +1129,14 @@ function syncClaudeUpdateButtonUI() {
   const btn = document.querySelector('#claude-update-btn') as HTMLButtonElement | null;
   if (!btn) return;
   const showBadge = shouldShowClaudeUpdateBadge();
-  const checking = claudeUpdateCheckStatus === 'checking';
+  const checking = claudeUpdateCheckStatus === 'checking' || claudeUpdateCheckStatus === 'updating';
   btn.classList.toggle('has-update', showBadge);
   btn.classList.toggle('is-checking', checking);
   const label = btn.querySelector('.toolbar-update-btn-label');
-  if (label) label.textContent = showBadge ? '有更新' : '版本';
+  if (label) {
+    label.textContent =
+      claudeUpdateCheckStatus === 'updating' ? '更新中' : showBadge ? '有更新' : '版本';
+  }
   let dot = btn.querySelector('.toolbar-update-btn-dot');
   if (showBadge && !dot) {
     dot = document.createElement('span');
@@ -1143,14 +1156,19 @@ async function checkClaudeCodeUpdate(_force = false): Promise<void> {
   if (claudeUpdateCheckPromise) {
     return claudeUpdateCheckPromise;
   }
+  if (claudeUpdateCheckStatus === 'updating') {
+    return;
+  }
 
   claudeUpdateCheckStatus = 'checking';
+  claudeUpdateError = null;
   syncClaudeUpdateButtonUI();
 
   claudeUpdateCheckPromise = (async () => {
     try {
       const info = await invoke<ClaudeCodeUpdateInfo>('check_claude_code_update');
       claudeUpdateInfo = info;
+      claudeUpdateError = null;
       claudeUpdateCheckStatus = info.error && !info.installed && !info.latest ? 'error' : 'ready';
     } catch (e) {
       claudeUpdateInfo = {
@@ -1158,22 +1176,59 @@ async function checkClaudeCodeUpdate(_force = false): Promise<void> {
         latest: null,
         updateAvailable: false,
         executablePath: null,
+        canSilentUpdate: false,
         error: String(e),
       };
       claudeUpdateCheckStatus = 'error';
     } finally {
       syncClaudeUpdateButtonUI();
       claudeUpdateCheckPromise = null;
-      // 若弹层开着，刷新内容
-      const panel = document.querySelector('#claude-update-popover');
-      if (panel) {
-        panel.innerHTML = renderClaudeUpdatePopoverBody();
-        bindClaudeUpdatePopoverEvents(panel);
-      }
+      refreshClaudeUpdatePopoverIfOpen();
     }
   })();
 
   return claudeUpdateCheckPromise;
+}
+
+function refreshClaudeUpdatePopoverIfOpen() {
+  const panel = document.querySelector('#claude-update-popover');
+  if (panel) {
+    panel.innerHTML = renderClaudeUpdatePopoverBody();
+    bindClaudeUpdatePopoverEvents(panel);
+  }
+}
+
+async function runClaudeCodeSilentUpdate(): Promise<void> {
+  if (claudeUpdateCheckStatus === 'updating') return;
+
+  claudeUpdateCheckStatus = 'updating';
+  claudeUpdateError = null;
+  syncClaudeUpdateButtonUI();
+  refreshClaudeUpdatePopoverIfOpen();
+
+  try {
+    const result = await invoke<ClaudeCodeSilentUpdateResult>('run_claude_code_update_silent');
+    showCopyToastMsg(
+      result.usedElevation ? '已通过系统授权完成更新' : 'Claude Code 已静默更新'
+    );
+    claudeUpdateCheckStatus = 'ready';
+    await checkClaudeCodeUpdate(true);
+  } catch (e) {
+    claudeUpdateError = String(e);
+    claudeUpdateCheckStatus = 'ready';
+    syncClaudeUpdateButtonUI();
+    refreshClaudeUpdatePopoverIfOpen();
+  }
+}
+
+async function openClaudeCodeUpdateTerminal(): Promise<void> {
+  try {
+    await invoke('open_claude_code_update_terminal');
+    showCopyToastMsg('已打开终端执行更新');
+    closeClaudeUpdatePopover();
+  } catch (e) {
+    alert('打开更新终端失败: ' + String(e));
+  }
 }
 
 function dismissClaudeUpdateReminder() {
@@ -1192,6 +1247,7 @@ function dismissClaudeUpdateReminder() {
 function renderClaudeUpdatePopoverBody(): string {
   const info = claudeUpdateInfo;
   const checking = claudeUpdateCheckStatus === 'checking';
+  const updating = claudeUpdateCheckStatus === 'updating';
 
   if (checking && !info) {
     return `
@@ -1207,7 +1263,17 @@ function renderClaudeUpdatePopoverBody(): string {
   const latest = info?.latest || '—';
   const path = info?.executablePath || '';
   const hasUpdate = Boolean(info?.updateAvailable && info.latest);
-  const error = info?.error || '';
+  const error = claudeUpdateError || info?.error || '';
+  const canSilent = info?.canSilentUpdate !== false;
+  const hint = updating
+    ? '正在后台静默更新，请稍候…'
+    : hasUpdate
+      ? canSilent
+        ? '发现新版本，可直接静默安装，无需打开终端。'
+        : '当前安装位于系统目录。将尝试系统授权或安装到用户目录；也可改用终端更新。'
+      : info?.installed && info.latest
+        ? '已是最新版本。'
+        : '';
 
   return `
     <div class="claude-update-popover-header">
@@ -1229,18 +1295,23 @@ function renderClaudeUpdatePopoverBody(): string {
         <span class="claude-update-value" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
       </div>` : ''}
     </div>
-    ${hasUpdate
-      ? `<p class="claude-update-popover-hint">发现新版本，可在终端执行 <code>claude update</code> 升级。</p>`
-      : info?.installed && info.latest
-        ? `<p class="claude-update-popover-hint">已是最新版本。</p>`
-        : ''}
-    ${error ? `<p class="claude-update-popover-error">${escapeHtml(error)}</p>` : ''}
+    ${hint ? `<p class="claude-update-popover-status">${escapeHtml(hint)}</p>` : ''}
+    ${updating ? `
+      <div class="app-update-progress">
+        <div class="app-update-progress-track">
+          <div class="app-update-progress-bar claude-update-progress-indeterminate"></div>
+        </div>
+        <span class="app-update-progress-pct">更新中</span>
+      </div>
+    ` : ''}
+    ${error && !updating ? `<p class="claude-update-popover-error">${escapeHtml(error)}</p>` : ''}
     <div class="claude-update-popover-actions">
-      <button type="button" class="claude-update-action" data-action="recheck" ${checking ? 'disabled' : ''}>
+      <button type="button" class="claude-update-action" data-action="recheck" ${checking || updating ? 'disabled' : ''}>
         ${checking ? '检查中…' : '重新检查'}
       </button>
-      ${hasUpdate ? `
-        <button type="button" class="claude-update-action primary" data-action="update">终端更新</button>
+      ${hasUpdate && !updating ? `
+        <button type="button" class="claude-update-action primary" data-action="update">立即更新</button>
+        <button type="button" class="claude-update-action" data-action="terminal-update">${error ? '改用终端更新' : '终端更新'}</button>
         <button type="button" class="claude-update-action" data-action="dismiss">稍后提醒</button>
       ` : ''}
     </div>
@@ -1258,15 +1329,9 @@ function bindClaudeUpdatePopoverEvents(panel: Element) {
       if (action === 'recheck') {
         void checkClaudeCodeUpdate(true);
       } else if (action === 'update') {
-        void (async () => {
-          try {
-            await invoke('open_claude_code_update_terminal');
-            showCopyToastMsg('已打开终端执行更新');
-            closeClaudeUpdatePopover();
-          } catch (e) {
-            alert('打开更新终端失败: ' + String(e));
-          }
-        })();
+        void runClaudeCodeSilentUpdate();
+      } else if (action === 'terminal-update') {
+        void openClaudeCodeUpdateTerminal();
       } else if (action === 'dismiss') {
         dismissClaudeUpdateReminder();
       }
@@ -3233,6 +3298,7 @@ function shouldShowClaudeUpdateBadge(): boolean {
 }
 
 function getClaudeUpdateButtonTitle(): string {
+  if (claudeUpdateCheckStatus === 'updating') return '正在静默更新 Claude Code…';
   if (claudeUpdateCheckStatus === 'checking') return '正在检查 Claude Code 更新…';
   if (shouldShowClaudeUpdateBadge() && claudeUpdateInfo?.latest) {
     return `Claude Code 有新版本 ${claudeUpdateInfo.latest}`;
@@ -3269,7 +3335,9 @@ function renderTitlebarActions(): string {
   const appShowBadge = shouldShowAppUpdateBadge();
   const appChecking = appUpdateCheckStatus === 'checking' || appUpdateCheckStatus === 'downloading';
   const showBadge = shouldShowClaudeUpdateBadge();
-  const checking = claudeUpdateCheckStatus === 'checking';
+  const checking = claudeUpdateCheckStatus === 'checking' || claudeUpdateCheckStatus === 'updating';
+  const claudeLabel =
+    claudeUpdateCheckStatus === 'updating' ? '更新中' : showBadge ? '有更新' : '版本';
   return `
     <button
       type="button"
@@ -3292,7 +3360,7 @@ function renderTitlebarActions(): string {
       aria-haspopup="dialog"
     >
       <span class="toolbar-update-btn-icon" aria-hidden="true">${renderClaudeUpdateIcon()}</span>
-      <span class="toolbar-update-btn-label">${showBadge ? '有更新' : '版本'}</span>
+      <span class="toolbar-update-btn-label">${claudeLabel}</span>
       ${showBadge ? '<span class="toolbar-update-btn-dot" aria-hidden="true"></span>' : ''}
     </button>
     <button type="button" class="toolbar-settings-btn settings-btn${isApiConfigViewActive ? ' is-active' : ''}" id="settings-btn" title="管理 Claude Code API 配置" aria-label="API 配置" aria-pressed="${isApiConfigViewActive}">

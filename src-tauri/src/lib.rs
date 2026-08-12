@@ -2143,16 +2143,18 @@ fn extended_path_for_cli() -> String {
         vec![
             // npm 全局路径（Windows）
             home.join("AppData").join("Roaming").join("npm"),
+            home.join(".local").join("bin"),
             home.join("AppData").join("Local").join("Programs").join("nodejs"),
             PathBuf::from("C:\\Program Files\\nodejs"),
         ]
     } else {
         vec![
-            PathBuf::from("/usr/local/bin"),
-            PathBuf::from("/opt/homebrew/bin"),
+            // 优先用户目录，配合静默更新到 ~/.local
             home.join(".local/bin"),
             home.join(".npm-global/bin"),
             home.join("bin"),
+            PathBuf::from("/opt/homebrew/bin"),
+            PathBuf::from("/usr/local/bin"),
         ]
     };
 
@@ -2183,21 +2185,24 @@ fn extended_path_for_cli() -> String {
 
 fn resolve_claude_executable() -> PathBuf {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    // 优先用户目录，便于静默更新到 ~/.local 后立即生效，避免仍命中旧的系统安装
     let mut candidates = vec![
-        PathBuf::from("/usr/local/bin/claude"),
-        PathBuf::from("/opt/homebrew/bin/claude"),
         home.join(".local/bin/claude"),
         home.join(".npm-global/bin/claude"),
         home.join("bin/claude"),
+        home.join(".claude/bin/claude"),
+        PathBuf::from("/opt/homebrew/bin/claude"),
+        PathBuf::from("/usr/local/bin/claude"),
     ];
 
     #[cfg(target_os = "windows")]
     {
+        // 优先 .exe，避免经 cmd.exe 解析 .cmd 时弹出控制台窗口
         candidates.extend([
             home.join(".claude/bin/claude.exe"),
-            // npm 全局安装路径 (npm install -g @anthropic-ai/claude-code)
-            home.join("AppData/Roaming/npm/claude.cmd"),
             home.join("AppData/Roaming/npm/claude.exe"),
+            home.join(".local/bin/claude.exe"),
+            home.join("AppData/Roaming/npm/claude.cmd"),
             PathBuf::from("C:\\Program Files\\Claude\\claude.exe"),
             PathBuf::from("C:\\Program Files (x86)\\Claude\\claude.exe"),
             dirs::data_local_dir().unwrap_or_default().join("claude/bin/claude.exe"),
@@ -2214,7 +2219,13 @@ fn resolve_claude_executable() -> PathBuf {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 if !path.is_empty() {
-                    candidates.insert(0, PathBuf::from(path));
+                    let found = PathBuf::from(&path);
+                    // 用户目录安装插到最前；系统路径仅作为候选补充，避免盖过 ~/.local
+                    if is_user_home_install(&found) {
+                        candidates.insert(0, found);
+                    } else {
+                        candidates.push(found);
+                    }
                 }
             }
         }
@@ -2293,11 +2304,57 @@ fn is_version_newer(latest: &str, installed: &str) -> bool {
 }
 
 const CLAUDE_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+const CLAUDE_UPDATE_TIMEOUT: Duration = Duration::from_secs(300);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Windows 下隐藏控制台窗口，避免检查/更新时闪出黑框。
+fn apply_create_no_window(cmd: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let _ = cmd;
+}
+
+/// 探测路径父目录是否可写（用于判断静默更新是否需要提权）。
+fn is_parent_dir_writable(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    if !parent.exists() {
+        return false;
+    }
+    let probe = parent.join(format!(".ccm_write_probe_{}", std::process::id()));
+    match fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+    {
+        Ok(_) => {
+            let _ = fs::remove_file(&probe);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn is_user_home_install(path: &Path) -> bool {
+    dirs::home_dir()
+        .map(|home| path.starts_with(&home))
+        .unwrap_or(false)
+}
+
+fn shell_escape_double_quoted(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
 
 fn read_installed_claude_version() -> Result<(String, String), String> {
     let claude_bin = resolve_claude_executable();
     let mut cmd = Command::new(&claude_bin);
     apply_cli_runtime_env(&mut cmd);
+    apply_create_no_window(&mut cmd);
     cmd.arg("-v");
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
@@ -2386,7 +2443,24 @@ struct ClaudeCodeUpdateInfo {
     latest: Option<String>,
     update_available: bool,
     executable_path: Option<String>,
+    /// 安装目录可写，或位于用户主目录，可尝试完全静默更新。
+    can_silent_update: bool,
     error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClaudeCodeSilentUpdateResult {
+    success: bool,
+    message: String,
+    installed: Option<String>,
+    latest: Option<String>,
+    used_elevation: bool,
+}
+
+fn claude_install_allows_silent(path: &str) -> bool {
+    let p = PathBuf::from(path);
+    is_user_home_install(&p) || is_parent_dir_writable(&p)
 }
 
 /// 检查本机 Claude Code 版本与 npm 最新版。
@@ -2406,6 +2480,7 @@ async fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
     match (installed_result, latest_result) {
         (Ok((installed, path)), Ok(latest)) => ClaudeCodeUpdateInfo {
             update_available: is_version_newer(&latest, &installed),
+            can_silent_update: claude_install_allows_silent(&path),
             installed: Some(installed),
             latest: Some(latest),
             executable_path: Some(path),
@@ -2413,6 +2488,7 @@ async fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
         },
         (Ok((installed, path)), Err(err)) => ClaudeCodeUpdateInfo {
             update_available: false,
+            can_silent_update: claude_install_allows_silent(&path),
             installed: Some(installed),
             latest: None,
             executable_path: Some(path),
@@ -2420,6 +2496,7 @@ async fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
         },
         (Err(err), Ok(latest)) => ClaudeCodeUpdateInfo {
             update_available: false,
+            can_silent_update: false,
             installed: None,
             latest: Some(latest),
             executable_path: None,
@@ -2427,12 +2504,262 @@ async fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
         },
         (Err(installed_err), Err(latest_err)) => ClaudeCodeUpdateInfo {
             update_available: false,
+            can_silent_update: false,
             installed: None,
             latest: None,
             executable_path: None,
             error: Some(format!("{}; {}", installed_err, latest_err)),
         },
     }
+}
+
+fn wait_child_with_timeout(
+    mut child: Child,
+    timeout: Duration,
+    label: &str,
+) -> Result<std::process::Output, String> {
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started_at.elapsed() < timeout => {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "{}超时（{} 秒）",
+                    label,
+                    timeout.as_secs()
+                ));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("等待 {} 失败: {e}", label));
+            }
+        }
+    }
+    child
+        .wait_with_output()
+        .map_err(|e| format!("读取 {} 输出失败: {e}", label))
+}
+
+fn output_combined_text(output: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    format!("{}\n{}", stdout, stderr).trim().to_string()
+}
+
+fn looks_like_permission_error(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("eacces")
+        || lower.contains("permission denied")
+        || lower.contains("operation not permitted")
+        || lower.contains("access is denied")
+        || lower.contains("requires elevated")
+        || lower.contains("need to be root")
+        || lower.contains("sudo")
+}
+
+/// 在用户可写目录静默执行 `claude update`。
+fn run_claude_update_process(claude_bin: &Path) -> Result<String, String> {
+    let mut cmd = Command::new(claude_bin);
+    apply_cli_runtime_env(&mut cmd);
+    apply_create_no_window(&mut cmd);
+    cmd.arg("update");
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("启动 Claude Code 更新失败（{}）: {}", claude_bin.display(), e))?;
+    let output = wait_child_with_timeout(child, CLAUDE_UPDATE_TIMEOUT, "Claude Code 更新")?;
+    let combined = output_combined_text(&output);
+    if output.status.success() {
+        Ok(if combined.is_empty() {
+            "Claude Code 已更新".to_string()
+        } else {
+            combined
+        })
+    } else {
+        Err(if combined.is_empty() {
+            format!(
+                "Claude Code 更新失败（退出码 {}）",
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            combined
+        })
+    }
+}
+
+/// macOS：通过系统授权对话框提权执行更新（不打开 Terminal）。
+#[cfg(target_os = "macos")]
+fn run_claude_update_elevated_macos(claude_bin: &Path) -> Result<String, String> {
+    let bin = shell_escape_double_quoted(&claude_bin.display().to_string());
+    let shell = format!(
+        "do shell script \"\\\"{}\\\" update\" with administrator privileges",
+        bin
+    );
+    let mut cmd = Command::new("osascript");
+    cmd.args(["-e", &shell]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("启动系统授权更新失败: {}", e))?;
+    let output = wait_child_with_timeout(child, CLAUDE_UPDATE_TIMEOUT, "系统授权更新")?;
+    let combined = output_combined_text(&output);
+    if output.status.success() {
+        Ok(if combined.is_empty() {
+            "Claude Code 已更新（已使用管理员权限）".to_string()
+        } else {
+            combined
+        })
+    } else {
+        let msg = if combined.is_empty() {
+            format!(
+                "系统授权更新失败（退出码 {}）",
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            combined
+        };
+        // 用户取消授权
+        if msg.to_ascii_lowercase().contains("user canceled")
+            || msg.contains("用户已取消")
+            || msg.contains("-128")
+        {
+            Err("已取消管理员授权".to_string())
+        } else {
+            Err(msg)
+        }
+    }
+}
+
+/// 当系统目录不可写时，静默安装到用户 `~/.local`（无需 sudo）。
+fn run_npm_user_prefix_install() -> Result<String, String> {
+    let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())?;
+    let prefix = home.join(".local");
+    let bin_dir = prefix.join("bin");
+    fs::create_dir_all(&bin_dir).map_err(|e| format!("创建 ~/.local/bin 失败: {}", e))?;
+
+    let mut cmd = Command::new("npm");
+    apply_cli_runtime_env(&mut cmd);
+    apply_create_no_window(&mut cmd);
+    cmd.args([
+        "install",
+        "-g",
+        "--prefix",
+        prefix.to_string_lossy().as_ref(),
+        "@anthropic-ai/claude-code@latest",
+    ]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("启动 npm 用户目录安装失败: {}（请确认已安装 Node.js/npm）", e))?;
+    let output = wait_child_with_timeout(child, CLAUDE_UPDATE_TIMEOUT, "npm 用户目录安装")?;
+    let combined = output_combined_text(&output);
+    if output.status.success() {
+        Ok(format!(
+            "已安装到 {}。若命令行仍指向旧路径，请优先将 ~/.local/bin 加入 PATH。",
+            bin_dir.display()
+        ))
+    } else {
+        Err(if combined.is_empty() {
+            format!(
+                "npm 用户目录安装失败（退出码 {}）",
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            combined
+        })
+    }
+}
+
+fn run_claude_code_update_silent_blocking() -> Result<ClaudeCodeSilentUpdateResult, String> {
+    let (installed_before, path) = read_installed_claude_version()?;
+    let claude_bin = PathBuf::from(&path);
+    let latest = fetch_latest_claude_version().ok();
+    let can_silent = claude_install_allows_silent(&path);
+
+    let mut used_elevation = false;
+    let message = if can_silent {
+        match run_claude_update_process(&claude_bin) {
+            Ok(msg) => msg,
+            Err(err) if looks_like_permission_error(&err) => {
+                // 权限探测偶发误判，再尝试用户目录安装 / 提权
+                #[cfg(target_os = "macos")]
+                {
+                    used_elevation = true;
+                    run_claude_update_elevated_macos(&claude_bin).or_else(|elev_err| {
+                        run_npm_user_prefix_install().map_err(|npm_err| {
+                            format!(
+                                "静默更新失败。\n原地更新: {}\n管理员授权: {}\n用户目录安装: {}",
+                                err, elev_err, npm_err
+                            )
+                        })
+                    })?
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    run_npm_user_prefix_install().map_err(|npm_err| {
+                        format!("静默更新失败。\n原地更新: {}\n用户目录安装: {}", err, npm_err)
+                    })?
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    } else {
+        #[cfg(target_os = "macos")]
+        {
+            used_elevation = true;
+            match run_claude_update_elevated_macos(&claude_bin) {
+                Ok(msg) => msg,
+                Err(elev_err) => run_npm_user_prefix_install().map_err(|npm_err| {
+                    format!(
+                        "当前安装位于系统目录，需要管理员权限。\n管理员授权: {}\n用户目录安装: {}",
+                        elev_err, npm_err
+                    )
+                })?,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            // Windows / Linux：系统目录不可写时改走用户目录，避免弹黑框/提权
+            run_npm_user_prefix_install().map_err(|npm_err| {
+                format!(
+                    "当前安装目录不可写，无法静默更新。\n用户目录安装失败: {}\n可改用「终端更新」。",
+                    npm_err
+                )
+            })?
+        }
+    };
+
+    // 更新后重新读版本；用户目录新装可能暂时仍解析到旧路径，尽量再探测一次
+    let installed_after = read_installed_claude_version()
+        .map(|(v, _)| v)
+        .unwrap_or(installed_before);
+
+    Ok(ClaudeCodeSilentUpdateResult {
+        success: true,
+        message,
+        installed: Some(installed_after),
+        latest,
+        used_elevation,
+    })
+}
+
+/// 静默更新 Claude Code：Windows 隐藏控制台；macOS 可写目录直接更新，系统目录则系统授权或安装到 ~/.local。
+#[tauri::command]
+async fn run_claude_code_update_silent() -> Result<ClaudeCodeSilentUpdateResult, String> {
+    tauri::async_runtime::spawn_blocking(run_claude_code_update_silent_blocking)
+        .await
+        .map_err(|e| format!("静默更新任务失败: {e}"))?
 }
 
 /// 在系统终端中执行 `claude update`（阻塞部分由异步命令调度到后台线程）
@@ -4717,6 +5044,7 @@ pub fn run() {
             open_terminal,
             open_terminal_resume,
             check_claude_code_update,
+            run_claude_code_update_silent,
             open_claude_code_update_terminal,
         ])
         .run(tauri::generate_context!())

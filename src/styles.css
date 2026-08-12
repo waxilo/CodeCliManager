@@ -1172,6 +1172,16 @@ body.is-sidebar-resizing {
   text-align: right;
 }
 
+.claude-update-progress-indeterminate {
+  width: 40% !important;
+  animation: claude-update-progress-slide 1.2s ease-in-out infinite;
+}
+
+@keyframes claude-update-progress-slide {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(280%); }
+}
+
 .toolbar-settings-btn:hover {
   background: var(--color-bg-surface-hover);
   color: var(--color-text);
