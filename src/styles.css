@@ -875,6 +875,7 @@ body.is-sidebar-resizing {
 }
 
 .toolbar-settings-btn {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -889,6 +890,19 @@ body.is-sidebar-resizing {
   cursor: pointer;
   transition: background 0.2s, color 0.2s, border-color 0.2s;
   -webkit-app-region: no-drag;
+}
+
+.toolbar-settings-update-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--color-titlebar);
+  border-radius: 50%;
+  background: var(--color-danger);
+  box-sizing: content-box;
+  pointer-events: none;
 }
 
 .toolbar-update-btn {

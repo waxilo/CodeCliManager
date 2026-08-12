@@ -1171,6 +1171,7 @@ function syncClaudeUpdateButtonUI() {
     btn.title = title;
     btn.setAttribute('aria-label', title);
   }
+  syncSettingsUpdateBadgeUI();
   renderSettingsUpdateSectionIfOpen();
 }
 
@@ -1391,6 +1392,30 @@ function shouldShowAppUpdateBadge(): boolean {
   return appUpdateDismissedVersion !== appUpdateInfo.latestVersion;
 }
 
+function shouldShowSettingsUpdateBadge(): boolean {
+  return shouldShowAppUpdateBadge() || shouldShowClaudeUpdateBadge();
+}
+
+function syncSettingsUpdateBadgeUI(): void {
+  const btn = document.querySelector('#settings-btn') as HTMLButtonElement | null;
+  if (!btn) return;
+
+  const showBadge = shouldShowSettingsUpdateBadge();
+  let dot = btn.querySelector('.toolbar-settings-update-dot');
+  if (showBadge && !dot) {
+    dot = document.createElement('span');
+    dot.className = 'toolbar-settings-update-dot';
+    dot.setAttribute('aria-hidden', 'true');
+    btn.appendChild(dot);
+  } else if (!showBadge && dot) {
+    dot.remove();
+  }
+
+  const title = showBadge ? '应用设置（有可用更新）' : '应用设置';
+  btn.title = title;
+  btn.setAttribute('aria-label', title);
+}
+
 function getAppUpdateButtonTitle(): string {
   if (appUpdateCheckStatus === 'checking') return '正在检查应用更新…';
   if (appUpdateCheckStatus === 'downloading') return '正在下载更新…';
@@ -1436,6 +1461,7 @@ function syncAppUpdateButtonUI(): void {
     btn.title = title;
     btn.setAttribute('aria-label', title);
   }
+  syncSettingsUpdateBadgeUI();
   renderSettingsUpdateSectionIfOpen();
 }
 
@@ -1581,6 +1607,9 @@ function bindAppUpdatePopoverEvents(panel: Element) {
         btn.textContent = '检查中…';
         void checkAppUpdate(true);
       } else if (action === 'install') {
+        if (appUpdateCheckStatus === 'downloading' || appUpdateCheckStatus === 'checking') return;
+        btn.disabled = true;
+        btn.textContent = '准备中…';
         void installAppUpdate();
       } else if (action === 'dismiss') {
         dismissAppUpdateReminder();
@@ -1610,7 +1639,29 @@ async function relaunchAfterUpdate(): Promise<void> {
 }
 
 async function installAppUpdate(): Promise<void> {
-  if (!appUpdate) return;
+  if (appUpdateCheckStatus === 'downloading') return;
+
+  // 更新句柄可能在失败/超时后被清空，但 UI 仍显示「下载并安装」——先重新检查再安装，避免点击无反应
+  if (!appUpdate) {
+    showCopyToastMsg('正在重新获取更新…');
+    appUpdateInfo.error = null;
+    await checkAppUpdate(true);
+    if (!appUpdate) {
+      appUpdateCheckStatus = 'error';
+      appUpdateInfo.error = '未找到可安装的更新包，请点击「重新检查」后再试。';
+      syncAppUpdateButtonUI();
+      const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
+      if (panel) {
+        panel.innerHTML = renderAppUpdatePopoverBody();
+        bindAppUpdatePopoverEvents(panel);
+      }
+      return;
+    }
+  }
+
+  const isWindows = /win/i.test(navigator.platform) || /windows/i.test(navigator.userAgent);
+  showCopyToastMsg(isWindows ? '开始下载更新…（安装时若弹出 UAC 请允许）' : '开始下载更新…');
+
   appUpdateCheckStatus = 'downloading';
   appUpdateProgress = { downloaded: 0, total: 0 };
   syncAppUpdateButtonUI();
@@ -1646,6 +1697,8 @@ async function installAppUpdate(): Promise<void> {
             console.warn('[updater] macOS install stall, forcing relaunch');
             void relaunchAfterUpdate();
           }, MAC_UPDATE_INSTALL_STALL_MS);
+        } else if (isWindows) {
+          showCopyToastMsg('下载完成，正在安装…（若弹出 UAC 请允许）');
         }
       }
       const progressPanel = document.querySelector('#app-update-popover, #settings-app-update-view');
@@ -1682,6 +1735,10 @@ async function installAppUpdate(): Promise<void> {
     appUpdateInfo.error = timedOut
       ? `下载更新超时。请检查网络后重试。\n${raw}`
       : raw;
+    // 失败后清空句柄，但保留「有更新」状态，下次点击会重新获取后再装
+    if (appUpdateInfo.latestVersion) {
+      appUpdateInfo.updateAvailable = true;
+    }
     const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
     if (panel) {
       panel.innerHTML = renderAppUpdatePopoverBody();
@@ -3306,9 +3363,10 @@ function renderMcpIcon(): string {
 
 function renderTitlebarActions(): string {
   return `
-    <button type="button" class="toolbar-settings-btn settings-btn${isApiConfigViewActive ? ' is-active' : ''}" id="settings-btn" title="应用设置" aria-label="设置" aria-pressed="${isApiConfigViewActive}">
+    <button type="button" class="toolbar-settings-btn settings-btn${isApiConfigViewActive ? ' is-active' : ''}" id="settings-btn" title="${shouldShowSettingsUpdateBadge() ? '应用设置（有可用更新）' : '应用设置'}" aria-label="${shouldShowSettingsUpdateBadge() ? '应用设置（有可用更新）' : '设置'}" aria-pressed="${isApiConfigViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderApiConfigIcon()}</span>
       <span class="toolbar-settings-btn-label">设置</span>
+      ${shouldShowSettingsUpdateBadge() ? '<span class="toolbar-settings-update-dot" aria-hidden="true"></span>' : ''}
     </button>
     <button type="button" class="toolbar-settings-btn settings-btn mcp-btn${isMcpViewActive ? ' is-active' : ''}" id="mcp-btn" title="管理 Claude Code MCP 服务器" aria-label="MCP 管理" aria-pressed="${isMcpViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderMcpIcon()}</span>
@@ -3972,6 +4030,16 @@ function attachEventListeners() {
       if (!section || section === settingsSection) return;
       settingsSection = section;
       render();
+      // 进入 CCM 更新页时，若 UI 显示有更新但句柄已丢，自动补一次检查
+      if (
+        section === 'app-update' &&
+        appUpdateInfo.updateAvailable &&
+        !appUpdate &&
+        appUpdateCheckStatus !== 'checking' &&
+        appUpdateCheckStatus !== 'downloading'
+      ) {
+        void checkAppUpdate(true);
+      }
     });
   });
   document.querySelector('#settings-btn')?.addEventListener('click', () => {
@@ -3993,6 +4061,14 @@ function attachEventListeners() {
     const updatePanel = document.querySelector('.settings-update-view');
     if (updatePanel && settingsSection === 'app-update') {
       bindAppUpdatePopoverEvents(updatePanel);
+      if (
+        appUpdateInfo.updateAvailable &&
+        !appUpdate &&
+        appUpdateCheckStatus !== 'checking' &&
+        appUpdateCheckStatus !== 'downloading'
+      ) {
+        void checkAppUpdate(true);
+      }
     } else if (updatePanel && settingsSection === 'claude-update') {
       bindClaudeUpdatePopoverEvents(updatePanel);
     }
