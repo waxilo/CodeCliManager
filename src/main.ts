@@ -242,10 +242,6 @@ let kiroUsageRequestId = 0;
 let deepSeekBalanceRequestId = 0;
 /** 主界面底部余额条异步查询序号 */
 let mainBalanceRequestId = 0;
-/** 主界面余额条定时刷新句柄 */
-let mainBalanceTimerId: number | null = null;
-/** 主界面余额条定时刷新间隔（毫秒） */
-const MAIN_BALANCE_REFRESH_INTERVAL_MS = 60_000;
 /** 上次成功展示的余额条内容，避免 render / 刷新时闪回占位符 */
 let mainBalanceCache: {
   profileId: string;
@@ -1912,8 +1908,7 @@ async function setupEventListeners() {
   // ESC 键取消正在运行的任务（参考 claudecodeui）
   document.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.key === 'Escape' && !e.repeat) {
-      const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
-      if (sendBtn?.dataset.loading === 'true') {
+      if (isSendButtonLoading()) {
         e.preventDefault();
         void abortSession();
       }
@@ -2321,7 +2316,17 @@ function canSendMessage(content?: string): boolean {
   return true;
 }
 
+/** 当前激活会话是否在运行中（与左侧会话列表同一数据源：runningSessions） */
+function isActiveConversationRunning(): boolean {
+  if (activeConversationId) {
+    return runningSessions.has(activeConversationId);
+  }
+  return runningSessions.has('pending');
+}
+
 function isSendButtonLoading(): boolean {
+  // 优先跟左侧一致：以 runningSessions 为准；dataset 仅覆盖撤回等短暂 UI busy
+  if (isActiveConversationRunning()) return true;
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
   return sendBtn?.dataset.loading === 'true';
 }
@@ -2371,7 +2376,13 @@ function updateSendButtonState() {
     return;
   }
 
-  const loading = sendBtn.dataset.loading === 'true';
+  // 与左侧一致：运行中以 runningSessions 为准；若 DOM 状态落后则完整同步（含输入区）
+  const sessionRunning = isActiveConversationRunning();
+  if (sessionRunning && sendBtn.dataset.loading !== 'true') {
+    setSendButtonLoading(true);
+    return;
+  }
+  const loading = sessionRunning || sendBtn.dataset.loading === 'true';
   const sendIcon = sendBtn.querySelector('.send-icon') as SVGElement | null;
   const stopIcon = sendBtn.querySelector('.stop-icon') as SVGElement | null;
   const hasContent = canSendMessage();
@@ -3917,6 +3928,10 @@ function render() {
   `;
   
   attachEventListeners();
+  // render 重建了发送按钮 DOM，按 runningSessions（与左侧同一逻辑）恢复 loading
+  if (!isApiConfigViewActive && !isSettingsViewActive && !isMcpViewActive) {
+    setSendButtonLoading(isActiveConversationRunning());
+  }
 }
 
 function attachEventListeners() {
@@ -4061,8 +4076,6 @@ function attachEventListeners() {
   if (!isApiConfigViewActive && !isSettingsViewActive && !isMcpViewActive) {
     bindDragDropFileRefs();
     startMainBalanceBarAutoRefresh();
-  } else {
-    stopMainBalanceBarAutoRefresh();
   }
 
   // 导入外部文件/文件夹按钮（点击弹出选择菜单）
@@ -4740,7 +4753,6 @@ function openApiConfigView() {
   if (isSidebarCollapsed) {
     setSidebarCollapsed(false);
   }
-  stopMainBalanceBarAutoRefresh();
   isApiConfigViewActive = true;
   render();
 }
@@ -5035,22 +5047,9 @@ function scheduleMainBalanceBar(): void {
   }, 0);
 }
 
-function stopMainBalanceBarAutoRefresh(): void {
-  if (mainBalanceTimerId != null) {
-    window.clearInterval(mainBalanceTimerId);
-    mainBalanceTimerId = null;
-  }
-}
-
-/** 进入主聊天页时立即刷新，并按固定间隔自动刷新 */
+/** 进入主聊天页时刷新余额条（无定时轮询） */
 function startMainBalanceBarAutoRefresh(): void {
-  stopMainBalanceBarAutoRefresh();
   scheduleMainBalanceBar();
-  mainBalanceTimerId = window.setInterval(() => {
-    if (isApiConfigViewActive || isSettingsViewActive || isMcpViewActive) return;
-    void refreshGitBranch();
-    void refreshMainBalanceBar();
-  }, MAIN_BALANCE_REFRESH_INTERVAL_MS);
 }
 
 function setProviderBalanceVisible(overlay: HTMLElement, visible: boolean) {
@@ -7370,8 +7369,7 @@ async function executePreparedCommand(
 }
 
 async function abortSession() {
-  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
-  if (!sendBtn || sendBtn.dataset.loading !== 'true') return;
+  if (!isSendButtonLoading()) return;
 
   try {
     const args: Record<string, string> = {};
@@ -7504,7 +7502,7 @@ function handleSendButtonClick() {
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
   if (!sendBtn) return;
 
-  if (sendBtn.dataset.loading === 'true') {
+  if (isSendButtonLoading()) {
     // 运行中：有输入内容则入队，否则停止当前任务
     if (canSendMessage()) {
       void sendMessage();
@@ -7723,10 +7721,8 @@ function selectConversation(id: string) {
   void refreshConversationFromBackend(id).then(() => {
     render();
 
-    // render() 重建整个 DOM 后，必须立即根据目标会话的运行状态恢复按钮
-    // 不能放在 setTimeout 中，否则中间可能有其他事件干扰
-    const thisSessionRunning = runningSessions.has(id);
-    setSendButtonLoading(thisSessionRunning);
+    // render() 已按 runningSessions 同步按钮；此处再读一次供流式 UI 恢复
+    const thisSessionRunning = isActiveConversationRunning();
     updateConversationListSpinner();
     refreshCommandQueueUI();
 
