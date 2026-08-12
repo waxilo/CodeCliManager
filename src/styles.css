@@ -2449,6 +2449,44 @@ body.is-sidebar-resizing {
   flex-shrink: 0;
 }
 
+.balance-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  width: 100%;
+  box-sizing: border-box;
+  height: 22px;
+  padding: 0 12px;
+  border-top: 1px solid var(--color-composer-border);
+  background: var(--color-composer-footer);
+  min-width: 0;
+  overflow: hidden;
+}
+
+.balance-status-bar[hidden] {
+  display: none;
+}
+
+.balance-status-bar-label {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--color-text-muted);
+}
+
+.balance-status-bar-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--color-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* ── 指令队列（每会话独立，运行中可入队）─────────────────────────── */
 .command-queue:empty {
   display: none;

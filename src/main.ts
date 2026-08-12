@@ -240,6 +240,12 @@ let kiroStatus: KiroStatusData | null = null;
 /** 额度 / 余额异步查询序号，避免过期结果回写 */
 let kiroUsageRequestId = 0;
 let deepSeekBalanceRequestId = 0;
+/** 主界面底部余额条异步查询序号 */
+let mainBalanceRequestId = 0;
+/** 主界面余额条定时刷新句柄 */
+let mainBalanceTimerId: number | null = null;
+/** 主界面余额条定时刷新间隔（毫秒） */
+const MAIN_BALANCE_REFRESH_INTERVAL_MS = 60_000;
 /** 主界面是否正在展示 MCP 管理页（非弹窗） */
 let isMcpViewActive = false;
 /** 防止 MCP 页异步挂载与关闭竞态 */
@@ -1111,6 +1117,7 @@ async function init() {
   if (!activeConversationId) {
     void refreshModelInfo();
   }
+  startMainBalanceBarAutoRefresh();
   setupEventListeners();
   setupExternalLinkInterceptor();
   bindSidebarResponsive();
@@ -1144,6 +1151,8 @@ async function setupKiroAutostartListener(): Promise<void> {
         } catch (e) {
           console.error('[kiro] 自动启动后刷新设置页失败:', e);
         }
+      } else {
+        scheduleMainBalanceBar();
       }
     });
     // 若自动启动已先于监听完成，补一次刷新
@@ -2491,6 +2500,15 @@ function renderSendButtonHtml(): string {
   `;
 }
 
+function renderBalanceStatusBarHtml(): string {
+  return `
+    <div id="balance-status-bar" class="balance-status-bar" hidden>
+      <span class="balance-status-bar-label" data-balance-label>余额</span>
+      <span class="balance-status-bar-value" data-balance-value>—</span>
+    </div>
+  `;
+}
+
 function renderInputComposerHtml(): string {
   return `
     <div class="input-area">
@@ -3479,6 +3497,7 @@ function closeMcpView() {
   }
   dismissMcpViewState();
   render();
+  startMainBalanceBarAutoRefresh();
 }
 
 async function loadMcpServers(): Promise<void> {
@@ -3867,6 +3886,7 @@ function render() {
         `}
       </div>
       </div>
+      ${!isApiConfigViewActive && !isSettingsViewActive && !isMcpViewActive ? renderBalanceStatusBarHtml() : ''}
     </div>
   `;
   
@@ -4014,6 +4034,9 @@ function attachEventListeners() {
   // 拖拽文件自动引用（全屏管理页无输入区，跳过）
   if (!isApiConfigViewActive && !isSettingsViewActive && !isMcpViewActive) {
     bindDragDropFileRefs();
+    startMainBalanceBarAutoRefresh();
+  } else {
+    stopMainBalanceBarAutoRefresh();
   }
 
   // 导入外部文件/文件夹按钮（点击弹出选择菜单）
@@ -4691,6 +4714,7 @@ function openApiConfigView() {
   if (isSidebarCollapsed) {
     setSidebarCollapsed(false);
   }
+  stopMainBalanceBarAutoRefresh();
   isApiConfigViewActive = true;
   render();
 }
@@ -4719,6 +4743,7 @@ function closeApiConfigView() {
   if (!activeConversationId) {
     void refreshModelInfo();
   }
+  startMainBalanceBarAutoRefresh();
 }
 
 function openSettingsView() {
@@ -4753,6 +4778,7 @@ function closeSettingsView() {
   }
   dismissSettingsViewState();
   render();
+  startMainBalanceBarAutoRefresh();
 }
 
 function mountSettingsView() {
@@ -4830,6 +4856,105 @@ function formatKiroUsageText(usage: KiroUsageData): string {
 function formatDeepSeekBalanceText(balance: DeepSeekBalanceData): string {
   const avail = balance.isAvailable ? '可用' : '不足';
   return `${balance.totalBalance} ${balance.currency}（赠送 ${balance.grantedBalance} / 充值 ${balance.toppedUpBalance} · ${avail}）`;
+}
+
+function isKiroProfile(profile: ApiProfileItem | undefined): boolean {
+  return Boolean(profile && profile.name === 'Kiro');
+}
+
+function getMainBalanceBarEl(): HTMLElement | null {
+  return document.querySelector('#balance-status-bar');
+}
+
+function setMainBalanceBarVisible(visible: boolean): void {
+  const bar = getMainBalanceBarEl();
+  if (bar) bar.hidden = !visible;
+}
+
+function setMainBalanceBarContent(label: string, value: string): void {
+  const bar = getMainBalanceBarEl();
+  if (!bar) return;
+  const labelEl = bar.querySelector('[data-balance-label]') as HTMLElement | null;
+  const valueEl = bar.querySelector('[data-balance-value]') as HTMLElement | null;
+  if (labelEl) labelEl.textContent = label;
+  if (valueEl) valueEl.textContent = value;
+}
+
+/** 刷新主界面底部余额条（DeepSeek 余额 / Kiro 额度；其余配置隐藏） */
+async function refreshMainBalanceBar(): Promise<void> {
+  const bar = getMainBalanceBarEl();
+  if (!bar) return;
+
+  const requestId = ++mainBalanceRequestId;
+  try {
+    const state = await invoke<ApiProfilesState>('get_api_profiles_state');
+    if (requestId !== mainBalanceRequestId) return;
+
+    const activeProfile = state.profiles.find((p) => p.id === state.activeProfileId);
+    const baseUrl = (activeProfile?.baseUrl || state.current?.baseUrl || '').trim();
+    const profileName = activeProfile?.name || '官方默认';
+
+    if (isKiroProfile(activeProfile)) {
+      setMainBalanceBarVisible(true);
+      setMainBalanceBarContent(`${profileName} · 额度`, '查询中…');
+      try {
+        const usage = await invoke<KiroUsageData>('kiro_usage');
+        if (requestId !== mainBalanceRequestId) return;
+        setMainBalanceBarContent(`${profileName} · 额度`, formatKiroUsageText(usage));
+      } catch (e) {
+        if (requestId !== mainBalanceRequestId) return;
+        setMainBalanceBarContent(`${profileName} · 额度`, `查询失败：${String(e)}`);
+      }
+      return;
+    }
+
+    if (isDeepSeekBaseUrl(baseUrl) && activeProfile) {
+      setMainBalanceBarVisible(true);
+      setMainBalanceBarContent(`${profileName} · 余额`, '查询中…');
+      try {
+        const balance = await invoke<DeepSeekBalanceData>('fetch_deepseek_balance', {
+          baseUrl,
+          apiKey: null,
+          profileId: activeProfile.id,
+        });
+        if (requestId !== mainBalanceRequestId) return;
+        setMainBalanceBarContent(`${profileName} · 余额`, formatDeepSeekBalanceText(balance));
+      } catch (e) {
+        if (requestId !== mainBalanceRequestId) return;
+        setMainBalanceBarContent(`${profileName} · 余额`, `查询失败：${String(e)}`);
+      }
+      return;
+    }
+
+    setMainBalanceBarVisible(false);
+  } catch {
+    if (requestId !== mainBalanceRequestId) return;
+    setMainBalanceBarVisible(false);
+  }
+}
+
+function scheduleMainBalanceBar(): void {
+  window.setTimeout(() => {
+    if (isApiConfigViewActive || isSettingsViewActive || isMcpViewActive) return;
+    void refreshMainBalanceBar();
+  }, 0);
+}
+
+function stopMainBalanceBarAutoRefresh(): void {
+  if (mainBalanceTimerId != null) {
+    window.clearInterval(mainBalanceTimerId);
+    mainBalanceTimerId = null;
+  }
+}
+
+/** 进入主聊天页时立即刷新，并按固定间隔自动刷新 */
+function startMainBalanceBarAutoRefresh(): void {
+  stopMainBalanceBarAutoRefresh();
+  scheduleMainBalanceBar();
+  mainBalanceTimerId = window.setInterval(() => {
+    if (isApiConfigViewActive || isSettingsViewActive || isMcpViewActive) return;
+    void refreshMainBalanceBar();
+  }, MAIN_BALANCE_REFRESH_INTERVAL_MS);
 }
 
 function setProviderBalanceVisible(overlay: HTMLElement, visible: boolean) {
