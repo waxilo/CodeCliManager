@@ -200,15 +200,19 @@ let sidebarAutoCollapsed = false;
 let sidebarWasNarrow: boolean | null = null;
 /** 侧边栏会话搜索关键词 */
 let sidebarSearchQuery = '';
-/** 主界面是否正在展示设置页（非弹窗） */
+/** 主界面是否正在展示 API 配置页（非弹窗） */
 let isApiConfigViewActive = false;
-type SettingsSection = 'api' | 'app-update' | 'claude-update';
+/** 主界面是否正在展示设置页（仅更新相关） */
+let isSettingsViewActive = false;
+type SettingsSection = 'app-update' | 'claude-update';
 /** 设置页当前选中的内容 */
-let settingsSection: SettingsSection = 'api';
+let settingsSection: SettingsSection = 'app-update';
 /** 防止异步挂载与关闭竞态 */
 let apiConfigMountToken = 0;
 /** API 配置页 Escape 键监听（需在关闭时统一移除） */
 let apiConfigEscapeHandler: ((event: KeyboardEvent) => void) | null = null;
+/** 设置页 Escape 键监听 */
+let settingsEscapeHandler: ((event: KeyboardEvent) => void) | null = null;
 /** Kiro 反代代理状态（由后端 kiro_status 返回） */
 let kiroStatus: KiroStatusData | null = null;
 /** 主界面是否正在展示 MCP 管理页（非弹窗） */
@@ -1223,7 +1227,7 @@ function refreshClaudeUpdatePopoverIfOpen() {
 }
 
 function renderSettingsUpdateSectionIfOpen(): void {
-  if (!isApiConfigViewActive || (settingsSection !== 'app-update' && settingsSection !== 'claude-update')) return;
+  if (!isSettingsViewActive || (settingsSection !== 'app-update' && settingsSection !== 'claude-update')) return;
   const view = document.querySelector<HTMLElement>('.settings-update-view');
   if (!view) return;
   view.innerHTML = settingsSection === 'app-update'
@@ -1411,7 +1415,7 @@ function syncSettingsUpdateBadgeUI(): void {
     dot.remove();
   }
 
-  const title = showBadge ? '应用设置（有可用更新）' : '应用设置';
+  const title = showBadge ? '设置（有可用更新）' : '设置';
   btn.title = title;
   btn.setAttribute('aria-label', title);
 }
@@ -2139,8 +2143,8 @@ function handleSessionError(payload: SessionErrorPayload) {
 }
 
 function ensureChatViewVisible() {
-  // API 配置页占用主区域时，不因后台流式事件强制切回聊天视图
-  if (isApiConfigViewActive) return;
+  // 全屏管理页占用主区域时，不因后台流式事件强制切回聊天视图
+  if (isApiConfigViewActive || isSettingsViewActive || isMcpViewActive) return;
   const mainContent = document.querySelector('.main-content');
   if (!mainContent) return;
   if (!document.querySelector('#message-list')) {
@@ -2968,6 +2972,8 @@ function groupConversationsByWorkspace(): { workspaces: WorkspaceGroup[]; uncate
 /** 在指定工作区快速新建对话（预设工作目录，跳过选目录步骤） */
 function newChatInWorkspace(workspacePath: string): void {
   dismissApiConfigViewState();
+  dismissSettingsViewState();
+  dismissMcpViewState();
   activeConversationId = '';
   invalidateFileCache();
   pendingUserMessage = null;
@@ -3230,7 +3236,7 @@ function renderConversationList(): string {
 
 /** 局部重渲染侧边栏会话列表 */
 function refreshConversationListDom(): void {
-  if (isApiConfigViewActive) return;
+  if (isApiConfigViewActive || isSettingsViewActive) return;
   const list = document.querySelector('#conversation-list');
   if (list) list.innerHTML = renderConversationList();
 }
@@ -3361,10 +3367,24 @@ function renderMcpIcon(): string {
   `;
 }
 
-function renderTitlebarActions(): string {
+function renderSettingsIcon(): string {
   return `
-    <button type="button" class="toolbar-settings-btn settings-btn${isApiConfigViewActive ? ' is-active' : ''}" id="settings-btn" title="${shouldShowSettingsUpdateBadge() ? '应用设置（有可用更新）' : '应用设置'}" aria-label="${shouldShowSettingsUpdateBadge() ? '应用设置（有可用更新）' : '设置'}" aria-pressed="${isApiConfigViewActive}">
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  `;
+}
+
+function renderTitlebarActions(): string {
+  const settingsTitle = shouldShowSettingsUpdateBadge() ? '设置（有可用更新）' : '设置';
+  return `
+    <button type="button" class="toolbar-settings-btn settings-btn${isApiConfigViewActive ? ' is-active' : ''}" id="api-config-btn" title="管理 Claude Code API 配置" aria-label="API 配置" aria-pressed="${isApiConfigViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderApiConfigIcon()}</span>
+      <span class="toolbar-settings-btn-label">API 配置</span>
+    </button>
+    <button type="button" class="toolbar-settings-btn settings-btn${isSettingsViewActive ? ' is-active' : ''}" id="settings-btn" title="${escapeHtml(settingsTitle)}" aria-label="${escapeHtml(settingsTitle)}" aria-pressed="${isSettingsViewActive}">
+      <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderSettingsIcon()}</span>
       <span class="toolbar-settings-btn-label">设置</span>
       ${shouldShowSettingsUpdateBadge() ? '<span class="toolbar-settings-update-dot" aria-hidden="true"></span>' : ''}
     </button>
@@ -3381,11 +3401,23 @@ function renderTitlebarActions(): string {
 function renderApiConfigSidebarHtml(): string {
   return `
     <div class="api-config-sidebar settings-sidebar">
+      <div class="settings-profiles-header">
+        <span>已保存配置</span>
+        <span class="settings-profiles-hint">左键查看 · 右键应用 / 删除</span>
+      </div>
+      <div class="settings-profile-list"></div>
+      <div class="api-config-sidebar-actions">
+        <button type="button" class="settings-add-profile">+ 新建</button>
+        <button type="button" class="settings-import-cc-switch">从 CC Switch 导入</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsSidebarHtml(): string {
+  return `
+    <div class="api-config-sidebar settings-sidebar">
       <div class="settings-section-nav" role="navigation" aria-label="设置分类">
-        <button type="button" class="settings-section-item${settingsSection === 'api' ? ' is-active' : ''}" data-settings-section="api">
-          <span class="settings-section-item-icon">${renderApiConfigIcon()}</span>
-          <span>API 配置</span>
-        </button>
         <button type="button" class="settings-section-item${settingsSection === 'app-update' ? ' is-active' : ''}" data-settings-section="app-update">
           <span class="settings-section-item-icon">${renderAppUpdateIcon()}</span>
           <span>CCM 更新</span>
@@ -3397,29 +3429,15 @@ function renderApiConfigSidebarHtml(): string {
           ${shouldShowClaudeUpdateBadge() ? '<span class="settings-section-item-dot" aria-label="有更新"></span>' : ''}
         </button>
       </div>
-      ${settingsSection === 'api' ? `
-        <div class="settings-profiles-header">
-          <span>已保存配置</span>
-          <span class="settings-profiles-hint">左键查看 · 右键应用 / 删除</span>
-        </div>
-        <div class="settings-profile-list"></div>
-        <div class="api-config-sidebar-actions">
-          <button type="button" class="settings-add-profile">+ 新建</button>
-          <button type="button" class="settings-import-cc-switch">从 CC Switch 导入</button>
-        </div>
-      ` : ''}
     </div>
   `;
 }
 
 function renderSettingsViewHtml(): string {
-  if (settingsSection === 'app-update') {
-    return `<div class="settings-update-view" id="settings-app-update-view">${renderAppUpdatePopoverBody()}</div>`;
-  }
   if (settingsSection === 'claude-update') {
     return `<div class="settings-update-view" id="settings-claude-update-view">${renderClaudeUpdatePopoverBody()}</div>`;
   }
-  return renderApiConfigViewHtml();
+  return `<div class="settings-update-view" id="settings-app-update-view">${renderAppUpdatePopoverBody()}</div>`;
 }
 
 function renderApiConfigViewHtml(): string {
@@ -3522,9 +3540,12 @@ function renderMcpViewHtml(): string {
 
 function openMcpView() {
   if (isMcpViewActive) return;
-  // 两个全屏设置页互斥：打开 MCP 管理页前先退出 API 配置页
+  // 全屏管理页互斥
   if (isApiConfigViewActive) {
     dismissApiConfigViewState();
+  }
+  if (isSettingsViewActive) {
+    dismissSettingsViewState();
   }
   isMcpViewActive = true;
   render();
@@ -3860,9 +3881,9 @@ function render() {
           ${renderTitlebarActions()}
         </div>
       </header>
-      <div class="app-container${isSidebarCollapsed ? ' is-sidebar-collapsed' : ''}${isApiConfigViewActive ? ' is-api-config' : isMcpViewActive ? ' is-mcp' : ''}">
-      <div class="sidebar${isApiConfigViewActive ? ' is-api-config' : ''}">
-        ${isApiConfigViewActive ? renderApiConfigSidebarHtml() : isMcpViewActive ? '' : `
+      <div class="app-container${isSidebarCollapsed ? ' is-sidebar-collapsed' : ''}${isApiConfigViewActive || isSettingsViewActive ? ' is-api-config' : isMcpViewActive ? ' is-mcp' : ''}">
+      <div class="sidebar${isApiConfigViewActive || isSettingsViewActive ? ' is-api-config' : ''}">
+        ${isApiConfigViewActive ? renderApiConfigSidebarHtml() : isSettingsViewActive ? renderSettingsSidebarHtml() : isMcpViewActive ? '' : `
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
             <div class="new-chat-btn-wrapper">
@@ -3910,8 +3931,8 @@ function render() {
         aria-orientation="vertical"
         aria-label="调整侧边栏宽度"
       ></div>
-      <div class="main-content${isApiConfigViewActive ? ' is-api-config' : isMcpViewActive ? ' is-mcp' : ''}">
-        ${isApiConfigViewActive ? renderSettingsViewHtml() : isMcpViewActive ? renderMcpViewHtml() : `
+      <div class="main-content${isApiConfigViewActive || isSettingsViewActive ? ' is-api-config' : isMcpViewActive ? ' is-mcp' : ''}">
+        ${isApiConfigViewActive ? renderApiConfigViewHtml() : isSettingsViewActive ? renderSettingsViewHtml() : isMcpViewActive ? renderMcpViewHtml() : `
         <div class="drop-zone-overlay" id="drop-zone-overlay">
           <div class="drop-zone-content">
             <div class="drop-zone-icon" aria-hidden="true">
@@ -4042,11 +4063,18 @@ function attachEventListeners() {
       }
     });
   });
-  document.querySelector('#settings-btn')?.addEventListener('click', () => {
+  document.querySelector('#api-config-btn')?.addEventListener('click', () => {
     if (isApiConfigViewActive) {
       closeApiConfigView();
     } else {
       openApiConfigView();
+    }
+  });
+  document.querySelector('#settings-btn')?.addEventListener('click', () => {
+    if (isSettingsViewActive) {
+      closeSettingsView();
+    } else {
+      openSettingsView();
     }
   });
   document.querySelector('#mcp-btn')?.addEventListener('click', () => {
@@ -4058,6 +4086,10 @@ function attachEventListeners() {
   });
 
   if (isApiConfigViewActive) {
+    void mountApiConfigView();
+  }
+
+  if (isSettingsViewActive) {
     const updatePanel = document.querySelector('.settings-update-view');
     if (updatePanel && settingsSection === 'app-update') {
       bindAppUpdatePopoverEvents(updatePanel);
@@ -4072,15 +4104,15 @@ function attachEventListeners() {
     } else if (updatePanel && settingsSection === 'claude-update') {
       bindClaudeUpdatePopoverEvents(updatePanel);
     }
-    void mountApiConfigView();
+    void mountSettingsView();
   }
 
   if (isMcpViewActive) {
     void mountMcpView();
   }
 
-  // 拖拽文件自动引用（API 配置页无输入区，跳过）
-  if (!isApiConfigViewActive) {
+  // 拖拽文件自动引用（全屏管理页无输入区，跳过）
+  if (!isApiConfigViewActive && !isSettingsViewActive && !isMcpViewActive) {
     bindDragDropFileRefs();
   }
 
@@ -4747,9 +4779,12 @@ async function refreshSettingsModal(
 
 function openApiConfigView() {
   if (isApiConfigViewActive) return;
-  // 两个全屏设置页互斥：打开 API 配置前先退出 MCP 管理页
+  // 全屏管理页互斥
   if (isMcpViewActive) {
     dismissMcpViewState();
+  }
+  if (isSettingsViewActive) {
+    dismissSettingsViewState();
   }
   // 配置列表在左侧栏，收起时先展开以免看不见
   if (isSidebarCollapsed) {
@@ -4783,6 +4818,57 @@ function closeApiConfigView() {
   if (!activeConversationId) {
     void refreshModelInfo();
   }
+}
+
+function openSettingsView() {
+  if (isSettingsViewActive) return;
+  if (isApiConfigViewActive) {
+    dismissApiConfigViewState();
+  }
+  if (isMcpViewActive) {
+    dismissMcpViewState();
+  }
+  if (isSidebarCollapsed) {
+    setSidebarCollapsed(false);
+  }
+  isSettingsViewActive = true;
+  render();
+}
+
+/** 退出设置页状态（不触发 render） */
+function dismissSettingsViewState() {
+  if (!isSettingsViewActive && !settingsEscapeHandler) return;
+  if (settingsEscapeHandler) {
+    document.removeEventListener('keydown', settingsEscapeHandler);
+    settingsEscapeHandler = null;
+  }
+  isSettingsViewActive = false;
+}
+
+function closeSettingsView() {
+  if (!isSettingsViewActive) {
+    dismissSettingsViewState();
+    return;
+  }
+  dismissSettingsViewState();
+  render();
+}
+
+function mountSettingsView() {
+  if (!isSettingsViewActive) return;
+
+  const onEscapeKey = (event: KeyboardEvent) => {
+    if (event.key !== 'Escape') return;
+    if (!isSettingsViewActive) return;
+    event.preventDefault();
+    closeSettingsView();
+  };
+
+  if (settingsEscapeHandler) {
+    document.removeEventListener('keydown', settingsEscapeHandler);
+  }
+  settingsEscapeHandler = onEscapeKey;
+  document.addEventListener('keydown', onEscapeKey);
 }
 
 function formatKiroExpiry(expiresAt: string | null): string {
@@ -6786,6 +6872,8 @@ async function pickNewWorkspaceDirectory(): Promise<void> {
   }
   // 完成选目录后执行创建新会话
   dismissApiConfigViewState();
+  dismissSettingsViewState();
+  dismissMcpViewState();
   activeConversationId = '';
   invalidateFileCache();
   pendingUserMessage = null;
@@ -7357,6 +7445,8 @@ function escapeHtml(text: string): string {
 // 全局函数 - 用于 HTML 模板中调用
 function selectConversation(id: string) {
   dismissApiConfigViewState();
+  dismissSettingsViewState();
+  dismissMcpViewState();
   activeConversationId = id;
   invalidateFileCache();
 
