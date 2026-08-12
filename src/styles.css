@@ -2452,7 +2452,7 @@ body.is-sidebar-resizing {
 .balance-status-bar {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   flex-shrink: 0;
   width: 100%;
   box-sizing: border-box;
@@ -2464,8 +2464,38 @@ body.is-sidebar-resizing {
   overflow: hidden;
 }
 
-.balance-status-bar[hidden] {
+.status-bar-git,
+.status-bar-balance {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.status-bar-git {
+  flex-shrink: 1;
+  max-width: 42%;
+}
+
+.status-bar-balance {
+  flex: 1;
+}
+
+.status-bar-git[hidden],
+.status-bar-balance[hidden],
+.status-bar-divider[hidden] {
   display: none;
+}
+
+.status-bar-divider {
+  flex-shrink: 0;
+  align-self: center;
+  width: 2px;
+  height: 12px;
+  margin: 0;
+  border-radius: 1px;
+  background: var(--color-danger);
+  opacity: 0.9;
 }
 
 .balance-status-bar-label {
@@ -2476,8 +2506,8 @@ body.is-sidebar-resizing {
   color: var(--color-text-muted);
 }
 
+.status-bar-git-value,
 .balance-status-bar-value {
-  flex: 1;
   min-width: 0;
   font-size: 10px;
   line-height: 1;
@@ -2485,6 +2515,10 @@ body.is-sidebar-resizing {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.status-bar-git-value {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 
 /* ── 指令队列（每会话独立，运行中可入队）─────────────────────────── */

@@ -3744,6 +3744,47 @@ fn list_project_files(project_dir: String) -> Result<Vec<String>, String> {
     Ok(files)
 }
 
+/// 查询项目目录当前 git 分支；非仓库或不在 git 中时返回 None。
+#[tauri::command]
+fn get_git_branch(project_dir: String) -> Result<Option<String>, String> {
+    let dir = project_dir.trim();
+    if dir.is_empty() {
+        return Ok(None);
+    }
+    let root = Path::new(dir);
+    if !root.is_dir() {
+        return Ok(None);
+    }
+
+    let output = Command::new("git")
+        .args(["-C", dir, "branch", "--show-current"])
+        .output()
+        .map_err(|e| format!("执行 git 失败: {}", e))?;
+
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let branch = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !branch.is_empty() {
+        return Ok(Some(branch));
+    }
+
+    // detached HEAD：展示短 commit
+    let head = Command::new("git")
+        .args(["-C", dir, "rev-parse", "--short", "HEAD"])
+        .output()
+        .map_err(|e| format!("执行 git 失败: {}", e))?;
+    if !head.status.success() {
+        return Ok(None);
+    }
+    let sha = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    if sha.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(format!("detached@{sha}")))
+}
+
 // ── 文件引用功能：读取文件内容 ──────────────────────────────────────
 #[tauri::command]
 fn read_file_content(file_path: String) -> Result<String, String> {
@@ -5048,6 +5089,7 @@ pub fn run() {
             upsert_mcp_server,
             delete_mcp_server,
             list_project_files,
+            get_git_branch,
             read_file_content,
             write_file_bytes,
             read_file_base64,

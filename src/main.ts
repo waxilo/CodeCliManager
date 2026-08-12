@@ -246,6 +246,17 @@ let mainBalanceRequestId = 0;
 let mainBalanceTimerId: number | null = null;
 /** 主界面余额条定时刷新间隔（毫秒） */
 const MAIN_BALANCE_REFRESH_INTERVAL_MS = 60_000;
+/** 上次成功展示的余额条内容，避免 render / 刷新时闪回占位符 */
+let mainBalanceCache: {
+  profileId: string;
+  label: string;
+  value: string;
+} | null = null;
+/** 上次成功展示的 git 分支（按项目目录缓存） */
+let gitBranchCache: {
+  projectDir: string;
+  branch: string;
+} | null = null;
 /** 主界面是否正在展示 MCP 管理页（非弹窗） */
 let isMcpViewActive = false;
 /** 防止 MCP 页异步挂载与关闭竞态 */
@@ -2501,10 +2512,25 @@ function renderSendButtonHtml(): string {
 }
 
 function renderBalanceStatusBarHtml(): string {
+  const balance = mainBalanceCache;
+  const git = gitBranchCache;
+  const branch = git?.branch ?? '';
+  const label = balance?.label ?? '余额';
+  const value = balance?.value ?? '';
+  const gitHidden = git ? '' : ' hidden';
+  const balanceHidden = balance ? '' : ' hidden';
+  const dividerHidden = git && balance ? '' : ' hidden';
   return `
-    <div id="balance-status-bar" class="balance-status-bar" hidden>
-      <span class="balance-status-bar-label" data-balance-label>余额</span>
-      <span class="balance-status-bar-value" data-balance-value>—</span>
+    <div id="balance-status-bar" class="balance-status-bar">
+      <span class="status-bar-git"${gitHidden}>
+        <span class="balance-status-bar-label">分支</span>
+        <span class="status-bar-git-value" data-git-branch title="${escapeHtml(branch)}">${escapeHtml(branch)}</span>
+      </span>
+      <span class="status-bar-divider" data-status-divider${dividerHidden} aria-hidden="true"></span>
+      <span class="status-bar-balance"${balanceHidden}>
+        <span class="balance-status-bar-label" data-balance-label>${escapeHtml(label)}</span>
+        <span class="balance-status-bar-value" data-balance-value title="${escapeHtml(value)}">${escapeHtml(value)}</span>
+      </span>
     </div>
   `;
 }
@@ -4866,18 +4892,79 @@ function getMainBalanceBarEl(): HTMLElement | null {
   return document.querySelector('#balance-status-bar');
 }
 
-function setMainBalanceBarVisible(visible: boolean): void {
+function syncStatusBarSections(): void {
   const bar = getMainBalanceBarEl();
-  if (bar) bar.hidden = !visible;
+  if (!bar) return;
+  const gitWrap = bar.querySelector('.status-bar-git') as HTMLElement | null;
+  const balanceWrap = bar.querySelector('.status-bar-balance') as HTMLElement | null;
+  const divider = bar.querySelector('[data-status-divider]') as HTMLElement | null;
+  if (gitWrap) gitWrap.hidden = !gitBranchCache;
+  if (balanceWrap) balanceWrap.hidden = !mainBalanceCache;
+  if (divider) divider.hidden = !(gitBranchCache && mainBalanceCache);
 }
 
-function setMainBalanceBarContent(label: string, value: string): void {
+function setMainBalanceBarContent(profileId: string, label: string, value: string): void {
+  mainBalanceCache = { profileId, label, value };
   const bar = getMainBalanceBarEl();
   if (!bar) return;
   const labelEl = bar.querySelector('[data-balance-label]') as HTMLElement | null;
   const valueEl = bar.querySelector('[data-balance-value]') as HTMLElement | null;
   if (labelEl) labelEl.textContent = label;
-  if (valueEl) valueEl.textContent = value;
+  if (valueEl) {
+    valueEl.textContent = value;
+    valueEl.title = value;
+  }
+  syncStatusBarSections();
+}
+
+function clearMainBalanceBarCache(): void {
+  mainBalanceCache = null;
+  syncStatusBarSections();
+}
+
+function setGitBranchContent(projectDir: string, branch: string): void {
+  gitBranchCache = { projectDir, branch };
+  const bar = getMainBalanceBarEl();
+  if (!bar) return;
+  const branchEl = bar.querySelector('[data-git-branch]') as HTMLElement | null;
+  if (branchEl) {
+    branchEl.textContent = branch;
+    branchEl.title = branch;
+  }
+  syncStatusBarSections();
+}
+
+function clearGitBranchCache(): void {
+  gitBranchCache = null;
+  syncStatusBarSections();
+}
+
+/** 刷新当前项目目录的 git 分支（有缓存时先保留，结果回来再替换） */
+async function refreshGitBranch(): Promise<void> {
+  const bar = getMainBalanceBarEl();
+  if (!bar) return;
+
+  const projectDir = getEffectiveProjectDir();
+  if (!projectDir) {
+    clearGitBranchCache();
+    return;
+  }
+
+  if (gitBranchCache && gitBranchCache.projectDir !== projectDir) {
+    clearGitBranchCache();
+  }
+
+  try {
+    const branch = await invoke<string | null>('get_git_branch', { projectDir });
+    if (getEffectiveProjectDir() !== projectDir) return;
+    if (branch && branch.trim()) {
+      setGitBranchContent(projectDir, branch.trim());
+    } else {
+      clearGitBranchCache();
+    }
+  } catch {
+    // 保留缓存，避免偶发失败把分支刷没
+  }
 }
 
 /** 刷新主界面底部余额条（DeepSeek 余额 / Kiro 额度；其余配置隐藏） */
@@ -4893,24 +4980,29 @@ async function refreshMainBalanceBar(): Promise<void> {
     const activeProfile = state.profiles.find((p) => p.id === state.activeProfileId);
     const baseUrl = (activeProfile?.baseUrl || state.current?.baseUrl || '').trim();
     const profileName = activeProfile?.name || '官方默认';
+    const profileId = activeProfile?.id ?? '';
+
+    // 配置已切换时，不要继续展示上一套配置的余额
+    if (mainBalanceCache && mainBalanceCache.profileId !== profileId) {
+      clearMainBalanceBarCache();
+    }
 
     if (isKiroProfile(activeProfile)) {
-      setMainBalanceBarVisible(true);
-      setMainBalanceBarContent(`${profileName} · 额度`, '查询中…');
       try {
         const usage = await invoke<KiroUsageData>('kiro_usage');
         if (requestId !== mainBalanceRequestId) return;
-        setMainBalanceBarContent(`${profileName} · 额度`, formatKiroUsageText(usage));
+        setMainBalanceBarContent(profileId, `${profileName} · 额度`, formatKiroUsageText(usage));
       } catch (e) {
         if (requestId !== mainBalanceRequestId) return;
-        setMainBalanceBarContent(`${profileName} · 额度`, `查询失败：${String(e)}`);
+        // 已有上次内容时保留；仅首次失败才写错误
+        if (!mainBalanceCache || mainBalanceCache.profileId !== profileId) {
+          setMainBalanceBarContent(profileId, `${profileName} · 额度`, `查询失败：${String(e)}`);
+        }
       }
       return;
     }
 
     if (isDeepSeekBaseUrl(baseUrl) && activeProfile) {
-      setMainBalanceBarVisible(true);
-      setMainBalanceBarContent(`${profileName} · 余额`, '查询中…');
       try {
         const balance = await invoke<DeepSeekBalanceData>('fetch_deepseek_balance', {
           baseUrl,
@@ -4918,24 +5010,27 @@ async function refreshMainBalanceBar(): Promise<void> {
           profileId: activeProfile.id,
         });
         if (requestId !== mainBalanceRequestId) return;
-        setMainBalanceBarContent(`${profileName} · 余额`, formatDeepSeekBalanceText(balance));
+        setMainBalanceBarContent(profileId, `${profileName} · 余额`, formatDeepSeekBalanceText(balance));
       } catch (e) {
         if (requestId !== mainBalanceRequestId) return;
-        setMainBalanceBarContent(`${profileName} · 余额`, `查询失败：${String(e)}`);
+        if (!mainBalanceCache || mainBalanceCache.profileId !== profileId) {
+          setMainBalanceBarContent(profileId, `${profileName} · 余额`, `查询失败：${String(e)}`);
+        }
       }
       return;
     }
 
-    setMainBalanceBarVisible(false);
+    clearMainBalanceBarCache();
   } catch {
     if (requestId !== mainBalanceRequestId) return;
-    setMainBalanceBarVisible(false);
+    // 保留缓存，避免偶发失败把底栏刷没
   }
 }
 
 function scheduleMainBalanceBar(): void {
   window.setTimeout(() => {
     if (isApiConfigViewActive || isSettingsViewActive || isMcpViewActive) return;
+    void refreshGitBranch();
     void refreshMainBalanceBar();
   }, 0);
 }
@@ -4953,6 +5048,7 @@ function startMainBalanceBarAutoRefresh(): void {
   scheduleMainBalanceBar();
   mainBalanceTimerId = window.setInterval(() => {
     if (isApiConfigViewActive || isSettingsViewActive || isMcpViewActive) return;
+    void refreshGitBranch();
     void refreshMainBalanceBar();
   }, MAIN_BALANCE_REFRESH_INTERVAL_MS);
 }
@@ -5856,6 +5952,7 @@ async function mountApiConfigView() {
     const applyProfile = async (profileId: string) => {
       try {
         await invoke('switch_api_profile', { profileId });
+        clearMainBalanceBarCache();
         await refreshSettingsModal(overlay, profileId, handleProfileConfigLoaded);
         if (livePathEl) {
           const state = await invoke<ApiProfilesState>('get_api_profiles_state');
@@ -5890,6 +5987,7 @@ async function mountApiConfigView() {
     const applyOfficial = async () => {
       try {
         await invoke('use_official_api');
+        clearMainBalanceBarCache();
         await refreshSettingsModal(overlay, null, handleProfileConfigLoaded);
         if (livePathEl) {
           const state = await invoke<ApiProfilesState>('get_api_profiles_state');
@@ -6125,9 +6223,11 @@ async function mountApiConfigView() {
     try {
       if (profileId === OFFICIAL_PROFILE_ID) {
         await invoke('use_official_api');
+        clearMainBalanceBarCache();
         await refreshSettingsModal(overlay, null, handleProfileConfigLoaded);
       } else {
         await invoke('switch_api_profile', { profileId });
+        clearMainBalanceBarCache();
         await refreshSettingsModal(overlay, profileId, handleProfileConfigLoaded);
       }
       if (livePathEl) {
