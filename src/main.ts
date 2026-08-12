@@ -151,8 +151,6 @@ type ThemeMode = 'light' | 'dark';
 const THEME_STORAGE_KEY = 'codemanager-theme';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'codemanager-sidebar-width';
 const SIDEBAR_COLLAPSED_STORAGE_KEY = 'codemanager-sidebar-collapsed';
-const CLAUDE_UPDATE_DISMISS_KEY = 'codemanager-claude-update-dismissed';
-const APP_UPDATE_DISMISS_KEY = 'codemanager-app-update-dismissed';
 const DEFAULT_SIDEBAR_WIDTH = 280;
 /** 历史默认宽度：命中这些值时视为「用户从未手动调整」，自动迁移到新默认宽度 */
 const LEGACY_DEFAULT_SIDEBAR_WIDTHS = [320, 184];
@@ -269,13 +267,6 @@ type ClaudeUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'updating' | 'err
 
 let claudeUpdateInfo: ClaudeCodeUpdateInfo | null = null;
 let claudeUpdateCheckStatus: ClaudeUpdateCheckStatus = 'idle';
-let claudeUpdateDismissedVersion: string | null = (() => {
-  try {
-    return localStorage.getItem(CLAUDE_UPDATE_DISMISS_KEY);
-  } catch {
-    return null;
-  }
-})();
 let claudeUpdateCheckPromise: Promise<void> | null = null;
 let claudeUpdateError: string | null = null;
 
@@ -300,13 +291,6 @@ let appUpdateInfo: AppUpdateInfo = {
 };
 let appUpdateCheckStatus: AppUpdateCheckStatus = 'idle';
 let appUpdateProgress: { downloaded: number; total: number } | null = null;
-let appUpdateDismissedVersion: string | null = (() => {
-  try {
-    return localStorage.getItem(APP_UPDATE_DISMISS_KEY);
-  } catch {
-    return null;
-  }
-})();
 let appUpdateCheckPromise: Promise<void> | null = null;
 /** 新加入列表、需要播放淡入动画的会话 ID */
 const newConversationIds = new Set<string>();
@@ -1195,6 +1179,10 @@ async function checkClaudeCodeUpdate(_force = false): Promise<void> {
   claudeUpdateCheckPromise = (async () => {
     try {
       const info = await invoke<ClaudeCodeUpdateInfo>('check_claude_code_update');
+      // 与 CCM 一致：已是最新时若 latest 为空则回填为当前版本
+      if (!info.updateAvailable && info.installed && !info.latest) {
+        info.latest = info.installed;
+      }
       claudeUpdateInfo = info;
       claudeUpdateError = null;
       claudeUpdateCheckStatus = info.error && !info.installed && !info.latest ? 'error' : 'ready';
@@ -1260,61 +1248,29 @@ async function runClaudeCodeSilentUpdate(): Promise<void> {
   }
 }
 
-async function openClaudeCodeUpdateTerminal(): Promise<void> {
-  try {
-    await invoke('open_claude_code_update_terminal');
-    showCopyToastMsg('已打开终端执行更新');
-    if (!document.querySelector('#settings-claude-update-view')) {
-      closeClaudeUpdatePopover();
-    }
-  } catch (e) {
-    alert('打开更新终端失败: ' + String(e));
-  }
-}
-
-function dismissClaudeUpdateReminder() {
-  const latest = claudeUpdateInfo?.latest;
-  if (!latest) return;
-  claudeUpdateDismissedVersion = latest;
-  try {
-    localStorage.setItem(CLAUDE_UPDATE_DISMISS_KEY, latest);
-  } catch {
-    /* ignore */
-  }
-  syncClaudeUpdateButtonUI();
-  renderSettingsUpdateSectionIfOpen();
-}
-
 function renderClaudeUpdatePopoverBody(): string {
   const info = claudeUpdateInfo;
   const checking = claudeUpdateCheckStatus === 'checking';
   const updating = claudeUpdateCheckStatus === 'updating';
-
-  if (checking && !info) {
-    return `
-      <div class="claude-update-popover-header">
-        <strong>Claude Code 版本</strong>
-        <button type="button" class="claude-update-popover-close" aria-label="关闭">✕</button>
-      </div>
-      <p class="claude-update-popover-status">正在检查更新…</p>
-    `;
-  }
-
-  const installed = info?.installed || '未检测到';
-  const latest = info?.latest || '—';
-  const path = info?.executablePath || '';
   const hasUpdate = Boolean(info?.updateAvailable && info.latest);
+  // 与 CCM 一致：已是最新时「最新版本」回填为当前版本，避免显示 —
+  const currentVersion = info?.installed || null;
+  const latestVersion = info?.latest || (!hasUpdate ? currentVersion : null);
+  const installed = currentVersion || '未检测到';
+  const latest = latestVersion || '—';
+  const path = info?.executablePath || '';
   const error = claudeUpdateError || info?.error || '';
   const canSilent = info?.canSilentUpdate !== false;
-  const hint = updating
+  const statusHint = updating
     ? '正在后台静默更新，请稍候…'
     : hasUpdate
       ? canSilent
-        ? '发现新版本，可直接静默安装，无需打开终端。'
-        : '当前安装位于系统目录。将尝试系统授权或安装到用户目录；也可改用终端更新。'
-      : info?.installed && info.latest
-        ? '已是最新版本。'
-        : '';
+        ? '发现新版本，可直接静默安装。'
+        : '当前安装位于系统目录。将尝试系统授权或安装到用户目录。'
+      : '';
+  const upToDateHint = !checking && !updating && !hasUpdate && currentVersion && latestVersion
+    ? '已是最新版本。'
+    : '';
 
   return `
     <div class="claude-update-popover-header">
@@ -1336,7 +1292,9 @@ function renderClaudeUpdatePopoverBody(): string {
         <span class="claude-update-value" title="${escapeHtml(path)}">${escapeHtml(path)}</span>
       </div>` : ''}
     </div>
-    ${hint ? `<p class="claude-update-popover-status">${escapeHtml(hint)}</p>` : ''}
+    ${checking ? `<p class="claude-update-popover-status">正在检查更新…</p>` : ''}
+    ${statusHint ? `<p class="claude-update-popover-status">${escapeHtml(statusHint)}</p>` : ''}
+    ${upToDateHint ? `<p class="claude-update-popover-status">${upToDateHint}</p>` : ''}
     ${updating ? `
       <div class="app-update-progress">
         <div class="app-update-progress-track">
@@ -1352,8 +1310,6 @@ function renderClaudeUpdatePopoverBody(): string {
       </button>
       ${hasUpdate && !updating ? `
         <button type="button" class="claude-update-action primary" data-action="update">立即更新</button>
-        <button type="button" class="claude-update-action" data-action="terminal-update">${error ? '改用终端更新' : '终端更新'}</button>
-        <button type="button" class="claude-update-action" data-action="dismiss">稍后提醒</button>
       ` : ''}
     </div>
   `;
@@ -1375,10 +1331,6 @@ function bindClaudeUpdatePopoverEvents(panel: Element) {
         void checkClaudeCodeUpdate(true);
       } else if (action === 'update') {
         void runClaudeCodeSilentUpdate();
-      } else if (action === 'terminal-update') {
-        void openClaudeCodeUpdateTerminal();
-      } else if (action === 'dismiss') {
-        dismissClaudeUpdateReminder();
       }
     });
   });
@@ -1392,8 +1344,7 @@ function closeClaudeUpdatePopover() {
 // ── 应用自身更新（tauri-plugin-updater 拉取 GitHub Releases） ──────────
 
 function shouldShowAppUpdateBadge(): boolean {
-  if (!appUpdateInfo.updateAvailable || !appUpdateInfo.latestVersion) return false;
-  return appUpdateDismissedVersion !== appUpdateInfo.latestVersion;
+  return Boolean(appUpdateInfo.updateAvailable && appUpdateInfo.latestVersion);
 }
 
 function shouldShowSettingsUpdateBadge(): boolean {
@@ -1521,19 +1472,6 @@ async function checkAppUpdate(_force = false): Promise<void> {
   return appUpdateCheckPromise;
 }
 
-function dismissAppUpdateReminder(): void {
-  const latest = appUpdateInfo.latestVersion;
-  if (!latest) return;
-  appUpdateDismissedVersion = latest;
-  try {
-    localStorage.setItem(APP_UPDATE_DISMISS_KEY, latest);
-  } catch {
-    /* ignore */
-  }
-  syncAppUpdateButtonUI();
-  renderSettingsUpdateSectionIfOpen();
-}
-
 function renderAppUpdateNotes(body: string): string {
   const html = renderMarkdown(body);
   return `<div class="markdown-body app-update-notes-body">${html}</div>`;
@@ -1590,7 +1528,6 @@ function renderAppUpdatePopoverBody(): string {
       </button>
       ${hasUpdate && !downloading ? `
         <button type="button" class="claude-update-action primary" data-action="install">下载并安装</button>
-        <button type="button" class="claude-update-action" data-action="dismiss">稍后提醒</button>
       ` : ''}
     </div>
   `;
@@ -1615,8 +1552,6 @@ function bindAppUpdatePopoverEvents(panel: Element) {
         btn.disabled = true;
         btn.textContent = '准备中…';
         void installAppUpdate();
-      } else if (action === 'dismiss') {
-        dismissAppUpdateReminder();
       }
     });
   });
@@ -3329,8 +3264,7 @@ function renderApiConfigIcon(): string {
 }
 
 function shouldShowClaudeUpdateBadge(): boolean {
-  if (!claudeUpdateInfo?.updateAvailable || !claudeUpdateInfo.latest) return false;
-  return claudeUpdateDismissedVersion !== claudeUpdateInfo.latest;
+  return Boolean(claudeUpdateInfo?.updateAvailable && claudeUpdateInfo.latest);
 }
 
 function getClaudeUpdateButtonTitle(): string {

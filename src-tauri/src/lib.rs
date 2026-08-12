@@ -2764,103 +2764,6 @@ async fn run_claude_code_update_silent() -> Result<ClaudeCodeSilentUpdateResult,
         .map_err(|e| format!("静默更新任务失败: {e}"))?
 }
 
-/// 在系统终端中执行 `claude update`（阻塞部分由异步命令调度到后台线程）
-fn open_claude_code_update_terminal_blocking() -> Result<(), String> {
-    let claude_path = resolve_claude_executable();
-    let claude_cmd = if claude_path.exists() {
-        #[cfg(target_os = "windows")]
-        {
-            format!("\"{}\"", claude_path.display())
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            format!("{}", claude_path.display())
-        }
-    } else {
-        "claude".to_string()
-    };
-
-    #[cfg(target_os = "windows")]
-    {
-        use std::io::Write;
-        use std::os::windows::process::CommandExt;
-        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
-
-        let bat_content = format!(
-            "@echo off\r\necho [Claude Code] 正在检查并安装更新...\r\necho.\r\n{} update\r\necho.\r\npause\r\n",
-            claude_cmd
-        );
-        let bat_path = std::env::temp_dir().join("ccm_claude_update.bat");
-        let mut file = std::fs::File::create(&bat_path)
-            .map_err(|e| format!("创建临时脚本失败: {}", e))?;
-        file.write_all(bat_content.as_bytes())
-            .map_err(|e| format!("写入临时脚本失败: {}", e))?;
-        file.flush()
-            .map_err(|e| format!("写入临时脚本失败: {}", e))?;
-        drop(file);
-
-        std::process::Command::new("cmd")
-            .arg("/k")
-            .arg(bat_path.to_string_lossy().as_ref())
-            .creation_flags(CREATE_NEW_CONSOLE)
-            .spawn()
-            .map_err(|e| format!("启动终端失败: {}", e))?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let script = format!(
-            "tell application \"Terminal\"\n  do script \"echo '[Claude Code] 正在检查并安装更新...' && {} update\"\n  activate\nend tell",
-            claude_cmd.replace('\'', "'\\''")
-        );
-        std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .spawn()
-            .map_err(|e| format!("启动终端失败: {}", e))?;
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        let cmd_str = format!(
-            "echo '[Claude Code] 正在检查并安装更新...'; {}; echo; exec bash",
-            claude_cmd
-        );
-        let xfce_arg = format!("bash -c {}", shell_quote_linux(&cmd_str));
-        let terminals: [(&str, Vec<&str>); 5] = [
-            ("gnome-terminal", vec!["--", "bash", "-c", &cmd_str]),
-            ("konsole", vec!["-e", "bash", "-c", &cmd_str]),
-            ("xfce4-terminal", vec!["-e", &xfce_arg]),
-            ("x-terminal-emulator", vec!["-e", "bash", "-c", &cmd_str]),
-            ("xterm", vec!["-e", "bash", "-c", &cmd_str]),
-        ];
-
-        let mut launched = false;
-        for (term, args) in &terminals {
-            if std::process::Command::new(term).args(args).spawn().is_ok() {
-                launched = true;
-                break;
-            }
-        }
-        if !launched {
-            return Err("未找到可用终端（gnome-terminal / konsole / xterm 等）".to_string());
-        }
-    }
-
-    Ok(())
-}
-
-#[tauri::command]
-async fn open_claude_code_update_terminal() -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(open_claude_code_update_terminal_blocking)
-        .await
-        .map_err(|e| format!("启动更新终端任务失败: {e}"))?
-}
-
-#[cfg(target_os = "linux")]
-fn shell_quote_linux(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\"'\"'"))
-}
-
 fn apply_cli_runtime_env(cmd: &mut Command) {
     cmd.env("PATH", extended_path_for_cli());
     if let Some(home) = dirs::home_dir() {
@@ -5063,7 +4966,6 @@ pub fn run() {
             open_terminal_resume,
             check_claude_code_update,
             run_claude_code_update_silent,
-            open_claude_code_update_terminal,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application")
