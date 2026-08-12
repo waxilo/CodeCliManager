@@ -2848,6 +2848,9 @@ fn spawn_claude_stream(
         "stream-json".to_string(),
         "--include-partial-messages".to_string(),
         "--dangerously-skip-permissions".to_string(),
+        // CCM 为 headless 一轮对话，无法处理互动问答 UI；禁用后 Claude 改用文字提问并结束本轮，用户再手动回复。
+        "--disallowedTools".to_string(),
+        "AskUserQuestion".to_string(),
     ];
 
     if let Some(cid) = conversation_id.filter(|c| !c.is_empty()) {
