@@ -15,7 +15,14 @@ import { loadData } from '../features/conversations/load';
 import { normalizeMessageForCompare } from '../features/files/index';
 import type { PermissionRequestPayload } from '../types';
 import { showCopyToastMsg } from '../ui';
+
+/** 防止 init 被重复调用时重复注册，导致 text_delta 字字双份 */
+let eventListenersReady = false;
+
 export async function setupEventListeners() {
+  if (eventListenersReady) return;
+  eventListenersReady = true;
+
   // 监听流式消息块（thinking / answer 实时分离）
   await listen<MessageChunkPayload>('message-chunk', (event) => {
     handleMessageChunk(event.payload);

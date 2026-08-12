@@ -148,7 +148,13 @@ async function setupKiroAutostartListener(): Promise<void> {
   }
 }
 
+let appInitialized = false;
+
 export async function init(): Promise<void> {
+  // files 模块曾误触发二次 init；全局只允许启动一次
+  if (appInitialized) return;
+  appInitialized = true;
+
   wireShellApi();
   initPlatformClass();
   initTheme();

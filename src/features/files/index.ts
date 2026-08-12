@@ -6,7 +6,6 @@ import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type { FileRef } from '../../types';
 import { getEffectiveProjectDir } from '../chat/session-context';
-import { init } from '../../app/bootstrap';
 import { updateSendButtonState } from '../chat/session-context';
 import { ImportedFileRef } from '../../state/app-state';
 // ── @file 引用功能 ──────────────────────────────────────────────────
@@ -1012,5 +1011,3 @@ export function resolveFilePath(filePath: string): string {
   if (!dir) return filePath;
   return (dir.endsWith('/') ? dir : dir + '/') + filePath;
 }
-
-init();
