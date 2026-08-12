@@ -117,7 +117,7 @@ fn read_header_value(buffer: &[u8], offset: usize) -> Option<(String, HeaderValu
 /// 增量解析 AWS Event Stream：边读 HTTP body 边吐出完整帧。
 #[derive(Debug, Default)]
 pub struct IncrementalEventStream {
-    buffer: Vec<u8>,
+    pub(crate) buffer: Vec<u8>,
 }
 
 impl IncrementalEventStream {

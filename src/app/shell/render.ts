@@ -1,0 +1,350 @@
+import type { SettingsSection } from '../../types';
+import { app, appState } from '../../state';
+import { escapeHtml } from '../../utils';
+import {
+  getIsSidebarCollapsed,
+  getSidebarToggleTitle,
+  getSidebarToggleIcon,
+  toggleSidebarCollapsed,
+  syncSidebarCollapsedUI,
+  syncSidebarResponsiveState,
+  bindSidebarResizer,
+  toggleTheme,
+} from '../../ui';
+import { shellApi } from './api';
+import { renderTitlebarActions } from './titlebar';
+import {
+  renderConversationList,
+  bindSidebarSearch,
+  handleConversationListClick,
+  handleConversationListKeydown,
+  handleConversationListContextMenu,
+  refreshConversationListDom,
+} from '../../features/sidebar';
+import { renderChatContent, renderEmptyState, renderChatHeaderHtml } from '../../features/chat/render-chat';
+import { renderInputComposerHtml, renderBalanceStatusBarHtml, bindSessionIdCopyEvents } from '../../features/chat/input-composer';
+import { setSendButtonLoading, isActiveConversationRunning, updateSendButtonState } from '../../features/chat/session-context';
+import { remountActiveInteractionPanel } from '../../features/permissions';
+import { bindPermissionModeBarEvents } from '../../features/settings/mount';
+import {
+  openApiConfigView,
+  closeApiConfigView,
+  mountApiConfigView,
+  renderApiConfigViewHtml,
+} from '../../features/api-config';
+import { renderApiConfigSidebarHtml } from '../../features/settings/view';
+import {
+  openSettingsView,
+  closeSettingsView,
+  mountSettingsView,
+  renderSettingsViewHtml,
+  renderSettingsSidebarHtml,
+} from '../../features/settings';
+import { openMcpView, closeMcpView, mountMcpView, renderMcpViewHtml } from '../../features/mcp';
+import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
+import { loadData } from '../../features/conversations';
+import { newChat } from '../../features/chat/send';
+import { handleSendButtonClick } from '../../features/chat/retry';
+import { handleKeydown, setupMessageListPostRender } from '../../features/chat/refresh';
+import { bindChatModelPickerEvents } from '../../features/chat/model-picker';
+import {
+  handlePaste,
+  handleFileSuggestionInput,
+  handleFileSuggestionKeydown,
+  hideFileSuggestions,
+  bindDragDropFileRefs,
+  showImportMenu,
+  previewFileByPath,
+} from '../../features/files';
+import { handleEditKeydown } from '../../features/conversations/edit-export';
+import { checkAppUpdate, bindAppUpdatePopoverEvents } from '../../features/updates/app-update';
+import { bindClaudeUpdatePopoverEvents } from '../../features/updates/claude-update';
+
+export function render() {
+  app.innerHTML = `
+    <div class="app-shell">
+      <header class="app-titlebar">
+        <div class="app-titlebar-leading">
+          <button
+            type="button"
+            class="toolbar-icon-btn sidebar-toggle-btn"
+            id="sidebar-toggle-btn"
+            title="${escapeHtml(getSidebarToggleTitle())}"
+            aria-label="${escapeHtml(getSidebarToggleTitle())}"
+            aria-expanded="${!getIsSidebarCollapsed()}"
+          >
+            ${getSidebarToggleIcon()}
+          </button>
+        </div>
+        <div class="app-titlebar-drag" data-tauri-drag-region></div>
+        <h1 class="app-titlebar-title">AI CLI Manager</h1>
+        <div class="app-titlebar-actions">
+          ${renderTitlebarActions()}
+        </div>
+      </header>
+      <div class="app-container${getIsSidebarCollapsed() ? ' is-sidebar-collapsed' : ''}${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
+      <div class="sidebar${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : ''}">
+        ${appState.isApiConfigViewActive ? renderApiConfigSidebarHtml() : appState.isSettingsViewActive ? renderSettingsSidebarHtml() : appState.isMcpViewActive ? '' : `
+        <div class="sidebar-header">
+          <div class="sidebar-header-actions">
+            <div class="new-chat-btn-wrapper">
+              <button type="button" class="new-chat-btn" id="new-chat-btn" aria-haspopup="menu"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>新建会话</button>
+            </div>
+          </div>
+          <div class="sidebar-search-row">
+            <div class="sidebar-search">
+              <span class="sidebar-search-icon" aria-hidden="true">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+              </span>
+              <input
+                type="text"
+                class="sidebar-search-input"
+                id="sidebar-search-input"
+                placeholder="搜索会话或项目…"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="搜索会话或项目"
+                value="${escapeHtml(appState.sidebarSearchQuery)}"
+              />
+              <button
+                type="button"
+                class="sidebar-search-clear"
+                id="sidebar-search-clear"
+                title="清空搜索"
+                aria-label="清空搜索"
+                ${appState.sidebarSearchQuery ? '' : 'hidden'}
+              >
+                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+              </button>
+            </div>
+            <button type="button" class="refresh-btn" id="refresh-btn" title="扫描本地新会话" aria-label="刷新会话列表"><span class="refresh-icon">↻</span></button>
+          </div>
+        </div>
+        <div class="conversation-list" id="conversation-list">
+          ${renderConversationList()}
+        </div>
+        `}
+      </div>
+      <div
+        class="sidebar-resizer"
+        id="sidebar-resizer"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="调整侧边栏宽度"
+      ></div>
+      <div class="main-content${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
+        ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isMcpViewActive ? renderMcpViewHtml() : `
+        <div class="drop-zone-overlay" id="drop-zone-overlay">
+          <div class="drop-zone-content">
+            <div class="drop-zone-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+            </div>
+            <p class="drop-zone-title">拖拽文件到此处引用</p>
+            <p class="drop-zone-hint">支持项目内文件自动匹配，外部文件以绝对路径引用</p>
+          </div>
+        </div>
+        ${appState.activeConversationId || appState.pendingUserMessage ? `
+        <div class="main-topbar">
+          <div class="main-topbar-main">
+            ${renderChatHeaderHtml(appState.conversations.find((c) => c.id === appState.activeConversationId))}
+          </div>
+        </div>
+        ` : ''}
+        ${appState.activeConversationId || appState.pendingUserMessage ? renderChatContent() : renderEmptyState()}
+        ${renderInputComposerHtml()}
+        `}
+      </div>
+      </div>
+      ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderBalanceStatusBarHtml() : ''}
+    </div>
+  `;
+  
+  attachEventListeners();
+  // render 重建了发送按钮 DOM，按 appState.runningSessions（与左侧同一逻辑）恢复 loading
+  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive) {
+    setSendButtonLoading(isActiveConversationRunning());
+  }
+  remountActiveInteractionPanel();
+}
+
+export function attachEventListeners() {
+  document.querySelector('#new-chat-btn')?.addEventListener('click', newChat);
+
+  document.querySelector('#refresh-btn')?.addEventListener('click', async () => {
+    const btn = document.querySelector('#refresh-btn') as HTMLButtonElement | null;
+    const sidebar = document.querySelector('.sidebar');
+    if (btn) btn.disabled = true;
+    btn?.classList.add('is-loading');
+
+    let overlay: HTMLDivElement | null = null;
+    if (sidebar && !sidebar.querySelector('.sidebar-loading-overlay')) {
+      overlay = document.createElement('div');
+      overlay.className = 'sidebar-loading-overlay';
+      overlay.innerHTML = `
+        <span class="list-loading-spinner" aria-hidden="true"></span>
+        <span class="list-loading-text">正在扫描会话…</span>
+      `;
+      sidebar.appendChild(overlay);
+    }
+
+    try {
+      // 加了缓存后刷新很快，给 loading 一个最小显示时长，避免一闪而过
+      await Promise.all([
+        loadData(),
+        new Promise((resolve) => setTimeout(resolve, 500)),
+      ]);
+    } finally {
+      refreshConversationListDom();
+      overlay?.remove();
+      if (btn) btn.disabled = false;
+      btn?.classList.remove('is-loading');
+    }
+  });
+
+  bindSidebarSearch();
+
+  const listEl = document.querySelector('#conversation-list');
+  if (listEl) {
+    listEl.removeEventListener('click', handleConversationListClick);
+    listEl.addEventListener('click', handleConversationListClick);
+    listEl.removeEventListener('contextmenu', handleConversationListContextMenu);
+    listEl.addEventListener('contextmenu', handleConversationListContextMenu);
+    listEl.removeEventListener('keydown', handleConversationListKeydown);
+    listEl.addEventListener('keydown', handleConversationListKeydown);
+  }
+
+  const textarea = document.querySelector('#message-input') as HTMLTextAreaElement;
+  if (textarea) {
+    textarea.addEventListener('keydown', handleKeydown);
+    textarea.addEventListener('input', updateSendButtonState);
+    textarea.addEventListener('input', handleFileSuggestionInput);
+    textarea.addEventListener('keydown', handleFileSuggestionKeydown);
+    textarea.addEventListener('paste', handlePaste);
+    textarea.addEventListener('blur', () => {
+      // 延迟关闭，让点击建议项有时间触发
+      setTimeout(() => hideFileSuggestions(), 150);
+    });
+  }
+
+  document.querySelector('#send-btn')?.addEventListener('click', handleSendButtonClick);
+
+  bindChatModelPickerEvents();
+  bindSessionIdCopyEvents();
+  bindSidebarResizer();
+  document.querySelectorAll('.sidebar-toggle-btn').forEach((btn) => {
+    btn.addEventListener('click', toggleSidebarCollapsed);
+  });
+  syncSidebarResponsiveState();
+  syncSidebarCollapsedUI();
+  document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
+  document.querySelectorAll<HTMLButtonElement>('[data-settings-section]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const section = btn.dataset.settingsSection as SettingsSection | undefined;
+      if (!section || section === appState.settingsSection) return;
+      appState.settingsSection = section;
+      shellApi.render();
+      // 进入 CCM 更新页时，若 UI 显示有更新但句柄已丢，自动补一次检查
+      if (
+        section === 'app-update' &&
+        appState.appUpdateInfo.updateAvailable &&
+        !appState.appUpdate &&
+        appState.appUpdateCheckStatus !== 'checking' &&
+        appState.appUpdateCheckStatus !== 'downloading'
+      ) {
+        void checkAppUpdate(true);
+      }
+    });
+  });
+  document.querySelector('#api-config-btn')?.addEventListener('click', () => {
+    if (appState.isApiConfigViewActive) {
+      closeApiConfigView();
+    } else {
+      openApiConfigView();
+    }
+  });
+  document.querySelector('#settings-btn')?.addEventListener('click', () => {
+    if (appState.isSettingsViewActive) {
+      closeSettingsView();
+    } else {
+      openSettingsView();
+    }
+  });
+  document.querySelector('#mcp-btn')?.addEventListener('click', () => {
+    if (appState.isMcpViewActive) {
+      closeMcpView();
+    } else {
+      openMcpView();
+    }
+  });
+
+  if (appState.isApiConfigViewActive) {
+    void mountApiConfigView();
+  }
+
+  if (appState.isSettingsViewActive) {
+    const updatePanel = document.querySelector('.settings-update-view');
+    if (updatePanel && appState.settingsSection === 'app-update') {
+      bindAppUpdatePopoverEvents(updatePanel);
+      if (
+        appState.appUpdateInfo.updateAvailable &&
+        !appState.appUpdate &&
+        appState.appUpdateCheckStatus !== 'checking' &&
+        appState.appUpdateCheckStatus !== 'downloading'
+      ) {
+        void checkAppUpdate(true);
+      }
+    } else if (updatePanel && appState.settingsSection === 'claude-update') {
+      bindClaudeUpdatePopoverEvents(updatePanel);
+    }
+    void mountSettingsView();
+  }
+
+  if (appState.isMcpViewActive) {
+    void mountMcpView();
+  }
+
+  // 拖拽文件自动引用（全屏管理页无输入区，跳过）
+  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive) {
+    bindDragDropFileRefs();
+    bindPermissionModeBarEvents();
+    startMainBalanceBarAutoRefresh();
+  }
+
+  // 导入外部文件/文件夹按钮（点击弹出选择菜单）
+  document.querySelector('#btn-import')?.addEventListener('click', (e) => {
+    const target = e.currentTarget as HTMLElement;
+    showImportMenu(target);
+  });
+
+  // 文件引用芯片双击预览（事件委托，图片 / PDF / 文本通用）
+  document.querySelector('#message-list')?.addEventListener('dblclick', (e) => {
+    const chip = (e.target as HTMLElement).closest('.file-ref-chip') as HTMLElement | null;
+    if (chip?.dataset.filePath) {
+      void previewFileByPath(chip.dataset.filePath);
+    }
+  });
+
+  if (appState.editingConversationId) {
+    setTimeout(() => {
+      const editInput = document.querySelector(`#edit-input-${appState.editingConversationId}`) as HTMLInputElement;
+      if (editInput) {
+        editInput.focus();
+        editInput.select();
+        editInput.addEventListener('keydown', (e) => {
+          if (appState.editingConversationId) {
+            handleEditKeydown(e, appState.editingConversationId);
+          }
+        });
+      }
+    }, 50);
+  }
+
+  // 初始化代码复制按钮和消息复制控件
+  const msgList = document.querySelector<HTMLDivElement>('#message-list');
+  if (msgList) setupMessageListPostRender(msgList);
+}
+

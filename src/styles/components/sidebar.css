@@ -1,0 +1,601 @@
+/* ── 侧边栏顶部：New Chat 主按钮 + 快速检索 ───────────────────── */
+.sidebar-header {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  background: var(--sidebar-header-bg);
+  padding: 10px 10px 7px;
+}
+
+/* New Chat：保留主行动层级，但降低大色块的视觉重量 */
+.new-chat-btn {
+  width: 100%;
+  height: 32px;
+  padding: 0 12px;
+  background: var(--color-accent);
+  border: none;
+  border-radius: 8px;
+  color: var(--color-on-accent);
+  font-size: 13px;
+  font-weight: 550;
+  font-family: inherit;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: background 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+  box-shadow: none;
+}
+
+.new-chat-btn:hover {
+  background: var(--color-accent-hover);
+  box-shadow: 0 2px 8px var(--color-accent-ring);
+}
+
+.new-chat-btn:active {
+  transform: translateY(1px);
+  box-shadow: none;
+}
+
+/* 快速检索行：搜索框 + 刷新按钮 */
+.sidebar-search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sidebar-search {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--sidebar-search-border);
+  border-radius: 9px;
+  background: var(--sidebar-search-bg);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.sidebar-search:focus-within {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
+}
+
+.sidebar-search-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--color-text-muted);
+}
+
+.sidebar-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+
+.sidebar-search-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.sidebar-search-clear {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--sidebar-badge-bg);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-search-clear:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+.sidebar-search-clear[hidden] {
+  display: none;
+}
+
+.new-chat-btn-wrapper {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+/* New Chat 下拉遮罩 */
+.new-chat-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 499;
+}
+
+.new-chat-dropdown {
+  position: fixed;
+  min-width: 200px;
+  max-width: 280px;
+  padding: 6px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+  box-shadow: 0 12px 32px var(--color-shadow-strong);
+  z-index: 500;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+/* 分组标题 */
+.new-chat-dropdown-label {
+  padding: 6px 10px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  user-select: none;
+}
+
+/* 选择新目录 — 顶部操作项 */
+.new-chat-dropdown-action {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-accent);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.new-chat-dropdown-action:hover {
+  background: var(--color-accent-ring, color-mix(in srgb, var(--color-accent) 12%, transparent));
+}
+
+.new-chat-dropdown-action-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--color-accent-ring, color-mix(in srgb, var(--color-accent) 12%, transparent));
+  color: var(--color-accent);
+}
+
+/* 分隔线 */
+.new-chat-dropdown-separator {
+  height: 1px;
+  margin: 2px 6px;
+  background: var(--color-bg-surface-hover);
+}
+
+/* 工作目录列表项 */
+.new-chat-dropdown-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.new-chat-dropdown-item:hover {
+  background: var(--color-bg-surface);
+}
+
+.new-chat-dropdown-item-icon {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 7px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-muted);
+}
+
+.new-chat-dropdown-item:hover .new-chat-dropdown-item-icon {
+  background: var(--color-bg-surface-hover);
+}
+
+.new-chat-dropdown-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.3;
+}
+
+.new-chat-dropdown-item-sublabel {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.new-chat-dropdown-empty {
+  padding: 16px 12px;
+  text-align: center;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.sidebar-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.refresh-btn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  color: var(--color-text-muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.refresh-btn:hover {
+  background: var(--sidebar-item-hover);
+  color: var(--color-text);
+  border-color: var(--sidebar-card-border-hover);
+}
+
+.refresh-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.conversation-list {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 3px 7px 12px;
+  min-height: 0;
+  min-width: 0;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.conversation-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* 分区标题（Workspaces / 搜索结果） */
+.sidebar-section-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 7px 7px 5px;
+  font-size: 10.5px;
+  font-weight: 550;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--color-text-muted);
+  user-select: none;
+}
+
+.sidebar-section-label-count {
+  font-weight: 500;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+/* ── Workspace 卡片（一级）───────────────────────────────────────── */
+.workspace-card {
+  margin-bottom: 2px;
+  border: 1px solid var(--sidebar-card-border);
+  border-radius: 9px;
+  background: var(--sidebar-card-bg);
+  box-shadow: var(--sidebar-card-shadow);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+  overflow: hidden;
+}
+
+.workspace-card:hover {
+  background: var(--sidebar-card-bg-hover);
+  border-color: var(--sidebar-card-border-hover);
+  box-shadow: var(--sidebar-card-shadow-hover);
+}
+
+/* 卡片内含当前活跃会话时，用 accent 描边标记 */
+.workspace-card.has-active {
+  border-color: color-mix(in srgb, var(--color-accent) 16%, transparent);
+}
+
+/* ── 卡片标题（项目行）──────────────────────────────────────────── */
+.workspace-header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 7px 7px 5px;
+  cursor: pointer;
+  user-select: none;
+  background: transparent;
+  transition: background 0.15s ease;
+}
+
+.workspace-header:hover {
+  background: var(--sidebar-item-hover);
+}
+
+/* 折叠箭头：轻量指示器，不做树形样式 */
+.workspace-arrow {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-muted);
+  opacity: 0.55;
+  transition: transform 0.2s ease, opacity 0.15s ease;
+}
+
+.workspace-header:hover .workspace-arrow {
+  opacity: 1;
+}
+
+.workspace-arrow svg {
+  width: 11px;
+  height: 11px;
+}
+
+.workspace-arrow.expanded {
+  transform: rotate(90deg);
+}
+
+/* 项目 icon：按路径生成稳定色相的首字母方块 */
+.workspace-avatar {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10.5px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  color: hsl(var(--ws-hue, 220) 70% var(--sidebar-avatar-text-lightness));
+  background: linear-gradient(
+    135deg,
+    hsl(var(--ws-hue, 220) 72% var(--sidebar-avatar-lightness)) 0%,
+    hsl(calc(var(--ws-hue, 220) + 26) 72% calc(var(--sidebar-avatar-lightness) - 8%)) 100%
+  );
+  filter: saturate(0.72);
+  opacity: 0.88;
+}
+
+.workspace-card.is-uncategorized .workspace-avatar {
+  background: var(--sidebar-badge-bg);
+  color: var(--color-text-muted);
+}
+
+/* 标题主区：两行（名称 + 元信息） */
+.workspace-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.workspace-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.workspace-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.25;
+}
+
+.workspace-card.is-uncategorized .workspace-name {
+  color: var(--color-text-secondary);
+}
+
+/* 会话数量 badge：小尺寸胶囊 */
+.workspace-count {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--sidebar-badge-text);
+  background: transparent;
+  border-radius: 999px;
+  padding: 0 6px;
+  min-width: 18px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.workspace-header:hover .workspace-count {
+  background: var(--sidebar-badge-bg);
+  color: var(--color-text-secondary);
+}
+
+/* 元信息行：AI 模型标签 + 最近使用时间 */
+.workspace-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 10.5px;
+  line-height: 1.3;
+  color: var(--color-text-muted);
+}
+
+.workspace-model-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 62%;
+  padding: 0 5px;
+  height: 15px;
+  border-radius: 999px;
+  background: transparent;
+  color: color-mix(in srgb, var(--color-accent) 82%, var(--color-text));
+  font-weight: 550;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workspace-model-dot {
+  flex-shrink: 0;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.65;
+}
+
+.workspace-time {
+  flex-shrink: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 卡片内有运行中会话时的脉冲指示 */
+.workspace-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  color: var(--color-success);
+  font-weight: 600;
+}
+
+.workspace-live-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: sidebar-pulse 1.4s ease-in-out infinite;
+}
+
+/* @keyframes sidebar-pulse → utilities/animations.css */
+
+/* ── 卡片操作区：默认隐藏，hover 项目时出现 ─────────────────────── */
+.workspace-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transform: translateX(2px);
+  transition: opacity 0.15s ease, transform 0.15s ease;
+  pointer-events: none;
+}
+
+.workspace-header:hover .workspace-actions,
+.workspace-header:focus-within .workspace-actions {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+
+.ws-icon-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.ws-icon-btn:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+/* ── 卡片主体：展开 / 收起 200ms 动画 ──────────────────────────── */
+.workspace-body {
+  overflow: hidden;
+  transition: max-height 0.2s ease, opacity 0.2s ease;
+}
+
+.workspace-card:not(.is-expanded) > .workspace-body {
+  max-height: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workspace-conversations {
+  padding: 1px 5px 5px 25px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+

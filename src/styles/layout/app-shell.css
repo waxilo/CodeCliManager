@@ -1,0 +1,120 @@
+#app {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-shell {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+}
+
+.app-titlebar {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 38px;
+  padding: 0 12px 0 0;
+  background: var(--color-titlebar);
+  border-bottom: 1px solid var(--color-titlebar-border);
+  user-select: none;
+  -webkit-app-region: drag;
+}
+
+.platform-macos .app-titlebar {
+  height: 28px;
+}
+
+.platform-windows .app-titlebar {
+  height: 32px;
+}
+
+.app-titlebar-leading {
+  display: flex;
+  align-items: center;
+  align-self: stretch;
+  flex-shrink: 0;
+  padding-left: 78px;
+  padding-right: 8px;
+  box-sizing: border-box;
+  -webkit-app-region: no-drag;
+}
+
+.platform-macos .app-titlebar-leading {
+  padding-left: 72px;
+}
+
+.platform-windows .app-titlebar-leading {
+  padding-left: 12px;
+}
+
+.app-titlebar-title {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  pointer-events: none;
+  max-width: min(320px, 50vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-titlebar-drag {
+  flex: 1;
+  min-width: 0;
+  align-self: stretch;
+}
+
+.app-titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: auto;
+  -webkit-app-region: no-drag;
+}
+
+.app-titlebar .toolbar-icon-btn {
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  -webkit-app-region: no-drag;
+}
+
+.platform-macos .app-titlebar .toolbar-icon-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+}
+
+.platform-macos .app-titlebar .toolbar-icon-btn svg {
+  width: 14px;
+  height: 14px;
+}
+
+.platform-macos .app-titlebar .toolbar-settings-btn {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.platform-macos .app-titlebar .toolbar-update-btn {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.platform-macos .app-titlebar .toolbar-update-btn-icon svg {
+  width: 12px;
+  height: 12px;
+}
+

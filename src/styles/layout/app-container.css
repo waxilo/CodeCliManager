@@ -1,0 +1,64 @@
+.app-container {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.sidebar {
+  position: relative;
+  width: var(--sidebar-width, 280px);
+  flex-shrink: 0;
+  background: var(--sidebar-bg);
+  color: var(--color-text);
+  display: flex;
+  flex-direction: column;
+  transition: width 0.2s ease, opacity 0.15s ease;
+  overflow: hidden;
+}
+
+.app-container.is-sidebar-collapsed .sidebar {
+  width: 0 !important;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar-resizer {
+  width: 4px;
+  flex-shrink: 0;
+  cursor: col-resize;
+  position: relative;
+  touch-action: none;
+  -webkit-app-region: no-drag;
+  transition: width 0.2s ease, opacity 0.15s ease;
+}
+
+.app-container.is-sidebar-collapsed .sidebar-resizer {
+  width: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.sidebar-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 1px;
+  background: var(--color-bg-surface);
+  transition: width 0.15s, background 0.15s;
+}
+
+.sidebar-resizer:hover::after,
+.sidebar-resizer.is-dragging::after {
+  width: 2px;
+  background: var(--color-accent);
+}
+
+body.is-sidebar-resizing {
+  cursor: col-resize;
+  user-select: none;
+}
+

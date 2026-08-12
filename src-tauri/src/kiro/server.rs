@@ -50,8 +50,8 @@ pub struct ProxyConfig {
 pub struct ProxyHandle {
     pub port: u16,
     pub config: ProxyConfig,
-    stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    pub(crate) stop: Arc<AtomicBool>,
+    pub(crate) thread: Option<JoinHandle<()>>,
 }
 
 impl ProxyHandle {

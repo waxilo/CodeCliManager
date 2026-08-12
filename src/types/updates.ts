@@ -1,0 +1,32 @@
+export interface ClaudeCodeUpdateInfo {
+  installed: string | null;
+  latest: string | null;
+  updateAvailable: boolean;
+  executablePath: string | null;
+  canSilentUpdate: boolean;
+  error: string | null;
+}
+
+export interface ClaudeCodeSilentUpdateResult {
+  success: boolean;
+  message: string;
+  installed: string | null;
+  latest: string | null;
+  usedElevation: boolean;
+}
+
+export type ClaudeUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'updating' | 'error';
+
+export type AppUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'downloading' | 'error';
+
+export interface AppUpdateInfo {
+  currentVersion: string | null;
+  latestVersion: string | null;
+  updateAvailable: boolean;
+  body: string | null;
+  error: string | null;
+}
+
+export type SettingsSection = 'app-update' | 'claude-update';
+
+export type ThemeMode = 'light' | 'dark';

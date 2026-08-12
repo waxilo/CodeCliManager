@@ -1,0 +1,466 @@
+.settings-dialog {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 16px 48px var(--color-shadow);
+}
+
+.settings-dialog-wide {
+  width: min(860px, 100%);
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-body {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  flex: 1;
+  min-height: 0;
+}
+
+.settings-profiles {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 100%;
+}
+
+.settings-profiles-header {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.settings-profiles-hint {
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--color-text-muted);
+}
+
+.settings-footer-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.settings-add-profile {
+  flex-shrink: 0;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 8px;
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+  font-size: 12px;
+  padding: 0 12px;
+  height: 36px;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+
+.settings-add-profile:hover {
+  background: var(--color-bg-surface-active);
+}
+
+.settings-import-cc-switch {
+  flex-shrink: 0;
+  border: 1px dashed var(--color-bg-surface-hover);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  padding: 0 12px;
+  height: 36px;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+  white-space: nowrap;
+}
+
+.settings-import-cc-switch:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+  background: var(--color-bg-elevated);
+}
+
+.settings-import-cc-switch:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.settings-profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.settings-profile-empty {
+  padding: 16px 12px;
+  border: 1px dashed var(--color-bg-surface-hover);
+  border-radius: 8px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.settings-profile-item {
+  width: 100%;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  padding: 10px 12px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  position: relative;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+}
+
+.settings-profile-item:focus {
+  outline: none;
+}
+
+.settings-profile-item:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.settings-profile-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 1;
+  width: 100%;
+  min-height: 40px;
+  position: relative;
+}
+
+.settings-profile-item:hover {
+  background: var(--color-bg-surface);
+}
+
+.settings-profile-item.selected {
+  border-color: var(--color-accent);
+}
+
+.settings-profile-item.active {
+  background: var(--color-bg-active-profile);
+}
+
+.settings-profile-name {
+  font-size: 13px;
+  font-weight: 600;
+  padding-right: 52px;
+  pointer-events: none;
+}
+
+.settings-profile-meta {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
+.settings-profile-badge {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--color-success);
+  color: var(--color-on-accent);
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.profile-context-menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+}
+
+.profile-context-menu {
+  position: fixed;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  box-shadow: 0 8px 24px var(--color-shadow-strong);
+}
+
+.profile-context-menu-item {
+  display: block;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.profile-context-menu-item:hover:not(:disabled) {
+  background: var(--color-bg-surface);
+}
+
+.profile-context-menu-item:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+}
+
+.profile-context-menu-item-danger:not(:disabled) {
+  color: var(--color-danger);
+}
+
+.profile-context-menu-item-danger:hover:not(:disabled) {
+  background: var(--color-danger-bg);
+}
+
+.settings-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.settings-title {
+  margin: 0 0 4px;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.settings-subtitle {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.settings-close-btn {
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+
+.settings-close-btn:hover {
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+}
+
+.settings-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-field span {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+}
+
+.settings-field input {
+  height: 36px;
+  box-sizing: border-box;
+  padding: 0 12px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: inherit;
+}
+
+.settings-field input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.settings-field input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+/* API Key 单框：和普通 input 等高、同样的边框，内部并排放显示文本 / 输入框 / 按钮 */
+.settings-apikey-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 36px;
+  box-sizing: border-box;
+  padding: 0 6px 0 12px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  background: var(--color-bg-elevated);
+  transition: border-color 0.15s ease;
+}
+
+.settings-apikey-box:focus-within {
+  border-color: var(--color-accent);
+}
+
+.settings-apikey-display {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.settings-apikey-display[hidden] {
+  display: none;
+}
+
+.settings-apikey-display-label {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+
+.settings-apikey-display-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 12px;
+  color: var(--color-text);
+  user-select: all;
+}
+
+/* 嵌套在统一边框内的输入框：自身不再有边框、背景、padding */
+.settings-apikey-box .settings-apikey-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 34px;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.settings-apikey-box .settings-apikey-input:focus {
+  outline: none;
+  border-color: transparent;
+}
+
+.settings-apikey-box .settings-apikey-input[hidden] {
+  display: none;
+}
+
+.settings-apikey-box .settings-apikey-input:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.settings-apikey-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.settings-apikey-btn {
+  flex-shrink: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 4px;
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.settings-apikey-btn[hidden] {
+  display: none;
+}
+
+.settings-apikey-btn:hover {
+  background: var(--color-bg-surface);
+  border-color: var(--color-accent);
+}
+
+.settings-apikey-btn:active {
+  background: var(--color-bg-surface-hover);
+}
+
+.settings-model-config-summary.is-disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.settings-model-input {
+  cursor: pointer;
+  background: var(--color-bg-deep);
+}
+
+.settings-model-input.is-loading {
+  cursor: wait;
+  color: var(--color-text-secondary);
+}
+
+.settings-model-input:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent-ring);
+}
+
+.settings-model-config-hint {
+  margin-top: -6px;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+.model-picker-dialog.display-models-picker-dialog {
+  width: min(880px, calc(100vw - 48px));
+  max-height: min(900px, calc(100vh - 32px));
+  gap: 14px;
+  padding: 18px 20px;
+}
+

@@ -1,0 +1,227 @@
+/* ============================================================
+   工具卡片样式（Tool Cards）
+   ============================================================ */
+
+.tool-card {
+  margin: 0.25em 0;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-left: 3px solid #8b949e;
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  overflow: hidden;
+  font-size: 13px;
+}
+
+.tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--color-bg-surface);
+  border-bottom: 1px solid var(--color-bg-surface-hover);
+  cursor: default;
+  user-select: none;
+}
+
+.tool-collapsible-summary {
+  cursor: pointer;
+}
+
+.tool-collapsible-summary::-webkit-details-marker {
+  display: none;
+}
+
+.tool-collapsible-summary::marker {
+  display: none;
+}
+
+.tool-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  width: 20px;
+  text-align: center;
+}
+
+.tool-label {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--color-text);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.tool-title-text {
+  font-size: 12px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.tool-chevron {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  transition: transform 0.15s;
+}
+
+.tool-collapsible[open] .tool-chevron {
+  transform: rotate(180deg);
+}
+
+.tool-secondary {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
+}
+
+/* 工具状态标签 */
+.tool-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 10px;
+  line-height: 1.5;
+}
+
+.tool-status-running {
+  background: rgba(88, 166, 255, 0.15);
+  color: #58a6ff;
+}
+
+.tool-status-done {
+  background: rgba(63, 185, 80, 0.15);
+  color: #3fb950;
+}
+
+.tool-status-error {
+  background: rgba(248, 81, 73, 0.15);
+  color: #f85149;
+}
+
+/* 工具卡片正文 */
+.tool-card-body {
+  padding: 8px 12px;
+}
+
+/* 单行 - 终端风格 */
+.tool-oneline-terminal .tool-cmd-prefix {
+  color: #3fb950;
+  font-weight: 600;
+  margin-right: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.tool-oneline-terminal .tool-cmd-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  color: var(--color-text);
+  word-break: break-all;
+}
+
+/* 单行 - 文件打开风格 */
+.tool-oneline-file-open .tool-file-link {
+  color: var(--color-accent-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.tool-oneline-file-open .tool-file-link:hover {
+  text-decoration: underline;
+}
+
+/* 单行 - 搜索风格 */
+.tool-oneline-search .tool-search-pattern {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+  color: var(--color-text);
+  background: var(--color-bg-surface);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+/* 工具输入预览 */
+.tool-input-preview {
+  margin: 0 0 8px 0;
+  padding: 8px;
+  background: var(--color-bg-surface);
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--color-text-muted);
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.tool-input-preview code {
+  background: transparent;
+  color: inherit;
+  font-size: inherit;
+}
+
+/* 工具结果区 */
+.tool-card-result {
+  padding: 8px 12px;
+  border-top: 1px solid var(--color-bg-surface-hover);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.tool-card-result .markdown-body {
+  font-size: 13px;
+}
+
+.tool-card-result .markdown-body pre {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* 运行中指示器 */
+.tool-running-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 0;
+}
+
+.tool-running-indicator .pending-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: pending-dot-bounce 1.2s infinite ease-in-out;
+}
+
+.tool-running-indicator .pending-dot:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.tool-running-indicator .pending-dot:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* 工具卡片在消息流中的定位 */
+.message.tool {
+  max-width: 100%;
+}
+
+.message.tool .message-content {
+  max-width: 100%;
+  background: transparent;
+  border: none;
+  padding: 0;
+  box-shadow: none;
+}
+
+

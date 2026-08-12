@@ -1,0 +1,300 @@
+.settings-overlay {
+  position: fixed;
+  inset: 0;
+  background: var(--color-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 24px;
+}
+
+.main-content.is-api-config {
+  overflow: hidden;
+}
+
+.api-config-view {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 24px 16px;
+  overflow: hidden;
+}
+
+.api-config-view .settings-form {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  max-width: 640px;
+  padding-right: 4px;
+}
+
+.api-config-view .settings-footer {
+  margin-top: 16px;
+  flex-shrink: 0;
+  max-width: 640px;
+}
+
+.api-config-view .settings-footer-actions {
+  margin-left: 0;
+}
+
+/* Kiro 反代卡片 */
+.kiro-card {
+  margin-top: 16px;
+  padding: 14px 16px;
+  max-width: 640px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 10px;
+  background: var(--color-bg-surface);
+  flex-shrink: 0;
+}
+
+.kiro-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kiro-card-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.kiro-card-badge {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--color-accent-ring, color-mix(in srgb, var(--color-accent) 14%, transparent));
+  color: var(--color-accent);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.kiro-card-status {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+}
+
+.kiro-card-status[data-kiro-status='running'] {
+  color: #3fb950;
+}
+
+.kiro-card-status[data-kiro-status='stopped'] {
+  color: var(--color-text-muted);
+}
+
+.kiro-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.kiro-card-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.kiro-card-label {
+  flex-shrink: 0;
+  width: 88px;
+  color: var(--color-text-muted);
+}
+
+.kiro-card-value {
+  color: var(--color-text);
+  word-break: break-all;
+  min-width: 0;
+}
+
+.kiro-card-value-arn {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+}
+
+.kiro-card-row .kiro-usage-refresh {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.provider-balance-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.provider-balance-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--color-text);
+  word-break: break-word;
+}
+
+.provider-balance-field[hidden] {
+  display: none;
+}
+
+.kiro-card-hint {
+  margin: 10px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
+
+.sidebar.is-api-config {
+  background: var(--sidebar-bg);
+}
+
+.api-config-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 10px 10px;
+}
+
+.settings-section-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex-shrink: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-bg-surface-hover);
+}
+
+.settings-section-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.settings-section-item:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+.settings-section-item.is-active {
+  background: var(--color-accent-ring, color-mix(in srgb, var(--color-accent) 14%, transparent));
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.settings-section-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.settings-section-item-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.settings-section-item-dot {
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--color-danger);
+}
+
+.settings-update-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28px 32px;
+}
+
+.settings-update-view .claude-update-popover-header {
+  margin-bottom: 20px;
+}
+
+.settings-update-view .claude-update-popover-actions {
+  justify-content: flex-start;
+}
+
+.settings-update-view .app-update-notes-body {
+  max-width: 720px;
+}
+
+.permission-mode-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 0 2px;
+}
+
+.permission-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.permission-mode-chip input {
+  margin: 0;
+  accent-color: var(--color-accent, #2563eb);
+}
+
+.permission-mode-chip.is-selected {
+  color: var(--color-text);
+  font-weight: 500;
+}
+
+.api-config-sidebar .settings-profiles-header {
+  padding: 0 2px;
+  flex-shrink: 0;
+}
+
+.api-config-sidebar .settings-profile-list {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+
+.api-config-sidebar-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+  padding-top: 4px;
+}
+
+.api-config-sidebar-actions .settings-add-profile,
+.api-config-sidebar-actions .settings-import-cc-switch {
+  width: 100%;
+  justify-content: center;
+}
+

@@ -1,0 +1,612 @@
+/* ── Toast notification ── */
+.toast-notification {
+  position: fixed;
+  top: 48px;
+  left: 50%;
+  transform: translateX(-50%) translateY(-8px);
+  background: var(--color-bg-elevated, #323232);
+  color: var(--color-text, #fff);
+  padding: 10px 22px;
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+  z-index: 100000;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  max-width: 420px;
+  text-align: center;
+}
+.toast-notification.is-visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+.toast-notification.is-toast-warning {
+  background: #fff3cd;
+  color: #664d03;
+  box-shadow: 0 4px 16px rgba(102,77,3,0.15);
+}
+
+/* ── @file 引用下拉建议 ─────────────────────────────────────────── */
+.file-suggestions {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  right: 0;
+  margin-bottom: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12);
+  z-index: 100;
+}
+
+.file-suggestion-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--color-text-primary);
+  transition: background 0.1s;
+}
+
+.file-suggestion-item:hover,
+.file-suggestion-item.active {
+  background: var(--color-bg-hover);
+}
+
+.file-suggestion-item.active {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  border-radius: 4px;
+}
+
+.file-suggestion-icon {
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+.file-suggestion-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 12px;
+}
+
+/* 目录项视觉区分 */
+.file-suggestion-item--dir {
+  border-radius: 0;
+}
+.file-suggestion-item--dir .file-suggestion-path {
+  color: var(--color-accent);
+  font-weight: 500;
+}
+
+/* 键盘选中目录项时覆盖为白色文字，避免蓝底蓝字看不清 */
+.file-suggestion-item.active .file-suggestion-path {
+  color: var(--color-on-accent);
+}
+
+/* 目录与文件之间的分隔 */
+.file-suggestion-item:not(.file-suggestion-item--dir) {
+  /* 文件项不用特殊标记 */
+}
+/* 最后一个目录项后加分隔线 */
+.file-suggestion-item--dir + .file-suggestion-item:not(.file-suggestion-item--dir) {
+  border-top: 1px solid var(--color-bg-surface-hover);
+  margin-top: 2px;
+  padding-top: 8px;
+}
+
+/* 深色主题适配 */
+[data-theme="dark"] .file-suggestions {
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.4);
+}
+
+/* 复制提示 Toast */
+.copy-toast {
+  position: fixed;
+  bottom: 96px;
+  left: 50%;
+  transform: translateX(-50%) translateY(12px);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  box-shadow: 0 4px 16px var(--color-bg-base);
+  border: 1px solid var(--color-bg-surface-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 9999;
+}
+
+.copy-toast--visible {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0);
+}
+
+.copy-toast svg {
+  color: var(--color-accent);
+}
+
+/* ── 文件引用芯片 ─────────────────────────────────────────────────── */
+.file-ref-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.file-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-bg-surface-hover);
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: default;
+  max-width: 220px;
+  overflow: hidden;
+  transition: background 0.15s ease;
+}
+
+.file-ref-chip:hover {
+  background: var(--color-bg-surface-hover);
+}
+
+/* 图片芯片：突出缩略图展示 */
+.file-ref-chip--image {
+  padding: 3px 10px 3px 3px;
+  gap: 6px;
+}
+
+.file-ref-chip-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 5px;
+  object-fit: cover;
+  flex-shrink: 0;
+  border: 1px solid var(--color-bg-surface-hover);
+  cursor: pointer;
+  background: var(--color-bg-elevated);
+}
+
+.file-ref-chip-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.file-ref-chip-path {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 12px;
+}
+
+.file-ref-chip[data-file-path] {
+  cursor: pointer;
+}
+.file-ref-chip[data-file-path]:hover {
+  opacity: 0.85;
+}
+
+/* 用户气泡内的芯片：适配淡绿底 */
+.message.user .file-ref-chip {
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(22, 101, 52, 0.2);
+  color: #111827;
+  backdrop-filter: blur(2px);
+}
+
+.message.user .file-ref-chip--image {
+  border-color: rgba(22, 101, 52, 0.28);
+}
+
+.message.user .file-ref-chip:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+.message.user .file-ref-chip-icon {
+  opacity: 0.85;
+}
+
+.message.user .file-ref-chip-path {
+  color: #1f2937;
+}
+
+.message.user .file-ref-chip-thumb {
+  border-color: rgba(22, 101, 52, 0.22);
+}
+
+/* ── 拖拽文件遮罩层 ─────────────────────────────────────────────── */
+.main-content {
+  position: relative;
+}
+
+.drop-zone-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--color-overlay);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  z-index: 100;
+}
+
+.main-content.drag-over .drop-zone-overlay {
+  opacity: 1;
+}
+
+.drop-zone-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  text-align: center;
+}
+
+.drop-zone-icon {
+  width: 56px;
+  height: 56px;
+  padding: 14px;
+  border-radius: 14px;
+  background: var(--color-bg-surface);
+  color: var(--color-accent);
+  opacity: 0.85;
+}
+
+.drop-zone-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.drop-zone-title {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--color-text);
+  line-height: 1.4;
+  letter-spacing: -0.01em;
+}
+
+.drop-zone-hint {
+  margin: 0;
+  font-size: 14px;
+  color: var(--color-text-muted);
+  line-height: 1.5;
+  max-width: 280px;
+}
+
+/* ── 粘贴图片附件栏 ───────────────────────────────────────────────── */
+.paste-attachments-bar {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+  padding: 0 8px 6px;
+  overflow-x: auto;
+}
+
+.paste-attachment-thumb {
+  position: relative;
+  flex-shrink: 0;
+  width: 52px;
+  height: 52px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  cursor: pointer;
+  background: transparent;
+}
+
+.paste-attachment-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.paste-attachment-thumb:hover {
+  border-color: var(--color-accent);
+}
+
+.paste-attachment-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 0 6px 0 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.paste-attachment-thumb:hover .paste-attachment-remove {
+  opacity: 1;
+}
+
+/* ── 导入/拖放文件预览栏 ─────────────────────────────────────────── */
+.imported-file-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 0 8px 6px;
+  overflow-x: auto;
+}
+
+.imported-file-thumb {
+  position: relative;
+  flex-shrink: 0;
+  width: 52px;
+  height: 52px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  cursor: pointer;
+  background: transparent;
+}
+
+.imported-file-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.imported-file-thumb:hover {
+  border-color: var(--color-accent);
+}
+
+.imported-file-card {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 28px 6px 10px;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  max-width: 200px;
+}
+
+.imported-file-card-icon {
+  flex-shrink: 0;
+  font-size: 14px;
+}
+
+.imported-file-card-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.imported-file-card:hover {
+  border-color: var(--color-accent);
+}
+
+.imported-file-remove {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 0 6px 0 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.imported-file-thumb:hover .imported-file-remove,
+.imported-file-card:hover .imported-file-remove {
+  opacity: 1;
+}
+
+/* ── 图片大图预览 Lightbox ─────────────────────────────────────────── */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  cursor: pointer;
+  animation: fadeIn 0.15s ease;
+}
+
+.image-lightbox img {
+  max-width: 90vw;
+  max-height: 90vh;
+  border-radius: 8px;
+  box-shadow: 0 8px 48px rgba(0, 0, 0, 0.5);
+  object-fit: contain;
+}
+
+/* ── 文本预览弹窗 ─────────────────────────────────────────── */
+.text-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  animation: fadeIn 0.15s ease;
+}
+
+.text-preview-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(90vw, 720px);
+  max-height: 85vh;
+  border-radius: 10px;
+  background: var(--color-bg-base);
+  box-shadow: 0 8px 48px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.text-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-bg-surface-hover);
+  flex-shrink: 0;
+}
+
+.text-preview-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 85%;
+}
+
+.text-preview-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.text-preview-close:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+.text-preview-content {
+  flex: 1;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  font-family: "Cascadia Code", "Fira Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--color-text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ── PDF 预览弹窗 ─────────────────────────────────────────── */
+.pdf-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  animation: fadeIn 0.15s ease;
+}
+
+.pdf-preview-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(90vw, 900px);
+  height: 90vh;
+  border-radius: 10px;
+  background: var(--color-bg-base);
+  box-shadow: 0 8px 48px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.pdf-preview-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-bg-surface-hover);
+  flex-shrink: 0;
+}
+
+.pdf-preview-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 85%;
+}
+
+.pdf-preview-close {
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+}
+
+.pdf-preview-close:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+.pdf-preview-frame {
+  flex: 1;
+  border: none;
+  width: 100%;
+  height: 100%;
+}
+
+/* @keyframes fadeIn → utilities/animations.css */

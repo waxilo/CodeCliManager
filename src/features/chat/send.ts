@@ -1,0 +1,393 @@
+import { appState } from '../../state';
+import { shellApi } from '../../app/shell/api';
+import * as api from '../../api';
+import type { FileRef, WorkspaceGroup, PreparedCommand } from '../../types';
+import { escapeHtml } from '../../utils';
+import { showCopyToastMsg } from '../../ui';
+import { open } from '@tauri-apps/plugin-dialog';
+import { getActiveChatModel } from './model-picker';
+import { getEffectiveProjectDir, hasRequiredProjectDir, isNewChatSession, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading } from './session-context';
+import { resolveFileReferences, clearPasteAttachments, clearImportedFileRefs, invalidateFileCache } from '../files';
+import { closePermissionDialogs } from '../permissions';
+import { groupConversationsByWorkspace } from '../sidebar';
+import { clearStreamingState, commitStreamingAssistantToConversation } from './streaming';
+import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
+import { refreshModelInfo } from './render-chat';
+import { hideSendingState } from './retry';
+import { refreshStreamingUI } from './streaming';
+import { isImageFile, stripFileRefTags, stripFileRefsFromDisplay, unwrapFileRef } from '../files/index';
+import { dismissMcpViewState } from '../mcp/mount';
+import { normalizeModelKey } from '../permissions/permission-mode';
+import { dismissSettingsViewState } from '../settings/mount';
+import { updateConversationListSpinner } from '../sidebar/render-list';
+import { newChatInWorkspace } from '../sidebar/workspace-grouping';
+export function newChat() {
+  toggleNewChatDropdown();
+}
+
+/** 关闭 New Chat 下拉框 */
+export function closeNewChatDropdown() {
+  document.querySelector('.new-chat-overlay')?.remove();
+  document.querySelector('.new-chat-dropdown')?.remove();
+}
+
+/** 切换 New Chat 下拉框显示/隐藏 */
+export function toggleNewChatDropdown() {
+  if (document.querySelector('.new-chat-dropdown')) {
+    closeNewChatDropdown();
+    return;
+  }
+
+  const btnWrapper = document.querySelector('#new-chat-btn')?.parentElement;
+  if (!btnWrapper) return;
+
+  const { workspaces } = groupConversationsByWorkspace();
+
+  const overlay = document.createElement('div');
+  overlay.className = 'new-chat-overlay';
+  overlay.addEventListener('click', closeNewChatDropdown);
+
+  const dropdown = document.createElement('div');
+  dropdown.className = 'new-chat-dropdown';
+  dropdown.innerHTML = renderNewChatDropdownContent(workspaces);
+
+  document.body.appendChild(overlay);
+  document.body.appendChild(dropdown);
+
+  // 定位下拉框
+  requestAnimationFrame(() => {
+    const btnRect = btnWrapper.getBoundingClientRect();
+    dropdown.style.top = `${btnRect.bottom + 4}px`;
+    dropdown.style.left = `${btnRect.left}px`;
+    // 确保不超出右边界
+    const dRect = dropdown.getBoundingClientRect();
+    if (dRect.right > window.innerWidth - 8) {
+      dropdown.style.left = `${Math.max(8, window.innerWidth - dRect.width - 8)}px`;
+    }
+    // 确保不超出下边界
+    if (dRect.bottom > window.innerHeight - 8) {
+      dropdown.style.top = `${Math.max(8, btnRect.top - dRect.height - 4)}px`;
+    }
+  });
+
+  // 监听点击事件
+  dropdown.addEventListener('click', (e) => {
+    const target = (e.target as HTMLElement).closest('[data-action]') as HTMLElement | null;
+    if (!target) return;
+    const action = target.dataset.action;
+    const workspacePath = target.dataset.workspace;
+
+    if (action === 'pick-new-dir') {
+      closeNewChatDropdown();
+      void pickNewWorkspaceDirectory();
+    } else if (action === 'new-chat-in-dropdown' && workspacePath) {
+      closeNewChatDropdown();
+      newChatInWorkspace(workspacePath);
+    }
+  });
+}
+
+/** 选择新的工作目录并创建新会话 */
+export async function pickNewWorkspaceDirectory(): Promise<void> {
+  try {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: '选择工作目录',
+    });
+    if (typeof selected !== 'string' || !selected.trim()) {
+      return;
+    }
+    const trimmed = selected.trim();
+    appState.pendingProjectDir = trimmed;
+    invalidateFileCache();
+  } catch (e) {
+    console.error('Failed to pick project directory:', e);
+    return;
+  }
+  // 完成选目录后执行创建新会话
+  dismissApiConfigViewState();
+  dismissSettingsViewState();
+  dismissMcpViewState();
+  appState.activeConversationId = '';
+  invalidateFileCache();
+  appState.pendingUserMessage = null;
+  appState.pendingUserMessageConvId = null;
+  appState.transientSessionError = null;
+  shellApi.render();
+  void refreshModelInfo();
+
+  setTimeout(() => {
+    const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+    if (input) input.focus();
+  }, 100);
+}
+
+/** 渲染 New Chat 下拉框内容 */
+export function renderNewChatDropdownContent(workspaces: WorkspaceGroup[]): string {
+  const plusSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+  const folderSvg = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
+
+  let html = `
+    <button type="button" class="new-chat-dropdown-action" data-action="pick-new-dir">
+      <span class="new-chat-dropdown-action-icon">${plusSvg}</span>
+      <span class="new-chat-dropdown-item-label">选择新工作目录…</span>
+    </button>
+  `;
+
+  if (workspaces.length > 0) {
+    html += `<div class="new-chat-dropdown-separator"></div>`;
+    html += `<div class="new-chat-dropdown-label">最近使用</div>`;
+    for (const ws of workspaces) {
+      html += `
+        <button type="button" class="new-chat-dropdown-item" data-action="new-chat-in-dropdown" data-workspace="${escapeHtml(ws.path)}" title="${escapeHtml(ws.path)}">
+          <span class="new-chat-dropdown-item-icon">${folderSvg}</span>
+          <span class="new-chat-dropdown-item-label">${escapeHtml(ws.displayName)}</span>
+        </button>
+      `;
+    }
+  } else {
+    html += `<div class="new-chat-dropdown-empty">暂无历史工作目录</div>`;
+  }
+
+  return html;
+}
+
+// 发送消息：通过 invoke 到后端，后端启动 shell 并通过事件推送更新
+export async function sendMessage() {
+  const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+
+  if (!input) return;
+
+  const hasPastedImages = appState.pasteAttachments.length > 0;
+  const hasImportedFiles = appState.importedFileRefs.length > 0;
+  if (!input.value.trim() && !hasPastedImages && !hasImportedFiles) return;
+  if (sendBtn?.disabled) return;
+
+  if (isNewChatSession() && !hasRequiredProjectDir()) {
+    return;
+  }
+
+  let content = input.value.trim();
+  input.value = '';
+  updateSendButtonState();
+
+  // 捕获导入的文件引用（在 clearImportedFileRefs 之前），用于构造发送给 CLI 的 prompt
+  const capturedImportedRefs = appState.importedFileRefs.map((e) => e.ref);
+  clearImportedFileRefs();
+
+  // 粘贴图片附件：拼到 prompt 前（给 CLI 用的），content 保持原始文字用于展示
+  const pasteRefs: { path: string; name: string; objectUrl: string }[] = [];
+  let promptWithPaste = content;
+  if (hasPastedImages) {
+    for (const att of appState.pasteAttachments) {
+      pasteRefs.push({ ...att });
+    }
+    const pasteRefStr = pasteRefs.map((a) => `@${a.path}`).join(' ');
+    promptWithPaste = pasteRefStr + (content ? ' ' + content : '');
+    clearPasteAttachments();
+  }
+
+  // 将导入的文件引用也拼到 prompt 前面（已经是 @File[path] 格式，直接拼接）
+  if (capturedImportedRefs.length > 0) {
+    const importedRefStr = capturedImportedRefs.join(' ');
+    promptWithPaste = importedRefStr + (promptWithPaste ? ' ' + promptWithPaste : '');
+  }
+
+  // 所有引用（粘贴图片 + 导入文件）合并
+  const allRefs: FileRef[] = [
+    ...pasteRefs.map((a) => ({ path: a.path, isImage: true })),
+    ...capturedImportedRefs.map((r) => {
+      const path = unwrapFileRef(r).replace(/\/$/, '');
+      return { path, isImage: isImageFile(path) };
+    }),
+  ];
+
+  // 从 prompt 中提取 @File[] 标签，剩余文本交给 resolveFileReferences 处理 @path 引用
+  const fileRefTagStr = capturedImportedRefs.length > 0 ? capturedImportedRefs.join(' ') + ' ' : '';
+  // 先剥离 @File[] 标签与粘贴图片的 @绝对路径，避免 resolveFileReferences 将其当作 @引用重复处理
+  // （粘贴图片是「始终不解析、原样交给 CLI」的附件，由下方单独拼回 prompt）
+  let promptForResolve = stripFileRefTags(promptWithPaste);
+  for (const att of pasteRefs) {
+    const escaped = att.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    promptForResolve = promptForResolve.replace(new RegExp(`@${escaped}\\s*`, 'g'), '');
+  }
+  promptForResolve = promptForResolve.trim();
+
+  const { prompt: resolvedFromAtPaths, displayPrompt, refs: fileRefs } = await resolveFileReferences(promptForResolve);
+
+  // 合并 @file 引用到 allRefs
+  for (const ref of fileRefs) {
+    if (!allRefs.some((r) => r.path === ref.path)) {
+      allRefs.push(ref);
+    }
+  }
+
+  // 最终发送给 CLI 的 prompt：粘贴图片 @绝对路径 + @File[] 标签 + resolveFileReferences 处理后的内容
+  const pasteRefStr = pasteRefs.map((a) => `@${a.path}`).join(' ');
+  const resolvedContent = [pasteRefStr, fileRefTagStr, resolvedFromAtPaths].filter(Boolean).join(' ');
+
+  // 展示用内容：剥离 @path 引用，保留 @File[] 标签用于消息渲染
+  const displayContent = stripFileRefsFromDisplay(displayPrompt).trim();
+
+  // 存储的消息内容：粘贴图片转为 @File[] 标签 + 导入文件 @File[] 标签 + 干净文字
+  // @File[] 标签可被 parseFileRefs 解析为文件芯片，并随消息内容持久化，
+  // 避免后端回传时 refs 字段丢失（Rust Message 无 refs 字段）导致图片不再展示
+  const pasteRefTagStr = pasteRefs.map((a) => `@File[${a.path}]`).join(' ');
+  const messageContent = ((pasteRefTagStr ? pasteRefTagStr + ' ' : '') + fileRefTagStr + (displayContent || '')).trim();
+  const model = getActiveChatModel() || undefined;
+  const prepared: PreparedCommand = {
+    prompt: resolvedContent,
+    messageContent,
+    refs: allRefs.length > 0 ? allRefs : undefined,
+    model,
+  };
+
+  // 忙碌中也直接发送：常驻会话走 stdin 追问（由 Claude 侧排队/处理）
+  await executePreparedCommand(appState.activeConversationId || null, prepared);
+}
+
+/** 立即执行一条已准备好的指令（新建会话时 conversationId 可为 null） */
+export async function executePreparedCommand(
+  conversationId: string | null,
+  command: PreparedCommand,
+): Promise<void> {
+  // 用展示内容而非原始 prompt 作为 pending 消息，与 push 到会话的 messageContent 保持一致，
+  // 否则含粘贴图片/文件引用时两者不一致，buildDisplayMessages 的去重守卫会误判并多显示一条
+  appState.pendingUserMessage = command.messageContent;
+  appState.pendingUserMessageConvId = conversationId;
+
+  const alreadyBusy = !!(
+    conversationId && appState.runningSessions.has(conversationId)
+  );
+
+  const nextModelKey = normalizeModelKey(command.model);
+  if (conversationId) {
+    const prevModelKey = appState.sessionProcessModels.get(conversationId);
+    if (prevModelKey !== undefined && prevModelKey !== nextModelKey) {
+      showCopyToastMsg('已切换模型，正在重启会话');
+      appState.modelRestartingSessions.add(conversationId);
+      // 新进程开始出字或要权限后解除；兜底超时避免卡死
+      window.setTimeout(() => appState.modelRestartingSessions.delete(conversationId), 60000);
+    }
+    appState.sessionProcessModels.set(conversationId, nextModelKey);
+  } else {
+    appState.sessionProcessModels.set('pending', nextModelKey);
+  }
+
+  if (conversationId) {
+    appState.runningSessions.add(conversationId);
+    const conv = appState.conversations.find((c) => c.id === conversationId);
+    // 切模型 / 新开一轮前先固化当前流式回复，避免 clearStreaming 后丢失
+    commitStreamingAssistantToConversation(conversationId);
+    if (conv) {
+      conv.messages.push({
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: command.messageContent,
+        refs: command.refs,
+        timestamp: Math.floor(Date.now() / 1000),
+      });
+      conv.updated_at = Math.floor(Date.now() / 1000);
+    }
+    // 忙碌中追问：保留当前流式输出，避免把正在生成的内容清掉
+    if (!alreadyBusy) {
+      clearStreamingState(conversationId);
+    }
+    if (appState.activeConversationId === conversationId) {
+      shellApi.refreshChatContent();
+      if (alreadyBusy && appState.streamingBySession.has(conversationId)) {
+        refreshStreamingUI(conversationId);
+      }
+    }
+    updateConversationListSpinner();
+  } else {
+    // 新会话，session ID 尚未确定，先标记为 pending
+    appState.runningSessions.add('pending');
+    shellApi.render();
+  }
+
+  // shellApi.render() / shellApi.refreshChatContent() 可能重建 DOM，需要在之后设置 loading 状态
+  if (!conversationId || conversationId === appState.activeConversationId) {
+    setSendButtonLoading(true);
+  }
+  updateConversationListSpinner();
+
+  try {
+    const args: Record<string, string> = { prompt: command.prompt };
+    if (conversationId) {
+      args.conversationId = conversationId;
+    }
+    if (command.model) {
+      args.model = command.model;
+    }
+    if (!conversationId) {
+      const projectDir = getEffectiveProjectDir();
+      if (projectDir) {
+        args.projectDir = projectDir;
+      }
+    }
+    await api.executePrompt(args);
+  } catch (e) {
+    console.error('Failed to send message:', e);
+    alert('Failed to send message: ' + String(e));
+    appState.pendingUserMessage = null;
+    appState.pendingUserMessageConvId = null;
+    appState.runningSessions.delete(conversationId || 'pending');
+    if (!conversationId || conversationId === appState.activeConversationId) {
+      hideSendingState();
+    }
+    updateConversationListSpinner();
+  }
+}
+
+export async function abortSession() {
+  if (!isSendButtonLoading() || appState.isAbortingActiveSession) return;
+
+  try {
+    const args: Record<string, string> = {};
+
+    // 仅终止当前正在查看的会话（按 session ID）
+    if (appState.activeConversationId && appState.runningSessions.has(appState.activeConversationId)) {
+      args.conversationId = appState.activeConversationId;
+    } else {
+      // 当前查看的会话没有在运行，无需终止
+      return;
+    }
+
+    const abortSessionId = appState.activeConversationId;
+    appState.abortingSessions.add(abortSessionId);
+    setAbortingUi(true);
+    closePermissionDialogs(abortSessionId);
+
+    const killed = await api.abortSession(args);
+    console.log('[abort] result:', killed, 'sessionId:', abortSessionId);
+
+    // 点击停止后立即从运行集合中移除转圈；保留 aborting 标记直到 session-ended
+    appState.runningSessions.delete(abortSessionId);
+    updateConversationListSpinner();
+
+    // 安全回退：如果 session-ended 在 5 秒内未到达，强制清理 UI（interrupt 友好停止可能稍慢）
+    setTimeout(() => {
+      if (!appState.abortingSessions.has(abortSessionId) && !appState.isAbortingActiveSession) {
+        return;
+      }
+      console.warn('[abort] session-ended 未及时到达，强制清理 UI 状态');
+      appState.abortingSessions.delete(abortSessionId);
+      appState.runningSessions.delete(abortSessionId);
+      clearStreamingState(abortSessionId);
+      setAbortingUi(false);
+      hideSendingState();
+      updateConversationListSpinner();
+      // 用户主动停止：不自动 drain 队列
+    }, 5000);
+  } catch (e) {
+    console.error('Failed to abort session:', e);
+    setAbortingUi(false);
+    hideSendingState();
+    updateConversationListSpinner();
+  }
+}
+
+/** 重新生成或撤回消息的统一入口 */

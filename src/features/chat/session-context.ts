@@ -1,0 +1,140 @@
+import { appState } from '../../state';
+export function isNewChatSession(): boolean {
+  return !appState.activeConversationId;
+}
+
+export function getEffectiveProjectDir(): string {
+  if (appState.activeConversationId) {
+    const conv = appState.conversations.find((c) => c.id === appState.activeConversationId);
+    const dir = conv?.project_dir?.trim();
+    return dir || '';
+  }
+  return appState.pendingProjectDir?.trim() || '';
+}
+
+export function hasRequiredProjectDir(): boolean {
+  return getEffectiveProjectDir().length > 0;
+}
+
+export function canSendMessage(content?: string): boolean {
+  const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  const text = (content ?? input?.value ?? '').trim();
+  // 有导入文件引用时也允许发送（即使没有文字）
+  if (!text && appState.importedFileRefs.length === 0) {
+    return false;
+  }
+  if (isNewChatSession() && !hasRequiredProjectDir()) {
+    return false;
+  }
+  return true;
+}
+
+/** 当前激活会话是否在运行中（与左侧会话列表同一数据源：appState.runningSessions） */
+export function isActiveConversationRunning(): boolean {
+  if (appState.activeConversationId) {
+    return appState.runningSessions.has(appState.activeConversationId);
+  }
+  return appState.runningSessions.has('pending');
+}
+
+export function isSendButtonLoading(): boolean {
+  // 优先跟左侧一致：以 appState.runningSessions 为准；dataset 仅覆盖撤回等短暂 UI busy
+  if (isActiveConversationRunning()) return true;
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+  return sendBtn?.dataset.loading === 'true';
+}
+
+export function updateSendButtonState() {
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+  if (!sendBtn) {
+    return;
+  }
+
+  // 与左侧一致：运行中以 appState.runningSessions 为准；若 DOM 状态落后则完整同步（含输入区）
+  const sessionRunning = isActiveConversationRunning();
+  if (sessionRunning && sendBtn.dataset.loading !== 'true') {
+    setSendButtonLoading(true);
+    return;
+  }
+  const loading = sessionRunning || sendBtn.dataset.loading === 'true';
+  const sendIcon = sendBtn.querySelector('.send-icon') as SVGElement | null;
+  const stopIcon = sendBtn.querySelector('.stop-icon') as SVGElement | null;
+  const hasContent = canSendMessage();
+
+  if (appState.isAbortingActiveSession) {
+    sendBtn.disabled = true;
+    sendBtn.classList.add('is-loading');
+    sendBtn.classList.add('is-aborting');
+    sendBtn.setAttribute('aria-label', '正在停止');
+    sendBtn.title = '正在停止…';
+    if (sendIcon) sendIcon.style.display = 'none';
+    if (stopIcon) stopIcon.style.display = '';
+    return;
+  }
+  sendBtn.classList.remove('is-aborting');
+
+  if (loading) {
+    // 运行中：有内容 → 会话中追问；无内容 → 停止本轮
+    const followupMode = hasContent;
+    sendBtn.disabled = false;
+    sendBtn.classList.toggle('is-loading', !followupMode);
+    sendBtn.setAttribute('aria-label', followupMode ? '发送追问' : '停止');
+    sendBtn.title = followupMode ? '发送追问（由 Claude 会话内处理）' : '停止当前任务';
+    if (sendIcon) sendIcon.style.display = followupMode ? '' : 'none';
+    if (stopIcon) stopIcon.style.display = followupMode ? 'none' : '';
+    return;
+  }
+
+  sendBtn.classList.remove('is-loading');
+  sendBtn.disabled = !hasContent;
+  sendBtn.setAttribute('aria-label', '发送');
+  sendBtn.title = '发送';
+  if (sendIcon) sendIcon.style.display = '';
+  if (stopIcon) stopIcon.style.display = 'none';
+}
+
+export function setAbortingUi(aborting: boolean) {
+  appState.isAbortingActiveSession = aborting;
+  syncMessageInputPlaceholder();
+  updateSendButtonState();
+}
+
+export function getDefaultMessagePlaceholder(loading = isSendButtonLoading()): string {
+  if (appState.isAbortingActiveSession) return '正在停止当前任务…';
+  if (appState.questionOtherInputActive) {
+    return '在下方输入自定义回答，Enter 或点「提交」确认…';
+  }
+  if (loading) return 'AI 正在回答中，可继续输入后 Enter 发送追问…';
+  return '输入你的问题，Enter 发送，Shift+Enter 换行，@ 引用文件，粘贴图片...';
+}
+
+export function syncMessageInputPlaceholder(): void {
+  const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  if (!input) return;
+  input.placeholder = getDefaultMessagePlaceholder();
+}
+
+export function setSendButtonLoading(loading: boolean) {
+  const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
+  if (!sendBtn) {
+    return;
+  }
+  sendBtn.dataset.loading = loading ? 'true' : 'false';
+
+  // 运行中仍允许继续输入并追问，不禁用输入框
+  const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  if (input) {
+    input.disabled = false;
+    if (!appState.isAbortingActiveSession) {
+      syncMessageInputPlaceholder();
+    }
+  }
+
+  const inputArea = document.querySelector('.input-composer');
+  if (inputArea) {
+    inputArea.classList.toggle('is-loading', loading || appState.isAbortingActiveSession);
+  }
+
+  updateSendButtonState();
+}
+

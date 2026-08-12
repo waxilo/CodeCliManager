@@ -174,3 +174,21 @@ export function renderMarkdown(text: string): string {
     ADD_ATTR: ['data-code', 'data-bound', 'target', 'rel', 'class'],
   });
 }
+
+// Markdown 渲染缓存：避免对相同内容重复调用 marked.parse + DOMPurify
+const _mdCache = new Map<string, string>();
+const _MD_CACHE_MAX = 3000;
+
+/** 带 LRU 缓存的 Markdown 渲染 */
+export function renderMarkdownCached(src: string): string {
+  const cached = _mdCache.get(src);
+  if (cached !== undefined) return cached;
+  const html = renderMarkdown(src);
+  if (_mdCache.size >= _MD_CACHE_MAX) {
+    // 简单 LRU：删除最早的条目
+    const firstKey = _mdCache.keys().next().value;
+    if (firstKey !== undefined) _mdCache.delete(firstKey);
+  }
+  _mdCache.set(src, html);
+  return html;
+}

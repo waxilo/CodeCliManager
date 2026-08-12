@@ -44,7 +44,7 @@ pub struct Auth {
     pub runtime_url: String,
     pub management_url: String,
     pub http: Client,
-    cache: Mutex<AuthCache>,
+    pub(crate) cache: Mutex<AuthCache>,
 }
 
 impl Auth {

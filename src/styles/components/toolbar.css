@@ -1,0 +1,813 @@
+.main-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 24px;
+  border-bottom: 1px solid var(--color-bg-surface);
+  flex-shrink: 0;
+}
+
+.main-topbar-main {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.toolbar-icon-btn {
+  width: 32px;
+  height: 32px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-icon);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  transition: background 0.2s, color 0.2s;
+}
+
+.toolbar-icon-btn:hover {
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+}
+
+.toolbar-icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.toolbar-icon-btn.theme-toggle-btn svg {
+  stroke: currentColor;
+  fill: none;
+}
+
+.toolbar-settings-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+  -webkit-app-region: no-drag;
+}
+
+.toolbar-settings-update-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border: 2px solid var(--color-titlebar);
+  border-radius: 50%;
+  background: var(--color-danger);
+  box-sizing: content-box;
+  pointer-events: none;
+}
+
+.toolbar-update-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+  -webkit-app-region: no-drag;
+}
+
+.toolbar-update-btn:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+.toolbar-update-btn.has-update {
+  color: var(--color-on-accent);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.toolbar-update-btn.has-update:hover {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+  color: var(--color-on-accent);
+}
+
+.toolbar-update-btn.is-checking {
+  opacity: 0.75;
+}
+
+.toolbar-update-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.toolbar-update-btn-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.toolbar-update-btn.is-checking .toolbar-update-btn-icon {
+  animation: claude-update-spin 1s linear infinite;
+}
+
+.toolbar-update-btn-label {
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.toolbar-update-btn-dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-danger);
+  box-shadow: 0 0 0 1.5px var(--color-bg-base);
+}
+
+.toolbar-update-btn.has-update .toolbar-update-btn-dot {
+  background: var(--color-on-accent);
+  box-shadow: 0 0 0 1.5px var(--color-accent);
+}
+
+/* @keyframes claude-update-spin → utilities/animations.css */
+
+.claude-update-popover-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+}
+
+.claude-update-popover {
+  position: fixed;
+  z-index: 1101;
+  width: min(320px, calc(100vw - 16px));
+  padding: 12px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 10px;
+  background: var(--color-bg-elevated);
+  box-shadow: 0 12px 32px var(--color-shadow-strong);
+  color: var(--color-text);
+}
+
+.claude-update-popover-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.claude-update-popover-header strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.claude-update-popover-close {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.claude-update-popover-close:hover {
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+}
+
+.claude-update-popover-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.claude-update-row {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  font-size: 12px;
+}
+
+.claude-update-key {
+  color: var(--color-text-muted);
+}
+
+.claude-update-value {
+  color: var(--color-text);
+  word-break: break-all;
+  font-variant-numeric: tabular-nums;
+}
+
+.claude-update-value.is-newer {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.claude-update-row-path .claude-update-value {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.claude-update-popover-hint,
+.claude-update-popover-status {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.5;
+}
+
+.claude-update-popover-hint code {
+  font-size: 11px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--color-bg-surface);
+  color: var(--color-code);
+}
+
+.claude-update-popover-error {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: var(--color-danger);
+  line-height: 1.45;
+}
+
+.claude-update-popover-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.claude-update-action {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 7px;
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.claude-update-action:hover:not(:disabled) {
+  background: var(--color-bg-surface-hover);
+}
+
+.claude-update-action:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.claude-update-action.primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.claude-update-action.primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
+}
+
+/* 应用自身更新：更新说明 + 下载进度 */
+.app-update-notes {
+  margin: 0 0 10px;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--color-bg-surface);
+}
+
+.app-update-notes .markdown-body {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-text-secondary);
+}
+
+.app-update-notes .markdown-body p {
+  margin: 0 0 6px;
+}
+
+.app-update-notes .markdown-body ul,
+.app-update-notes .markdown-body ol {
+  margin: 0 0 6px;
+  padding-left: 18px;
+}
+
+.app-update-notes .markdown-body h1,
+.app-update-notes .markdown-body h2,
+.app-update-notes .markdown-body h3 {
+  font-size: 13px;
+  margin: 8px 0 4px;
+}
+
+.app-update-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+}
+
+.app-update-progress-track {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--color-bg-surface-hover);
+  overflow: hidden;
+}
+
+.app-update-progress-bar {
+  height: 100%;
+  border-radius: 3px;
+  background: var(--color-accent);
+  transition: width 0.15s ease;
+}
+
+.app-update-progress-pct {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+  min-width: 34px;
+  text-align: right;
+}
+
+.claude-update-progress-indeterminate {
+  width: 40% !important;
+  animation: claude-update-progress-slide 1.2s ease-in-out infinite;
+}
+
+/* @keyframes claude-update-progress-slide → utilities/animations.css */
+
+.toolbar-settings-btn:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+.toolbar-settings-btn.is-active {
+  background: var(--color-bg-surface-active);
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+
+.toolbar-settings-btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.toolbar-settings-btn-icon svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+
+/* MCP 图标采用描边风格，覆盖默认填充 */
+.toolbar-settings-btn.mcp-btn .toolbar-settings-btn-icon svg {
+  fill: none;
+  stroke: currentColor;
+}
+
+.toolbar-settings-btn-label {
+  line-height: 1;
+  white-space: nowrap;
+}
+
+/* ── 会话列表项（二级节点）───────────────────────────────────── */
+.conversation-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 4px 6px 4px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.conversation-item.editing {
+  cursor: default;
+  padding-top: 3px;
+  padding-bottom: 3px;
+}
+
+/* 新建会话淡入 */
+.conversation-item.is-new {
+  animation: conversation-fade-in 0.22s ease both;
+}
+
+/* @keyframes conversation-fade-in → utilities/animations.css */
+
+/* ── Normal → Hover → Active 三级状态 ── */
+.conversation-item:hover {
+  background: var(--sidebar-item-hover);
+}
+
+/* Active：渐变浅色背景 + 左侧 3px 高亮条 + 轻微阴影 */
+.conversation-item.active,
+.conversation-item.active:hover {
+  background: linear-gradient(
+    90deg,
+    var(--sidebar-item-active-from) 0%,
+    var(--sidebar-item-active-to) 100%
+  );
+  box-shadow: var(--sidebar-item-active-shadow);
+}
+
+/* 左侧高亮条 */
+.conversation-rail {
+  position: absolute;
+  left: 3px;
+  top: 50%;
+  width: 3px;
+  height: 0;
+  border-radius: 999px;
+  background: var(--color-accent);
+  transform: translateY(-50%);
+  transition: height 0.15s ease;
+}
+
+.conversation-item.active .conversation-rail {
+  height: 60%;
+}
+
+/* 内容主区 */
+.conversation-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+}
+
+.conversation-title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.35;
+  color: var(--color-text-secondary);
+  /* 最多两行，超出省略 */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  transition: color 0.15s ease;
+}
+
+.conversation-item:hover .conversation-title {
+  color: var(--color-text);
+}
+
+/* Active 标题加粗 */
+.conversation-item.active .conversation-title {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.conversation-item.running .conversation-title {
+  color: var(--color-accent);
+}
+
+/* ── 会话左侧聊天图标（三级状态） ── */
+.conversation-chat-icon {
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+  opacity: 0.5;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+
+.conversation-item:hover .conversation-chat-icon {
+  opacity: 0.8;
+  color: var(--color-text-secondary);
+}
+
+.conversation-item.active .conversation-chat-icon {
+  color: var(--color-accent);
+  opacity: 1;
+}
+
+/* 运行中状态：脉冲圆点替代聊天图标 */
+.conversation-status-dot {
+  flex-shrink: 0;
+  width: 13px;
+  height: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.conversation-status-dot::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-success);
+  animation: sidebar-pulse 1.4s ease-in-out infinite;
+}
+
+/* 会话时间：默认显示，hover 时让位给 ⋮ */
+.conversation-time {
+  flex-shrink: 0;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+  transition: opacity 0.15s ease;
+}
+
+.conversation-item:hover .conversation-time {
+  display: none;
+}
+
+/* ── 更多操作按钮（⋮）：默认隐藏，hover 显示 ───────────────────── */
+.conv-more-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.conversation-item:hover .conv-more-btn {
+  display: inline-flex;
+}
+
+.conv-more-btn:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+/* ── 触控设备：操作按钮常驻，避免依赖 hover ─────────────────────── */
+@media (hover: none) {
+  .conversation-item {
+    min-height: 44px;
+  }
+
+  .conv-more-btn {
+    display: inline-flex;
+  }
+
+  .conversation-item .conversation-time {
+    display: none;
+  }
+
+  .workspace-actions {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+
+  .ws-icon-btn,
+  .conv-more-btn {
+    width: 28px;
+    height: 28px;
+  }
+}
+
+/* ── 弹出菜单 ───────────────────────────────────────────────── */
+.conv-menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+}
+
+.ws-menu-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1100;
+  pointer-events: none;
+}
+
+.conv-menu-dropdown {
+  pointer-events: auto;
+  position: fixed;
+  min-width: 100px;
+  padding: 4px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 8px;
+  background: var(--color-bg-elevated);
+  box-shadow: 0 8px 24px var(--color-shadow-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.conv-menu-item {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 7px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.1s;
+}
+
+.conv-menu-item:hover {
+  background: var(--color-bg-surface);
+}
+
+.conv-menu-item.is-danger {
+  color: var(--color-danger);
+}
+
+.conv-menu-item.is-danger:hover {
+  background: var(--color-danger-bg);
+}
+
+/* @keyframes conv-spin → utilities/animations.css */
+
+/* 历史会话列表刷新中的半透明遮罩 */
+.sidebar-loading-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  color: var(--color-text-muted);
+  background: color-mix(in srgb, var(--color-bg-base) 58%, transparent);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  animation: overlay-fade-in 0.18s ease;
+}
+
+/* @keyframes overlay-fade-in → utilities/animations.css */
+
+.list-loading-spinner {
+  width: 24px;
+  height: 24px;
+  border: 2.5px solid var(--color-bg-surface-hover);
+  border-top-color: var(--color-accent, #4f8cff);
+  border-radius: 50%;
+  animation: conv-spin 0.7s linear infinite;
+}
+
+.list-loading-text {
+  font-size: 12px;
+}
+
+/* 刷新按钮 loading */
+.refresh-btn .refresh-icon {
+  display: inline-block;
+  line-height: 1;
+}
+
+.refresh-btn.is-loading .refresh-icon {
+  animation: conv-spin 0.7s linear infinite;
+}
+
+.conversation-edit-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+}
+
+.edit-input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  box-sizing: border-box;
+  padding: 0 10px;
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.edit-input:focus {
+  border-color: var(--color-accent);
+}
+
+.edit-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.edit-action-btn {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s;
+  padding: 0;
+}
+
+.edit-action-btn.save {
+  background: var(--color-success);
+  color: var(--color-on-accent);
+}
+
+.edit-action-btn.save:hover {
+  background: var(--color-success-hover);
+}
+
+.edit-action-btn.cancel {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+.edit-action-btn.cancel:hover {
+  background: var(--color-bg-surface-active);
+}
+
+/* 侧边栏空状态 / 无搜索结果 */
+.sidebar-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 28px 16px;
+  text-align: center;
+  color: var(--color-text-muted);
+}
+
+.sidebar-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--sidebar-badge-bg);
+  color: var(--color-text-muted);
+}
+
+.sidebar-empty-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.sidebar-empty-hint {
+  font-size: 11px;
+  line-height: 1.5;
+}
+

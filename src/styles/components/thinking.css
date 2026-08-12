@@ -1,0 +1,241 @@
+/* ============================================================
+   思考过程手风琴（Reasoning Accordion — 参考 claudecodeui）
+   ============================================================ */
+
+.thinking-block {
+  margin: 0;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--color-bg-surface);
+}
+
+/* ---- 触发器（点击展开/收起）---- */
+.thinking-summary {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  background: var(--color-bg-thinking);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  transition: background 0.15s, color 0.15s;
+}
+
+.thinking-summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking-block .thinking-brain-icon {
+  flex-shrink: 0;
+  width: 15px;
+  height: 15px;
+  color: var(--color-accent-soft);
+}
+
+.thinking-block .thinking-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.thinking-block .thinking-duration {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.thinking-block .thinking-chevron {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s ease;
+  color: var(--color-text-muted);
+}
+
+.thinking-block[open] > .thinking-summary .thinking-chevron {
+  transform: rotate(180deg);
+}
+
+.thinking-summary:hover {
+  color: var(--color-text);
+  background: var(--color-bg-surface-hover);
+}
+
+/* ---- 思考内容的展开/收起动画（CSS grid 技巧）---- */
+.thinking-content-wrapper {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s ease;
+}
+
+.thinking-block[open] > .thinking-content-wrapper {
+  grid-template-rows: 1fr;
+}
+
+.thinking-content-inner {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.thinking-content-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.thinking-content {
+  padding: 10px 14px;
+  color: #6c7086;
+}
+
+[data-theme="light"] .thinking-content {
+  color: #585b6e;
+}
+
+.thinking-content pre {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: inherit;
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  background: transparent;
+}
+
+/* ---- 流式思考中的闪烁动画标签 ---- */
+.thinking-block.streaming-active .thinking-label-text {
+  background: linear-gradient(90deg, var(--color-accent) 0%, var(--color-accent-soft) 50%, var(--color-accent) 100%);
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: thinking-shimmer 2s linear infinite;
+}
+
+/* @keyframes thinking-shimmer → utilities/animations.css */
+
+/* 纯 thinking 消息样式：紧凑间距 */
+.message.thinking-msg {
+  margin-top: -10px;
+  margin-bottom: -10px;
+}
+
+.message.thinking-msg + .message.thinking-msg {
+  margin-top: -12px;
+}
+
+.message.thinking-msg .message-content {
+  max-width: 100%;
+  padding: 0;
+}
+
+/* 流式输出中的消息：左侧蓝色指示条 + 生成中动画 */
+.message.streaming .message-content .markdown-body {
+  border-left: 2px solid var(--color-accent);
+  padding-left: 10px;
+}
+
+/* 流式输出指示器：显示在 message-footer 中，与完成后的时间戳结构一致 */
+.message-streaming-indicator {
+  font-size: 11px;
+  color: var(--color-accent-soft);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 流式输出中的闪烁点动画（与 pending-dot 保持一致的风格） */
+.message-streaming-indicator::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: pending-dot-bounce 1.2s infinite ease-in-out;
+}
+
+/* 统一 message-footer 最小高度，避免流式输出切换到完成状态时布局跳动 */
+.message.streaming .message-footer {
+  min-height: 20px;
+}
+
+/* ---- 错误消息 ---- */
+.message.error {
+  padding: 0 12px;
+}
+
+.message.error .message-content,
+.message-error-content {
+  padding: 12px 16px;
+  background: var(--color-error-bg);
+  border: 1px solid var(--color-error-border);
+  border-radius: 8px;
+}
+
+.message-error-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-danger);
+  margin-bottom: 8px;
+}
+
+.message.error .markdown-body {
+  color: var(--color-error-text);
+}
+
+.message.error .markdown-body code {
+  background: var(--color-md-code-bg);
+  color: var(--color-code);
+}
+
+/* ---- 待处理消息（等待回复）---- */
+.message.pending {
+  padding: 0 12px;
+}
+
+.message.pending .message-content,
+.message-pending-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 36px;
+  padding: 0;
+  color: var(--color-text-secondary);
+  background: transparent;
+  border: none;
+}
+
+.pending-animation {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.pending-text {
+  font-size: 13px;
+  color: var(--color-text-muted);
+}
+
+.pending-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-accent);
+  animation: pending-dot-bounce 1.2s infinite ease-in-out;
+}
+
+.pending-dot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.pending-dot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+/* @keyframes pending-dot-bounce → utilities/animations.css */
+
