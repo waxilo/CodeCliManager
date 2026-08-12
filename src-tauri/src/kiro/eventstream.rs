@@ -21,6 +21,8 @@ pub struct KiroEvent {
 #[derive(Debug, Default, Clone)]
 pub struct CollectedText {
     pub text: String,
+    /// 已拼装完成的原生 tool_use 块（Anthropic 格式）。
+    pub tool_uses: Vec<Value>,
     pub stop_reason: String,
     pub meter: Option<Value>,
     pub context_usage: Option<Value>,
@@ -108,58 +110,102 @@ fn read_header_value(buffer: &[u8], offset: usize) -> Option<(String, HeaderValu
     Some((name, value, o))
 }
 
-/// 解析完整的事件流 body（不含 HTTP 分块编码，reqwest 已自动解码）。
-pub fn parse_event_stream(input: &[u8]) -> Vec<KiroEvent> {
-    let mut events = Vec::new();
-    let mut offset = 0;
-    let len = input.len();
+/// 增量解析 AWS Event Stream：边读 HTTP body 边吐出完整帧。
+#[derive(Debug, Default)]
+pub struct IncrementalEventStream {
+    buffer: Vec<u8>,
+}
 
-    while offset + 12 <= len {
-        let total_length = read_u32_be(input, offset);
-        let headers_length = read_u32_be(input, offset + 4);
-        if total_length == 0 || offset + total_length > len {
-            break;
-        }
-
-        let mut headers: HashMap<String, HeaderValue> = HashMap::new();
-        let header_end = offset + 12 + headers_length;
-        let mut header_offset = offset + 12;
-        while header_offset + 2 <= header_end {
-            match read_header_value(input, header_offset) {
-                Some((name, value, next)) => {
-                    headers.insert(name, value);
-                    header_offset = next;
-                }
-                None => break,
-            }
-        }
-
-        let payload_start = header_end;
-        let payload_end = offset + total_length - 4;
-        let payload_bytes = if payload_start < payload_end {
-            &input[payload_start..payload_end]
-        } else {
-            &[]
-        };
-
-        let payload = if payload_bytes.is_empty() {
-            Value::Null
-        } else {
-            serde_json::from_slice(payload_bytes).unwrap_or_else(|_| {
-                json!({ "raw": String::from_utf8_lossy(payload_bytes).to_string() })
-            })
-        };
-
-        let event_type = match headers.get(":event-type") {
-            Some(HeaderValue::String(s)) => s.clone(),
-            _ => String::new(),
-        };
-
-        events.push(KiroEvent { event_type, payload });
-        offset += total_length;
+impl IncrementalEventStream {
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    events
+    /// 喂入一段原始字节，返回本轮新解析出的完整事件。
+    pub fn push(&mut self, data: &[u8]) -> Vec<KiroEvent> {
+        if !data.is_empty() {
+            self.buffer.extend_from_slice(data);
+        }
+        self.drain_complete_frames()
+    }
+
+    fn drain_complete_frames(&mut self) -> Vec<KiroEvent> {
+        let mut events = Vec::new();
+        loop {
+            if self.buffer.len() < 12 {
+                break;
+            }
+            let total_length = read_u32_be(&self.buffer, 0);
+            // 非法长度：停止消费，避免死循环（留给上层当截断处理）
+            if total_length < 16 || total_length > 64 * 1024 * 1024 {
+                break;
+            }
+            if self.buffer.len() < total_length {
+                break;
+            }
+            let frame: Vec<u8> = self.buffer.drain(..total_length).collect();
+            if let Some(event) = parse_single_frame(&frame) {
+                events.push(event);
+            }
+        }
+        events
+    }
+}
+
+fn parse_single_frame(frame: &[u8]) -> Option<KiroEvent> {
+    if frame.len() < 16 {
+        return None;
+    }
+    let total_length = read_u32_be(frame, 0);
+    let headers_length = read_u32_be(frame, 4);
+    if total_length == 0 || total_length > frame.len() {
+        return None;
+    }
+
+    let mut headers: HashMap<String, HeaderValue> = HashMap::new();
+    let header_end = 12 + headers_length;
+    if header_end > frame.len().saturating_sub(4) {
+        return None;
+    }
+    let mut header_offset = 12;
+    while header_offset + 2 <= header_end {
+        match read_header_value(frame, header_offset) {
+            Some((name, value, next)) => {
+                headers.insert(name, value);
+                header_offset = next;
+            }
+            None => break,
+        }
+    }
+
+    let payload_start = header_end;
+    let payload_end = total_length - 4;
+    let payload_bytes = if payload_start < payload_end && payload_end <= frame.len() {
+        &frame[payload_start..payload_end]
+    } else {
+        &[]
+    };
+
+    let payload = if payload_bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(payload_bytes).unwrap_or_else(|_| {
+            json!({ "raw": String::from_utf8_lossy(payload_bytes).to_string() })
+        })
+    };
+
+    let event_type = match headers.get(":event-type") {
+        Some(HeaderValue::String(s)) => s.clone(),
+        _ => String::new(),
+    };
+
+    Some(KiroEvent { event_type, payload })
+}
+
+/// 解析完整的事件流 body（不含 HTTP 分块编码，reqwest 已自动解码）。
+pub fn parse_event_stream(input: &[u8]) -> Vec<KiroEvent> {
+    let mut parser = IncrementalEventStream::new();
+    parser.push(input)
 }
 
 #[cfg(test)]
@@ -217,6 +263,79 @@ mod tests {
         // 截断的帧应被跳过而不是 panic
         assert!(events.is_empty());
     }
+
+    #[test]
+    fn incremental_parser_emits_across_chunks() {
+        let frame = build_frame("assistantResponseEvent", &json!({ "content": "ab" }));
+        let split = frame.len() / 2;
+        let mut parser = IncrementalEventStream::new();
+        assert!(parser.push(&frame[..split]).is_empty());
+        let events = parser.push(&frame[split..]);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].payload["content"], "ab");
+    }
+
+    #[test]
+    fn collects_native_tool_use_event() {
+        let frame = build_frame(
+            "toolUseEvent",
+            &json!({
+                "name": "Bash",
+                "toolUseId": "call_abc",
+                "input": "{\"command\":\"echo hi\"}",
+                "stop": true
+            }),
+        );
+        let events = parse_event_stream(&frame);
+        let collected = collect_kiro_text(&events);
+        assert_eq!(collected.stop_reason, "tool_use");
+        assert_eq!(collected.tool_uses.len(), 1);
+        assert_eq!(collected.tool_uses[0]["name"], "Bash");
+        assert_eq!(collected.tool_uses[0]["id"], "call_abc");
+        assert_eq!(collected.tool_uses[0]["input"]["command"], "echo hi");
+    }
+
+    #[test]
+    fn collects_chunked_native_tool_use_event() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_frame(
+            "toolUseEvent",
+            &json!({
+                "name": "Bash",
+                "toolUseId": "call_chunked"
+            }),
+        ));
+        data.extend_from_slice(&build_frame(
+            "toolUseEvent",
+            &json!({
+                "name": "Bash",
+                "toolUseId": "call_chunked",
+                "input": "{\"command\":"
+            }),
+        ));
+        data.extend_from_slice(&build_frame(
+            "toolUseEvent",
+            &json!({
+                "name": "Bash",
+                "toolUseId": "call_chunked",
+                "input": "\"echo hi\"}"
+            }),
+        ));
+        data.extend_from_slice(&build_frame(
+            "toolUseEvent",
+            &json!({
+                "name": "Bash",
+                "toolUseId": "call_chunked",
+                "stop": true
+            }),
+        ));
+        let events = parse_event_stream(&data);
+        let collected = collect_kiro_text(&events);
+        assert_eq!(collected.tool_uses.len(), 1);
+        assert_eq!(collected.tool_uses[0]["id"], "call_chunked");
+        assert_eq!(collected.tool_uses[0]["input"]["command"], "echo hi");
+        assert_eq!(collected.stop_reason, "tool_use");
+    }
 }
 
 fn map_stop_reason(stop_reason: &str) -> String {
@@ -227,18 +346,92 @@ fn map_stop_reason(stop_reason: &str) -> String {
     }
 }
 
+fn tool_use_event_to_block(payload: &Value) -> Option<Value> {
+    let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
+    if name.is_empty() {
+        return None;
+    }
+    let id = payload
+        .get("toolUseId")
+        .or_else(|| payload.get("tool_use_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    let id = if id.is_empty() {
+        let raw = format!("{:x}", chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        format!("tooluse_{raw}")
+    } else {
+        id.to_string()
+    };
+    let input_value = match payload.get("input") {
+        Some(Value::String(s)) => {
+            serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({ "raw": s }))
+        }
+        Some(v) if v.is_object() => v.clone(),
+        _ => json!({}),
+    };
+    Some(json!({
+        "type": "tool_use",
+        "id": id,
+        "name": name,
+        "input": input_value,
+    }))
+}
+
 /// 遍历事件，累积文本回复、停止原因与用量信息。
 pub fn collect_kiro_text(events: &[KiroEvent]) -> CollectedText {
     let mut collected = CollectedText {
         stop_reason: "end_turn".to_string(),
         ..Default::default()
     };
+    let mut tool_order: Vec<String> = Vec::new();
+    let mut tool_parts: HashMap<String, (String, String, Option<Value>, bool)> = HashMap::new();
 
     for event in events {
         match event.event_type.as_str() {
             "assistantResponseEvent" => {
                 if let Some(content) = event.payload.get("content").and_then(|v| v.as_str()) {
                     collected.text.push_str(content);
+                }
+            }
+            "toolUseEvent" => {
+                let id = event
+                    .payload
+                    .get("toolUseId")
+                    .or_else(|| event.payload.get("tool_use_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                let name = event
+                    .payload
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                if !tool_parts.contains_key(&id) {
+                    tool_order.push(id.clone());
+                }
+                let entry = tool_parts
+                    .entry(id.clone())
+                    .or_insert_with(|| (name.clone(), String::new(), None, false));
+                if entry.0.is_empty() && !name.is_empty() {
+                    entry.0 = name;
+                }
+                match event.payload.get("input") {
+                    Some(Value::String(chunk)) => entry.1.push_str(chunk),
+                    Some(value) if value.is_object() => entry.2 = Some(value.clone()),
+                    _ => {}
+                }
+                let is_stop = event
+                    .payload
+                    .get("stop")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if is_stop {
+                    entry.3 = true;
                 }
             }
             "metadataEvent" => {
@@ -250,6 +443,28 @@ pub fn collect_kiro_text(events: &[KiroEvent]) -> CollectedText {
             "contextUsageEvent" => collected.context_usage = Some(event.payload.clone()),
             _ => {}
         }
+    }
+
+    for id in tool_order {
+        let Some((name, input_parts, object_input, is_complete)) = tool_parts.get(&id) else {
+            continue;
+        };
+        if !is_complete {
+            continue;
+        }
+        let input = object_input
+            .clone()
+            .unwrap_or_else(|| Value::String(input_parts.clone()));
+        if let Some(block) = tool_use_event_to_block(&json!({
+            "toolUseId": id,
+            "name": name,
+            "input": input,
+        })) {
+            collected.tool_uses.push(block);
+        }
+    }
+    if !collected.tool_uses.is_empty() {
+        collected.stop_reason = "tool_use".to_string();
     }
 
     collected
