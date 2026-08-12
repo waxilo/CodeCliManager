@@ -1173,6 +1173,24 @@ async fn fetch_api_models(
     model_fetch::fetch_models(trimmed_base_url, &resolved_key).await
 }
 
+/// 查询当前选中 profile 的 DeepSeek 余额（仅 deepseek.com Base URL）。
+#[tauri::command]
+async fn fetch_deepseek_balance(
+    base_url: String,
+    api_key: Option<String>,
+    profile_id: Option<String>,
+) -> Result<model_fetch::DeepSeekBalance, String> {
+    let trimmed_base_url = base_url.trim();
+    if trimmed_base_url.is_empty() {
+        return Err("Base URL 不能为空".to_string());
+    }
+    if !model_fetch::is_deepseek_base_url(trimmed_base_url) {
+        return Err("当前配置不是 DeepSeek API".to_string());
+    }
+    let resolved_key = resolve_api_key_for_fetch(api_key, profile_id)?;
+    model_fetch::fetch_deepseek_balance(trimmed_base_url, &resolved_key).await
+}
+
 fn active_api_profile<'a>(store: &'a ApiProfilesStore) -> Option<&'a ApiProfile> {
     store
         .active_profile_id
@@ -4940,6 +4958,22 @@ fn kiro_status(state: tauri::State<'_, KiroProxyState>) -> KiroStatus {
     build_kiro_status(&state)
 }
 
+/// 查询 Kiro 账户 Credits 额度（后台线程阻塞 HTTP，不卡住 UI）。
+#[tauri::command]
+async fn kiro_usage() -> Result<kiro::auth::KiroUsageInfo, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let auth = kiro::auth::Auth::new(
+            kiro_sso_cache_dir(),
+            None,
+            KIRO_RUNTIME_URL.to_string(),
+            KIRO_MANAGEMENT_URL.to_string(),
+        );
+        auth.get_usage_limits()
+    })
+    .await
+    .map_err(|e| format!("额度查询任务失败: {e}"))?
+}
+
 /// 启动 Kiro 反代代理并自动接入 Claude Code。
 #[tauri::command]
 fn kiro_start(
@@ -5005,7 +5039,9 @@ pub fn run() {
             delete_api_profile,
             import_cc_switch_profiles,
             fetch_api_models,
+            fetch_deepseek_balance,
             kiro_status,
+            kiro_usage,
             kiro_start,
             kiro_stop,
             get_mcp_servers,

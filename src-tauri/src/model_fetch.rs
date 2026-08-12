@@ -36,6 +36,100 @@ pub struct FetchedModel {
     pub owned_by: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeepSeekBalance {
+    pub is_available: bool,
+    pub currency: String,
+    pub total_balance: String,
+    pub granted_balance: String,
+    pub topped_up_balance: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepSeekBalanceResponse {
+    is_available: Option<bool>,
+    balance_infos: Option<Vec<DeepSeekBalanceInfo>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeepSeekBalanceInfo {
+    currency: Option<String>,
+    total_balance: Option<String>,
+    granted_balance: Option<String>,
+    topped_up_balance: Option<String>,
+}
+
+/// 判断 Base URL 是否指向 DeepSeek 官方 API。
+pub fn is_deepseek_base_url(base_url: &str) -> bool {
+    base_url
+        .trim()
+        .to_ascii_lowercase()
+        .contains("deepseek.com")
+}
+
+/// 从兼容 Anthropic 的 DeepSeek Base URL 推导官方根域名。
+pub fn deepseek_api_root(base_url: &str) -> Result<String, String> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("Base URL 不能为空".to_string());
+    }
+    if !is_deepseek_base_url(trimmed) {
+        return Err("当前 Base URL 不是 DeepSeek".to_string());
+    }
+
+    let mut root = trimmed.to_string();
+    if let Some(stripped) = strip_compat_suffix(&root) {
+        root = stripped.trim_end_matches('/').to_string();
+    }
+    if let Some(stripped) = root.strip_suffix("/v1") {
+        root = stripped.trim_end_matches('/').to_string();
+    }
+    if root.is_empty() || !root.contains("://") {
+        return Err("无法从 Base URL 解析 DeepSeek API 根地址".to_string());
+    }
+    Ok(root)
+}
+
+/// 查询 DeepSeek 账户余额：`GET {root}/user/balance`。
+pub async fn fetch_deepseek_balance(base_url: &str, api_key: &str) -> Result<DeepSeekBalance, String> {
+    let root = deepseek_api_root(base_url)?;
+    let url = format!("{root}/user/balance");
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
+        .build()
+        .map_err(|err| format!("创建 HTTP 客户端失败: {err}"))?;
+
+    let response = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key.trim()))
+        .send()
+        .await
+        .map_err(|err| format!("请求 DeepSeek 余额失败: {err}"))?;
+
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}: {}", truncate_body(body)));
+    }
+
+    let parsed: DeepSeekBalanceResponse = serde_json::from_str(&body)
+        .map_err(|err| format!("解析 DeepSeek 余额失败: {err}"))?;
+    let info = parsed
+        .balance_infos
+        .and_then(|list| list.into_iter().next())
+        .ok_or_else(|| "DeepSeek 余额响应缺少 balance_infos".to_string())?;
+
+    Ok(DeepSeekBalance {
+        is_available: parsed.is_available.unwrap_or(false),
+        currency: info.currency.unwrap_or_else(|| "CNY".to_string()),
+        total_balance: info.total_balance.unwrap_or_else(|| "0".to_string()),
+        granted_balance: info.granted_balance.unwrap_or_else(|| "0".to_string()),
+        topped_up_balance: info.topped_up_balance.unwrap_or_else(|| "0".to_string()),
+    })
+}
+
 pub fn build_models_url_candidates(base_url: &str) -> Result<Vec<String>, String> {
     let trimmed = base_url.trim().trim_end_matches('/');
     if trimmed.is_empty() {
@@ -173,5 +267,19 @@ mod tests {
                 "https://api.deepseek.com/models",
             ]
         );
+    }
+
+    #[test]
+    fn deepseek_root_from_anthropic_compat() {
+        assert!(is_deepseek_base_url("https://api.deepseek.com/anthropic"));
+        assert_eq!(
+            deepseek_api_root("https://api.deepseek.com/anthropic").unwrap(),
+            "https://api.deepseek.com"
+        );
+        assert_eq!(
+            deepseek_api_root("https://api.deepseek.com/v1").unwrap(),
+            "https://api.deepseek.com"
+        );
+        assert!(deepseek_api_root("https://api.anthropic.com").is_err());
     }
 }

@@ -9,6 +9,7 @@ use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
+use serde::Serialize;
 use serde_json::{json, Value};
 
 const TOKEN_REFRESH_SKEW_SECS: i64 = 120;
@@ -18,6 +19,23 @@ const PROFILE_ARN_RE: &str = r"^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:p
 struct AuthCache {
     cached_profile_arn: Option<String>,
     cached_available_models: Option<Vec<String>>,
+}
+
+/// Kiro 账户额度快照（来自 getUsageLimits）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KiroUsageInfo {
+    pub subscription_title: Option<String>,
+    pub subscription_type: Option<String>,
+    pub current_usage: f64,
+    pub usage_limit: f64,
+    pub remaining: f64,
+    pub percent_used: f64,
+    pub next_reset_at: Option<String>,
+    pub days_until_reset: Option<i64>,
+    pub overage_status: Option<String>,
+    pub currency: Option<String>,
+    pub email: Option<String>,
 }
 
 pub struct Auth {
@@ -583,6 +601,218 @@ impl Auth {
             .or_else(|| models.iter().find(|m| m.to_lowercase().contains("sonnet")).cloned());
         Some(claude.unwrap_or_else(|| models[0].clone()))
     }
+
+    /// 查询当前账户 Kiro Credits 额度（不消耗额度）。
+    ///
+    /// `GET https://q.{region}.amazonaws.com/getUsageLimits?...`
+    pub fn get_usage_limits(&self) -> Result<KiroUsageInfo, String> {
+        let Some(auth_header) = self.get_authorization()? else {
+            return Err("未找到 Kiro 凭据，请先登录 Kiro IDE".to_string());
+        };
+        let profile_arn = match self.get_sso_profile_arn() {
+            Some(arn) => arn,
+            None => match self.discover_profile_arn()? {
+                Some(arn) => arn,
+                None => return Err("未找到 Profile ARN，无法查询额度".to_string()),
+            },
+        };
+        let region = Self::get_profile_arn_region(&profile_arn)
+            .or_else(|| {
+                self.read_sso_token()
+                    .and_then(|t| t.get("region").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            })
+            .unwrap_or_else(|| "us-east-1".to_string());
+
+        let mut url = reqwest::Url::parse(&format!(
+            "https://q.{region}.amazonaws.com/getUsageLimits"
+        ))
+        .map_err(|e| format!("构造额度查询 URL 失败: {e}"))?;
+        {
+            let mut pairs = url.query_pairs_mut();
+            pairs.append_pair("isEmailRequired", "true");
+            pairs.append_pair("origin", "AI_EDITOR");
+            pairs.append_pair("resourceType", "AGENTIC_REQUEST");
+            pairs.append_pair("profileArn", &profile_arn);
+        }
+
+        let mut request = self
+            .http
+            .get(url)
+            .header("authorization", &auth_header)
+            .header("accept", "application/json")
+            .header("user-agent", "KiroIDE");
+
+        // Social / 外部 IdP 账户需要 TokenType，否则部分区域会 403
+        if let Some(token) = self.read_sso_token() {
+            let auth_method = token
+                .get("authMethod")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if auth_method == "social" || auth_method.contains("external") {
+                request = request.header("TokenType", "EXTERNAL_IDP");
+            }
+        }
+
+        let response = request
+            .send()
+            .map_err(|e| format!("查询 Kiro 额度失败: {e}"))?;
+        let status = response.status();
+        let data: Value = response.json().unwrap_or_else(|_| json!({}));
+        if !status.is_success() {
+            let reason = data
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .or_else(|| data.get("message").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            return Err(if reason.is_empty() {
+                format!("查询 Kiro 额度失败: HTTP {status}")
+            } else {
+                format!("查询 Kiro 额度失败: HTTP {status} ({reason})")
+            });
+        }
+
+        Ok(parse_kiro_usage_limits(&data))
+    }
+}
+
+fn json_f64(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_i64().map(|n| n as f64))
+        .or_else(|| value.as_u64().map(|n| n as f64))
+        .or_else(|| value.as_str().and_then(|s| s.parse::<f64>().ok()))
+}
+
+fn format_epoch_reset(value: &Value) -> Option<String> {
+    if let Some(s) = value.as_str() {
+        if !s.trim().is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    let ts = json_f64(value)?;
+    // 上游可能返回秒或毫秒 epoch（含科学计数法 float）
+    let secs = if ts > 10_000_000_000.0 {
+        (ts / 1000.0) as i64
+    } else {
+        ts as i64
+    };
+    // 过滤 day-of-month 等非 epoch 小数（如 1），避免解析成 1970
+    if secs < 1_600_000_000 {
+        return None;
+    }
+    DateTime::from_timestamp(secs, 0).map(|dt| dt.to_rfc3339())
+}
+
+/// 由重置时间推算剩余整天数（向上取整；已过期为 0）。
+fn days_until_reset_from_at(reset_at: &str) -> Option<i64> {
+    let reset_ms = parse_expiry_ms(reset_at)?;
+    let remaining_ms = reset_ms - now_ms();
+    if remaining_ms <= 0 {
+        return Some(0);
+    }
+    Some((remaining_ms + 86_400_000 - 1) / 86_400_000)
+}
+
+fn parse_kiro_usage_limits(data: &Value) -> KiroUsageInfo {
+    let subscription = data.get("subscriptionInfo").cloned().unwrap_or(Value::Null);
+    let overage = data
+        .get("overageConfiguration")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let user = data.get("userInfo").cloned().unwrap_or(Value::Null);
+
+    let breakdowns = data
+        .get("usageBreakdownList")
+        .or_else(|| data.get("usageBreakdowns"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let credit = breakdowns
+        .iter()
+        .find(|item| {
+            item.get("resourceType")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .eq_ignore_ascii_case("CREDIT")
+                || item
+                    .get("type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .eq_ignore_ascii_case("CREDIT")
+        })
+        .or_else(|| breakdowns.first())
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let current_usage = credit
+        .get("currentUsageWithPrecision")
+        .and_then(json_f64)
+        .or_else(|| credit.get("currentUsage").and_then(json_f64))
+        .unwrap_or(0.0);
+    let usage_limit = credit
+        .get("usageLimitWithPrecision")
+        .and_then(json_f64)
+        .or_else(|| credit.get("usageLimit").and_then(json_f64))
+        .unwrap_or(0.0);
+    let remaining = (usage_limit - current_usage).max(0.0);
+    let percent_used = if usage_limit > 0.0 {
+        (current_usage / usage_limit * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+
+    let next_reset_at = data
+        .get("nextDateReset")
+        .and_then(format_epoch_reset)
+        .or_else(|| credit.get("nextDateReset").and_then(format_epoch_reset))
+        .or_else(|| credit.get("resetDate").and_then(|v| v.as_str().map(|s| s.to_string())));
+
+    // 上游经常返回 daysUntilReset=0，真实周期在 nextDateReset；优先按重置时间推算。
+    let upstream_days = data
+        .get("daysUntilReset")
+        .and_then(|v| v.as_i64().or_else(|| json_f64(v).map(|n| n as i64)));
+    let computed_days = next_reset_at
+        .as_deref()
+        .and_then(days_until_reset_from_at);
+    let days_until_reset = match (upstream_days, computed_days) {
+        (_, Some(computed)) if computed > 0 => Some(computed),
+        (Some(upstream), Some(computed)) if upstream > 0 => Some(upstream.max(computed)),
+        (Some(upstream), None) if upstream > 0 => Some(upstream),
+        (_, Some(computed)) => Some(computed),
+        (Some(upstream), None) => Some(upstream),
+        _ => None,
+    };
+
+    KiroUsageInfo {
+        subscription_title: subscription
+            .get("subscriptionTitle")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        subscription_type: subscription
+            .get("type")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        current_usage,
+        usage_limit,
+        remaining,
+        percent_used,
+        next_reset_at,
+        days_until_reset,
+        overage_status: overage
+            .get("overageStatus")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        currency: credit
+            .get("currency")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        email: user
+            .get("email")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    }
 }
 
 fn now_ms() -> i64 {
@@ -601,4 +831,40 @@ fn parse_expiry_ms(value: &str) -> Option<i64> {
         return Some((ms * 1000.0) as i64);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_prefers_next_date_when_days_is_zero() {
+        // 约 20 天后
+        let reset_secs = Utc::now().timestamp() + 20 * 86_400;
+        let data = json!({
+            "daysUntilReset": 0,
+            "nextDateReset": reset_secs as f64,
+            "subscriptionInfo": { "subscriptionTitle": "KIRO PRO", "type": "Q_DEVELOPER_STANDALONE_PRO" },
+            "usageBreakdownList": [{
+                "resourceType": "CREDIT",
+                "currentUsage": 10,
+                "usageLimit": 1000
+            }]
+        });
+        let info = parse_kiro_usage_limits(&data);
+        assert!(info.days_until_reset.unwrap_or(0) >= 19);
+        assert!(info.days_until_reset.unwrap_or(0) <= 21);
+        assert!(info.next_reset_at.is_some());
+    }
+
+    #[test]
+    fn usage_ignores_day_of_month_as_epoch() {
+        let data = json!({
+            "daysUntilReset": 0,
+            "nextDateReset": 1,
+            "usageBreakdownList": [{ "resourceType": "CREDIT", "currentUsage": 1, "usageLimit": 50 }]
+        });
+        let info = parse_kiro_usage_limits(&data);
+        assert!(info.next_reset_at.is_none());
+    }
 }

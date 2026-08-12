@@ -3628,6 +3628,30 @@ body.is-sidebar-resizing {
   font-size: 11px;
 }
 
+.kiro-card-row .kiro-usage-refresh {
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.provider-balance-box {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.provider-balance-value {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  color: var(--color-text);
+  word-break: break-word;
+}
+
+.provider-balance-field[hidden] {
+  display: none;
+}
+
 .kiro-card-hint {
   margin: 10px 0 0;
   font-size: 11px;

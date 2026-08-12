@@ -141,6 +141,30 @@ interface KiroStatusData {
   profileArn: string | null;
 }
 
+/** 后端 kiro_usage 返回值 */
+interface KiroUsageData {
+  subscriptionTitle: string | null;
+  subscriptionType: string | null;
+  currentUsage: number;
+  usageLimit: number;
+  remaining: number;
+  percentUsed: number;
+  nextResetAt: string | null;
+  daysUntilReset: number | null;
+  overageStatus: string | null;
+  currency: string | null;
+  email: string | null;
+}
+
+/** 后端 fetch_deepseek_balance 返回值 */
+interface DeepSeekBalanceData {
+  isAvailable: boolean;
+  currency: string;
+  totalBalance: string;
+  grantedBalance: string;
+  toppedUpBalance: string;
+}
+
 interface FetchedModel {
   id: string;
   ownedBy?: string | null;
@@ -213,6 +237,9 @@ let apiConfigEscapeHandler: ((event: KeyboardEvent) => void) | null = null;
 let settingsEscapeHandler: ((event: KeyboardEvent) => void) | null = null;
 /** Kiro 反代代理状态（由后端 kiro_status 返回） */
 let kiroStatus: KiroStatusData | null = null;
+/** 额度 / 余额异步查询序号，避免过期结果回写 */
+let kiroUsageRequestId = 0;
+let deepSeekBalanceRequestId = 0;
 /** 主界面是否正在展示 MCP 管理页（非弹窗） */
 let isMcpViewActive = false;
 /** 防止 MCP 页异步挂载与关闭竞态 */
@@ -3344,6 +3371,13 @@ function renderApiConfigViewHtml(): string {
             </div>
           </div>
         </div>
+        <div class="settings-field provider-balance-field" data-provider-balance-wrap hidden>
+          <span>账户余额</span>
+          <div class="provider-balance-box">
+            <span class="provider-balance-value" data-provider-balance>—</span>
+            <button type="button" class="settings-apikey-btn provider-balance-refresh" title="刷新余额">刷新</button>
+          </div>
+        </div>
         <label class="settings-field">
           <span>模型配置</span>
           <input
@@ -3369,6 +3403,11 @@ function renderApiConfigViewHtml(): string {
           <div class="kiro-card-row"><span class="kiro-card-label">凭据来源</span><span class="kiro-card-value" data-kiro-auth>—</span></div>
           <div class="kiro-card-row"><span class="kiro-card-label">Token 过期</span><span class="kiro-card-value" data-kiro-expires>—</span></div>
           <div class="kiro-card-row kiro-card-row-profile"><span class="kiro-card-label">Profile ARN</span><span class="kiro-card-value kiro-card-value-arn" data-kiro-arn>—</span></div>
+          <div class="kiro-card-row">
+            <span class="kiro-card-label">账户额度</span>
+            <span class="kiro-card-value" data-kiro-usage>—</span>
+            <button type="button" class="settings-apikey-btn kiro-usage-refresh" title="刷新额度">刷新</button>
+          </div>
         </div>
         <p class="kiro-card-hint">将本地代理暴露为 Anthropic API，配合 Kiro IDE 免费额度的 Claude 使用；开关仅影响本机代理，不影响上方 API 配置。</p>
       </section>
@@ -4490,6 +4529,7 @@ function fillOfficialView(overlay: HTMLElement) {
   const modelInput = overlay.querySelector('.settings-model-config-summary') as HTMLInputElement | null;
   if (modelInput) modelInput.value = '由订阅 / 官方登录决定';
   setSettingsFormEditable(overlay, false);
+  setProviderBalanceVisible(overlay, false);
 }
 
 /** 将完整 API Key 转换为首尾可见的脱敏字符串，例如 `sk-a••••••••••wxyz`。 */
@@ -4745,6 +4785,137 @@ function formatKiroExpiry(expiresAt: string | null): string {
   return `${hours} 小时${leftMin > 0 ? ` ${leftMin} 分` : ''}后`;
 }
 
+function isDeepSeekBaseUrl(baseUrl: string): boolean {
+  return baseUrl.trim().toLowerCase().includes('deepseek.com');
+}
+
+function formatUsageNumber(value: number): string {
+  if (!Number.isFinite(value)) return '0';
+  if (Number.isInteger(value)) return String(value);
+  return value.toFixed(2).replace(/\.?0+$/, '');
+}
+
+function formatKiroUsageText(usage: KiroUsageData): string {
+  const used = formatUsageNumber(usage.currentUsage);
+  const limit = formatUsageNumber(usage.usageLimit);
+  const remaining = formatUsageNumber(usage.remaining);
+  const percent = Number.isFinite(usage.percentUsed) ? usage.percentUsed.toFixed(1) : '0.0';
+  const plan = usage.subscriptionTitle ? `${usage.subscriptionTitle} · ` : '';
+  let text = `${plan}${used} / ${limit}（剩余 ${remaining}，${percent}%）`;
+
+  const resetTs = usage.nextResetAt ? Date.parse(usage.nextResetAt) : Number.NaN;
+  const hasResetTs = !Number.isNaN(resetTs);
+  let days = usage.daysUntilReset;
+  // 上游常给 daysUntilReset=0，若还有未来的重置时间则按日期重算
+  if (hasResetTs) {
+    const computed = Math.max(0, Math.ceil((resetTs - Date.now()) / 86_400_000));
+    if (days == null || (days <= 0 && computed > 0)) {
+      days = computed;
+    }
+  }
+
+  if (days != null && days > 0) {
+    text += ` · ${days} 天后重置`;
+    if (hasResetTs) {
+      text += `（${new Date(resetTs).toLocaleDateString()}）`;
+    }
+  } else if (hasResetTs && resetTs > Date.now()) {
+    text += ` · 重置 ${new Date(resetTs).toLocaleDateString()}`;
+  } else if (days === 0 || (hasResetTs && resetTs <= Date.now())) {
+    text += ' · 今天重置';
+  }
+  return text;
+}
+
+function formatDeepSeekBalanceText(balance: DeepSeekBalanceData): string {
+  const avail = balance.isAvailable ? '可用' : '不足';
+  return `${balance.totalBalance} ${balance.currency}（赠送 ${balance.grantedBalance} / 充值 ${balance.toppedUpBalance} · ${avail}）`;
+}
+
+function setProviderBalanceVisible(overlay: HTMLElement, visible: boolean) {
+  const wrap = overlay.querySelector('[data-provider-balance-wrap]') as HTMLElement | null;
+  if (wrap) wrap.hidden = !visible;
+}
+
+function setProviderBalanceText(overlay: HTMLElement, text: string) {
+  const el = overlay.querySelector('[data-provider-balance]') as HTMLElement | null;
+  if (el) el.textContent = text;
+}
+
+async function refreshDeepSeekBalance(overlay: HTMLElement): Promise<void> {
+  const requestId = ++deepSeekBalanceRequestId;
+  const baseUrl =
+    (overlay.querySelector('input[name="baseUrl"]') as HTMLInputElement | null)?.value.trim() || '';
+  if (!isDeepSeekBaseUrl(baseUrl)) {
+    if (requestId === deepSeekBalanceRequestId) {
+      setProviderBalanceVisible(overlay, false);
+    }
+    return;
+  }
+  setProviderBalanceVisible(overlay, true);
+  setProviderBalanceText(overlay, '查询中…');
+  const refreshBtn = overlay.querySelector('.provider-balance-refresh') as HTMLButtonElement | null;
+  if (refreshBtn) refreshBtn.disabled = true;
+  try {
+    const apiKeyRaw =
+      (overlay.querySelector('input[name="apiKey"]') as HTMLInputElement | null)?.value.trim() || '';
+    const profileId = overlay.dataset.profileId || null;
+    const balance = await invoke<DeepSeekBalanceData>('fetch_deepseek_balance', {
+      baseUrl,
+      apiKey: apiKeyRaw || null,
+      profileId,
+    });
+    if (requestId !== deepSeekBalanceRequestId || !isApiConfigViewActive) return;
+    setProviderBalanceText(overlay, formatDeepSeekBalanceText(balance));
+  } catch (e) {
+    if (requestId !== deepSeekBalanceRequestId || !isApiConfigViewActive) return;
+    setProviderBalanceText(overlay, `查询失败：${String(e)}`);
+  } finally {
+    if (requestId === deepSeekBalanceRequestId && refreshBtn) {
+      refreshBtn.disabled = false;
+    }
+  }
+}
+
+function setKiroUsageText(text: string) {
+  const el = document.querySelector('#kiro-card [data-kiro-usage]') as HTMLElement | null;
+  if (el) el.textContent = text;
+}
+
+async function refreshKiroUsage(): Promise<void> {
+  const requestId = ++kiroUsageRequestId;
+  const refreshBtn = document.querySelector('#kiro-card .kiro-usage-refresh') as HTMLButtonElement | null;
+  if (refreshBtn) refreshBtn.disabled = true;
+  setKiroUsageText('查询中…');
+  try {
+    const usage = await invoke<KiroUsageData>('kiro_usage');
+    if (requestId !== kiroUsageRequestId) return;
+    setKiroUsageText(formatKiroUsageText(usage));
+  } catch (e) {
+    if (requestId !== kiroUsageRequestId) return;
+    setKiroUsageText(`查询失败：${String(e)}`);
+  } finally {
+    if (requestId === kiroUsageRequestId && refreshBtn) {
+      refreshBtn.disabled = false;
+    }
+  }
+}
+
+/** 延后到下一宏任务，避免挡住 API 配置页首次渲染 */
+function scheduleDeepSeekBalance(overlay: HTMLElement): void {
+  window.setTimeout(() => {
+    if (!isApiConfigViewActive) return;
+    void refreshDeepSeekBalance(overlay);
+  }, 0);
+}
+
+function scheduleKiroUsage(): void {
+  window.setTimeout(() => {
+    if (!isApiConfigViewActive) return;
+    void refreshKiroUsage();
+  }, 0);
+}
+
 /** 把后端 kiro_status 结果渲染到卡片 DOM（无卡片时仅更新全局状态） */
 function renderKiroCard(status: KiroStatusData | null) {
   kiroStatus = status;
@@ -4793,6 +4964,7 @@ async function refreshKiroStatus(): Promise<void> {
   try {
     const status = await invoke<KiroStatusData>('kiro_status');
     renderKiroCard(status);
+    scheduleKiroUsage();
   } catch (e) {
     console.error('获取 Kiro 状态失败:', e);
   }
@@ -5015,6 +5187,7 @@ async function mountApiConfigView() {
   const handleProfileConfigLoaded = (config: ClaudeCodeApiConfig) => {
     fetchedModels = [];
     setModelConfigFromConfig(config.displayModels, config.customModels);
+    scheduleDeepSeekBalance(overlay);
   };
 
   const fetchModelsForSettings = async (): Promise<FetchedModel[]> => {
@@ -5921,6 +6094,18 @@ async function mountApiConfigView() {
     void toggleKiroProxy(overlay);
   });
 
+  overlay.querySelector('.kiro-usage-refresh')?.addEventListener('click', () => {
+    scheduleKiroUsage();
+  });
+
+  overlay.querySelector('.provider-balance-refresh')?.addEventListener('click', () => {
+    scheduleDeepSeekBalance(overlay);
+  });
+
+  overlay.querySelector('input[name="baseUrl"]')?.addEventListener('change', () => {
+    scheduleDeepSeekBalance(overlay);
+  });
+
   try {
     if (!isMountCurrent()) return;
     const initial = await refreshSettingsModal(overlay, null, handleProfileConfigLoaded);
@@ -5930,8 +6115,8 @@ async function mountApiConfigView() {
     }
     bindProfileListEvents();
     bindModelConfigEvents();
-    // 填充 Kiro 卡片状态（放在绑定事件之后，避免异步返回时覆盖按钮状态）
-    await refreshKiroStatus();
+    // 状态 / 额度后台刷新，不阻塞配置页首屏
+    void refreshKiroStatus();
   } catch (e) {
     if (!isMountCurrent()) return;
     alert('加载 API 配置失败: ' + String(e));
