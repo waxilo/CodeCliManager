@@ -200,8 +200,11 @@ let sidebarAutoCollapsed = false;
 let sidebarWasNarrow: boolean | null = null;
 /** 侧边栏会话搜索关键词 */
 let sidebarSearchQuery = '';
-/** 主界面是否正在展示 API 配置页（非弹窗） */
+/** 主界面是否正在展示设置页（非弹窗） */
 let isApiConfigViewActive = false;
+type SettingsSection = 'api' | 'app-update' | 'claude-update';
+/** 设置页当前选中的内容 */
+let settingsSection: SettingsSection = 'api';
 /** 防止异步挂载与关闭竞态 */
 let apiConfigMountToken = 0;
 /** API 配置页 Escape 键监听（需在关闭时统一移除） */
@@ -1126,29 +1129,31 @@ async function setupKiroAutostartListener(): Promise<void> {
 }
 
 function syncClaudeUpdateButtonUI() {
-  const btn = document.querySelector('#claude-update-btn') as HTMLButtonElement | null;
-  if (!btn) return;
   const showBadge = shouldShowClaudeUpdateBadge();
   const checking = claudeUpdateCheckStatus === 'checking' || claudeUpdateCheckStatus === 'updating';
-  btn.classList.toggle('has-update', showBadge);
-  btn.classList.toggle('is-checking', checking);
-  const label = btn.querySelector('.toolbar-update-btn-label');
-  if (label) {
-    label.textContent =
-      claudeUpdateCheckStatus === 'updating' ? '更新中' : showBadge ? '有更新' : '版本';
+  const btn = document.querySelector('#claude-update-btn') as HTMLButtonElement | null;
+  if (btn) {
+    btn.classList.toggle('has-update', showBadge);
+    btn.classList.toggle('is-checking', checking);
+    const label = btn.querySelector('.toolbar-update-btn-label');
+    if (label) {
+      label.textContent =
+        claudeUpdateCheckStatus === 'updating' ? '更新中' : showBadge ? '有更新' : '版本';
+    }
+    let dot = btn.querySelector('.toolbar-update-btn-dot');
+    if (showBadge && !dot) {
+      dot = document.createElement('span');
+      dot.className = 'toolbar-update-btn-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      btn.appendChild(dot);
+    } else if (!showBadge && dot) {
+      dot.remove();
+    }
+    const title = getClaudeUpdateButtonTitle();
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
   }
-  let dot = btn.querySelector('.toolbar-update-btn-dot');
-  if (showBadge && !dot) {
-    dot = document.createElement('span');
-    dot.className = 'toolbar-update-btn-dot';
-    dot.setAttribute('aria-hidden', 'true');
-    btn.appendChild(dot);
-  } else if (!showBadge && dot) {
-    dot.remove();
-  }
-  const title = getClaudeUpdateButtonTitle();
-  btn.title = title;
-  btn.setAttribute('aria-label', title);
+  renderSettingsUpdateSectionIfOpen();
 }
 
 async function checkClaudeCodeUpdate(_force = false): Promise<void> {
@@ -1191,11 +1196,22 @@ async function checkClaudeCodeUpdate(_force = false): Promise<void> {
 }
 
 function refreshClaudeUpdatePopoverIfOpen() {
-  const panel = document.querySelector('#claude-update-popover');
+  const panel = document.querySelector('#claude-update-popover, #settings-claude-update-view');
   if (panel) {
     panel.innerHTML = renderClaudeUpdatePopoverBody();
     bindClaudeUpdatePopoverEvents(panel);
   }
+}
+
+function renderSettingsUpdateSectionIfOpen(): void {
+  if (!isApiConfigViewActive || (settingsSection !== 'app-update' && settingsSection !== 'claude-update')) return;
+  const view = document.querySelector<HTMLElement>('.settings-update-view');
+  if (!view) return;
+  view.innerHTML = settingsSection === 'app-update'
+    ? renderAppUpdatePopoverBody()
+    : renderClaudeUpdatePopoverBody();
+  if (settingsSection === 'app-update') bindAppUpdatePopoverEvents(view);
+  else bindClaudeUpdatePopoverEvents(view);
 }
 
 async function runClaudeCodeSilentUpdate(): Promise<void> {
@@ -1225,7 +1241,9 @@ async function openClaudeCodeUpdateTerminal(): Promise<void> {
   try {
     await invoke('open_claude_code_update_terminal');
     showCopyToastMsg('已打开终端执行更新');
-    closeClaudeUpdatePopover();
+    if (!document.querySelector('#settings-claude-update-view')) {
+      closeClaudeUpdatePopover();
+    }
   } catch (e) {
     alert('打开更新终端失败: ' + String(e));
   }
@@ -1241,7 +1259,7 @@ function dismissClaudeUpdateReminder() {
     /* ignore */
   }
   syncClaudeUpdateButtonUI();
-  closeClaudeUpdatePopover();
+  renderSettingsUpdateSectionIfOpen();
 }
 
 function renderClaudeUpdatePopoverBody(): string {
@@ -1320,6 +1338,7 @@ function renderClaudeUpdatePopoverBody(): string {
 
 function bindClaudeUpdatePopoverEvents(panel: Element) {
   panel.querySelector('.claude-update-popover-close')?.addEventListener('click', () => {
+    if (panel.id === 'settings-claude-update-view') return;
     closeClaudeUpdatePopover();
   });
 
@@ -1342,45 +1361,6 @@ function bindClaudeUpdatePopoverEvents(panel: Element) {
 function closeClaudeUpdatePopover() {
   document.querySelector('.claude-update-popover-overlay')?.remove();
   document.querySelector('#claude-update-popover')?.remove();
-}
-
-function toggleClaudeUpdatePopover() {
-  if (document.querySelector('#claude-update-popover')) {
-    closeClaudeUpdatePopover();
-    return;
-  }
-
-  const anchor = document.querySelector('#claude-update-btn') as HTMLElement | null;
-  if (!anchor) return;
-  closeAppUpdatePopover();
-
-  const overlay = document.createElement('div');
-  overlay.className = 'claude-update-popover-overlay';
-  overlay.addEventListener('click', closeClaudeUpdatePopover);
-
-  const panel = document.createElement('div');
-  panel.id = 'claude-update-popover';
-  panel.className = 'claude-update-popover';
-  panel.setAttribute('role', 'dialog');
-  panel.setAttribute('aria-label', 'Claude Code 版本更新');
-  panel.innerHTML = renderClaudeUpdatePopoverBody();
-
-  document.body.appendChild(overlay);
-  document.body.appendChild(panel);
-  bindClaudeUpdatePopoverEvents(panel);
-
-  const rect = anchor.getBoundingClientRect();
-  const panelWidth = panel.offsetWidth || 300;
-  const left = Math.min(
-    Math.max(8, rect.right - panelWidth),
-    window.innerWidth - panelWidth - 8,
-  );
-  panel.style.top = `${rect.bottom + 6}px`;
-  panel.style.left = `${left}px`;
-
-  if (!claudeUpdateInfo || claudeUpdateCheckStatus === 'idle') {
-    void checkClaudeCodeUpdate(true);
-  }
 }
 
 // ── 应用自身更新（tauri-plugin-updater 拉取 GitHub Releases） ──────────
@@ -1414,26 +1394,28 @@ function renderAppUpdateIcon(): string {
 
 function syncAppUpdateButtonUI(): void {
   const btn = document.querySelector('#app-update-btn') as HTMLButtonElement | null;
-  if (!btn) return;
   const showBadge = shouldShowAppUpdateBadge();
   const checking = appUpdateCheckStatus === 'checking';
   const downloading = appUpdateCheckStatus === 'downloading';
-  btn.classList.toggle('has-update', showBadge);
-  btn.classList.toggle('is-checking', checking || downloading);
-  const label = btn.querySelector('.toolbar-update-btn-label');
-  if (label) label.textContent = showBadge ? '有更新' : '更新';
-  let dot = btn.querySelector('.toolbar-update-btn-dot');
-  if (showBadge && !dot) {
-    dot = document.createElement('span');
-    dot.className = 'toolbar-update-btn-dot';
-    dot.setAttribute('aria-hidden', 'true');
-    btn.appendChild(dot);
-  } else if (!showBadge && dot) {
-    dot.remove();
+  if (btn) {
+    btn.classList.toggle('has-update', showBadge);
+    btn.classList.toggle('is-checking', checking || downloading);
+    const label = btn.querySelector('.toolbar-update-btn-label');
+    if (label) label.textContent = showBadge ? '有更新' : '更新';
+    let dot = btn.querySelector('.toolbar-update-btn-dot');
+    if (showBadge && !dot) {
+      dot = document.createElement('span');
+      dot.className = 'toolbar-update-btn-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      btn.appendChild(dot);
+    } else if (!showBadge && dot) {
+      dot.remove();
+    }
+    const title = getAppUpdateButtonTitle();
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
   }
-  const title = getAppUpdateButtonTitle();
-  btn.title = title;
-  btn.setAttribute('aria-label', title);
+  renderSettingsUpdateSectionIfOpen();
 }
 
 async function initAppUpdate(): Promise<void> {
@@ -1476,7 +1458,7 @@ async function checkAppUpdate(_force = false): Promise<void> {
       syncAppUpdateButtonUI();
       appUpdateCheckPromise = null;
       // 若弹层开着，刷新内容
-      const panel = document.querySelector('#app-update-popover');
+      const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
       if (panel) {
         panel.innerHTML = renderAppUpdatePopoverBody();
         bindAppUpdatePopoverEvents(panel);
@@ -1497,7 +1479,7 @@ function dismissAppUpdateReminder(): void {
     /* ignore */
   }
   syncAppUpdateButtonUI();
-  closeAppUpdatePopover();
+  renderSettingsUpdateSectionIfOpen();
 }
 
 function renderAppUpdateNotes(body: string): string {
@@ -1560,6 +1542,7 @@ function renderAppUpdatePopoverBody(): string {
 
 function bindAppUpdatePopoverEvents(panel: Element) {
   panel.querySelector('.claude-update-popover-close')?.addEventListener('click', () => {
+    if (panel.id === 'settings-app-update-view') return;
     closeAppUpdatePopover();
   });
 
@@ -1582,45 +1565,6 @@ function closeAppUpdatePopover() {
   document.querySelector('#app-update-popover')?.remove();
 }
 
-function toggleAppUpdatePopover() {
-  if (document.querySelector('#app-update-popover')) {
-    closeAppUpdatePopover();
-    return;
-  }
-
-  const anchor = document.querySelector('#app-update-btn') as HTMLElement | null;
-  if (!anchor) return;
-  closeClaudeUpdatePopover();
-
-  const overlay = document.createElement('div');
-  overlay.className = 'claude-update-popover-overlay';
-  overlay.addEventListener('click', closeAppUpdatePopover);
-
-  const panel = document.createElement('div');
-  panel.id = 'app-update-popover';
-  panel.className = 'claude-update-popover';
-  panel.setAttribute('role', 'dialog');
-  panel.setAttribute('aria-label', '应用更新');
-  panel.innerHTML = renderAppUpdatePopoverBody();
-
-  document.body.appendChild(overlay);
-  document.body.appendChild(panel);
-  bindAppUpdatePopoverEvents(panel);
-
-  const rect = anchor.getBoundingClientRect();
-  const panelWidth = panel.offsetWidth || 300;
-  const left = Math.min(
-    Math.max(8, rect.right - panelWidth),
-    window.innerWidth - panelWidth - 8,
-  );
-  panel.style.top = `${rect.bottom + 6}px`;
-  panel.style.left = `${left}px`;
-
-  if (appUpdateCheckStatus === 'idle') {
-    void checkAppUpdate(true);
-  }
-}
-
 /** macOS 上 downloadAndInstall 可能卡在 Finished 后不 resolve；超时后强制 relaunch */
 const MAC_UPDATE_INSTALL_STALL_MS = 12_000;
 
@@ -1641,7 +1585,7 @@ async function installAppUpdate(): Promise<void> {
   appUpdateCheckStatus = 'downloading';
   appUpdateProgress = { downloaded: 0, total: 0 };
   syncAppUpdateButtonUI();
-  const panel = document.querySelector('#app-update-popover');
+  const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
   if (panel) {
     panel.innerHTML = renderAppUpdatePopoverBody();
     bindAppUpdatePopoverEvents(panel);
@@ -1675,7 +1619,7 @@ async function installAppUpdate(): Promise<void> {
           }, MAC_UPDATE_INSTALL_STALL_MS);
         }
       }
-      const progressPanel = document.querySelector('#app-update-popover');
+      const progressPanel = document.querySelector('#app-update-popover, #settings-app-update-view');
       if (progressPanel) {
         const bar = progressPanel.querySelector('.app-update-progress-bar') as HTMLElement | null;
         const pctEl = progressPanel.querySelector('.app-update-progress-pct') as HTMLElement | null;
@@ -1709,7 +1653,7 @@ async function installAppUpdate(): Promise<void> {
     appUpdateInfo.error = timedOut
       ? `下载更新超时。请检查网络后重试。\n${raw}`
       : raw;
-    const panel = document.querySelector('#app-update-popover');
+    const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
     if (panel) {
       panel.innerHTML = renderAppUpdatePopoverBody();
       bindAppUpdatePopoverEvents(panel);
@@ -3332,40 +3276,10 @@ function renderMcpIcon(): string {
 }
 
 function renderTitlebarActions(): string {
-  const appShowBadge = shouldShowAppUpdateBadge();
-  const appChecking = appUpdateCheckStatus === 'checking' || appUpdateCheckStatus === 'downloading';
-  const showBadge = shouldShowClaudeUpdateBadge();
-  const checking = claudeUpdateCheckStatus === 'checking' || claudeUpdateCheckStatus === 'updating';
-  const claudeLabel =
-    claudeUpdateCheckStatus === 'updating' ? '更新中' : showBadge ? '有更新' : '版本';
   return `
-    <button
-      type="button"
-      class="toolbar-update-btn${appShowBadge ? ' has-update' : ''}${appChecking ? ' is-checking' : ''}"
-      id="app-update-btn"
-      title="${escapeHtml(getAppUpdateButtonTitle())}"
-      aria-label="${escapeHtml(getAppUpdateButtonTitle())}"
-      aria-haspopup="dialog"
-    >
-      <span class="toolbar-update-btn-icon" aria-hidden="true">${renderAppUpdateIcon()}</span>
-      <span class="toolbar-update-btn-label">${appShowBadge ? '有更新' : '更新'}</span>
-      ${appShowBadge ? '<span class="toolbar-update-btn-dot" aria-hidden="true"></span>' : ''}
-    </button>
-    <button
-      type="button"
-      class="toolbar-update-btn${showBadge ? ' has-update' : ''}${checking ? ' is-checking' : ''}"
-      id="claude-update-btn"
-      title="${escapeHtml(getClaudeUpdateButtonTitle())}"
-      aria-label="${escapeHtml(getClaudeUpdateButtonTitle())}"
-      aria-haspopup="dialog"
-    >
-      <span class="toolbar-update-btn-icon" aria-hidden="true">${renderClaudeUpdateIcon()}</span>
-      <span class="toolbar-update-btn-label">${claudeLabel}</span>
-      ${showBadge ? '<span class="toolbar-update-btn-dot" aria-hidden="true"></span>' : ''}
-    </button>
-    <button type="button" class="toolbar-settings-btn settings-btn${isApiConfigViewActive ? ' is-active' : ''}" id="settings-btn" title="管理 Claude Code API 配置" aria-label="API 配置" aria-pressed="${isApiConfigViewActive}">
+    <button type="button" class="toolbar-settings-btn settings-btn${isApiConfigViewActive ? ' is-active' : ''}" id="settings-btn" title="应用设置" aria-label="设置" aria-pressed="${isApiConfigViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderApiConfigIcon()}</span>
-      <span class="toolbar-settings-btn-label">API 配置</span>
+      <span class="toolbar-settings-btn-label">设置</span>
     </button>
     <button type="button" class="toolbar-settings-btn settings-btn mcp-btn${isMcpViewActive ? ' is-active' : ''}" id="mcp-btn" title="管理 Claude Code MCP 服务器" aria-label="MCP 管理" aria-pressed="${isMcpViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderMcpIcon()}</span>
@@ -3379,18 +3293,46 @@ function renderTitlebarActions(): string {
 
 function renderApiConfigSidebarHtml(): string {
   return `
-    <div class="api-config-sidebar">
-      <div class="settings-profiles-header">
-        <span>已保存配置</span>
-        <span class="settings-profiles-hint">左键查看 · 右键应用 / 删除</span>
+    <div class="api-config-sidebar settings-sidebar">
+      <div class="settings-section-nav" role="navigation" aria-label="设置分类">
+        <button type="button" class="settings-section-item${settingsSection === 'api' ? ' is-active' : ''}" data-settings-section="api">
+          <span class="settings-section-item-icon">${renderApiConfigIcon()}</span>
+          <span>API 配置</span>
+        </button>
+        <button type="button" class="settings-section-item${settingsSection === 'app-update' ? ' is-active' : ''}" data-settings-section="app-update">
+          <span class="settings-section-item-icon">${renderAppUpdateIcon()}</span>
+          <span>CCM 更新</span>
+          ${shouldShowAppUpdateBadge() ? '<span class="settings-section-item-dot" aria-label="有更新"></span>' : ''}
+        </button>
+        <button type="button" class="settings-section-item${settingsSection === 'claude-update' ? ' is-active' : ''}" data-settings-section="claude-update">
+          <span class="settings-section-item-icon">${renderClaudeUpdateIcon()}</span>
+          <span>Claude Code 更新</span>
+          ${shouldShowClaudeUpdateBadge() ? '<span class="settings-section-item-dot" aria-label="有更新"></span>' : ''}
+        </button>
       </div>
-      <div class="settings-profile-list"></div>
-      <div class="api-config-sidebar-actions">
-        <button type="button" class="settings-add-profile">+ 新建</button>
-        <button type="button" class="settings-import-cc-switch">从 CC Switch 导入</button>
-      </div>
+      ${settingsSection === 'api' ? `
+        <div class="settings-profiles-header">
+          <span>已保存配置</span>
+          <span class="settings-profiles-hint">左键查看 · 右键应用 / 删除</span>
+        </div>
+        <div class="settings-profile-list"></div>
+        <div class="api-config-sidebar-actions">
+          <button type="button" class="settings-add-profile">+ 新建</button>
+          <button type="button" class="settings-import-cc-switch">从 CC Switch 导入</button>
+        </div>
+      ` : ''}
     </div>
   `;
+}
+
+function renderSettingsViewHtml(): string {
+  if (settingsSection === 'app-update') {
+    return `<div class="settings-update-view" id="settings-app-update-view">${renderAppUpdatePopoverBody()}</div>`;
+  }
+  if (settingsSection === 'claude-update') {
+    return `<div class="settings-update-view" id="settings-claude-update-view">${renderClaudeUpdatePopoverBody()}</div>`;
+  }
+  return renderApiConfigViewHtml();
 }
 
 function renderApiConfigViewHtml(): string {
@@ -3882,7 +3824,7 @@ function render() {
         aria-label="调整侧边栏宽度"
       ></div>
       <div class="main-content${isApiConfigViewActive ? ' is-api-config' : isMcpViewActive ? ' is-mcp' : ''}">
-        ${isApiConfigViewActive ? renderApiConfigViewHtml() : isMcpViewActive ? renderMcpViewHtml() : `
+        ${isApiConfigViewActive ? renderSettingsViewHtml() : isMcpViewActive ? renderMcpViewHtml() : `
         <div class="drop-zone-overlay" id="drop-zone-overlay">
           <div class="drop-zone-content">
             <div class="drop-zone-icon" aria-hidden="true">
@@ -3995,11 +3937,13 @@ function attachEventListeners() {
   syncSidebarResponsiveState();
   syncSidebarCollapsedUI();
   document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
-  document.querySelector('#app-update-btn')?.addEventListener('click', () => {
-    toggleAppUpdatePopover();
-  });
-  document.querySelector('#claude-update-btn')?.addEventListener('click', () => {
-    toggleClaudeUpdatePopover();
+  document.querySelectorAll<HTMLButtonElement>('[data-settings-section]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const section = btn.dataset.settingsSection as SettingsSection | undefined;
+      if (!section || section === settingsSection) return;
+      settingsSection = section;
+      render();
+    });
   });
   document.querySelector('#settings-btn')?.addEventListener('click', () => {
     if (isApiConfigViewActive) {

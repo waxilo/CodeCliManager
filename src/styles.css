@@ -523,7 +523,12 @@ body.is-sidebar-resizing {
   padding: 3px 7px 12px;
   min-height: 0;
   min-width: 0;
-  scrollbar-width: thin;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.conversation-list::-webkit-scrollbar {
+  display: none;
 }
 
 /* 分区标题（Workspaces / 搜索结果） */
@@ -3700,6 +3705,94 @@ body.is-sidebar-resizing {
   flex: 1;
   min-height: 0;
   padding: 12px 10px 10px;
+}
+
+.api-config-sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+  min-height: 0;
+  padding: 12px 10px 10px;
+}
+
+.settings-section-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex-shrink: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-bg-surface-hover);
+}
+
+.settings-section-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.settings-section-item:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+.settings-section-item.is-active {
+  background: var(--color-accent-ring, color-mix(in srgb, var(--color-accent) 14%, transparent));
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.settings-section-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+}
+
+.settings-section-item-icon svg {
+  width: 15px;
+  height: 15px;
+}
+
+.settings-section-item-dot {
+  width: 6px;
+  height: 6px;
+  margin-left: auto;
+  border-radius: 50%;
+  background: var(--color-danger);
+}
+
+.settings-update-view {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 28px 32px;
+}
+
+.settings-update-view .claude-update-popover-header {
+  margin-bottom: 20px;
+}
+
+.settings-update-view .claude-update-popover-actions {
+  justify-content: flex-start;
+}
+
+.settings-update-view .app-update-notes-body {
+  max-width: 720px;
 }
 
 .api-config-sidebar .settings-profiles-header {
