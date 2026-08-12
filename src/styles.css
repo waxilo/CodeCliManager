@@ -1949,7 +1949,7 @@ body.is-sidebar-resizing {
   min-width: 0;
 }
 
-/* ---- 用户消息：右侧蓝色气泡（匹配 claudecodeui）---- */
+/* ---- 用户消息：右侧淡绿气泡 ---- */
 .message.user {
   flex-direction: column;
   align-items: flex-end;
@@ -1961,16 +1961,16 @@ body.is-sidebar-resizing {
   max-width: 85%;
   min-width: 0;
   padding: 10px 16px;
-  background: #2563eb;
-  color: #fff;
-  border: none;
+  background: var(--color-bubble-user-bg);
+  color: var(--color-bubble-user-text);
+  border: 1px solid var(--color-bubble-user-border);
   border-radius: 18px 18px 4px 18px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
   line-height: 1.55;
 }
 
 .message.user .message-content .markdown-body {
-  color: #fff;
+  color: var(--color-bubble-user-text);
   font-size: 14px;
   line-height: 1.55;
 }
@@ -1981,33 +1981,33 @@ body.is-sidebar-resizing {
 .message.user .message-content .markdown-body h4,
 .message.user .message-content .markdown-body h5,
 .message.user .message-content .markdown-body h6 {
-  color: #fff;
+  color: var(--color-bubble-user-text);
 }
 
 .message.user .message-content .markdown-body a {
-  color: #bfdbfe;
+  color: #166534;
   text-decoration: underline;
 }
 
 .message.user .message-content .markdown-body blockquote {
-  border-left-color: rgba(255, 255, 255, 0.4);
-  color: rgba(255, 255, 255, 0.85);
+  border-left-color: rgba(22, 101, 52, 0.35);
+  color: rgba(17, 24, 39, 0.75);
 }
 
 .message.user .message-content .markdown-body code {
-  background: rgba(255, 255, 255, 0.15);
-  color: #fff;
+  background: var(--color-bubble-user-code-bg);
+  color: var(--color-bubble-user-text);
 }
 
 .message.user .message-content .markdown-body pre,
 .message.user .message-content .code-block-wrapper {
-  background: rgba(0, 0, 0, 0.3) !important;
-  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(0, 0, 0, 0.06) !important;
+  border-color: var(--color-bubble-user-border);
 }
 
 .message.user .message-content .code-block-wrapper pre code,
 .message.user .message-content .code-block-wrapper .hljs {
-  color: #e2e8f0 !important;
+  color: #1f2937 !important;
   background: transparent !important;
 }
 
@@ -5445,32 +5445,32 @@ body.is-sidebar-resizing {
   opacity: 0.85;
 }
 
-/* 用户气泡内的芯片：半透明白底白字 */
+/* 用户气泡内的芯片：适配淡绿底 */
 .message.user .file-ref-chip {
-  background: rgba(255, 255, 255, 0.15);
-  border-color: rgba(255, 255, 255, 0.2);
-  color: #fff;
+  background: rgba(0, 0, 0, 0.06);
+  border-color: rgba(22, 101, 52, 0.2);
+  color: #111827;
   backdrop-filter: blur(2px);
 }
 
 .message.user .file-ref-chip--image {
-  border-color: rgba(255, 255, 255, 0.35);
+  border-color: rgba(22, 101, 52, 0.28);
 }
 
 .message.user .file-ref-chip:hover {
-  background: rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.1);
 }
 
 .message.user .file-ref-chip-icon {
-  opacity: 0.9;
+  opacity: 0.85;
 }
 
 .message.user .file-ref-chip-path {
-  color: rgba(255, 255, 255, 0.9);
+  color: #1f2937;
 }
 
 .message.user .file-ref-chip-thumb {
-  border-color: rgba(255, 255, 255, 0.2);
+  border-color: rgba(22, 101, 52, 0.22);
 }
 
 /* ── 拖拽文件遮罩层 ─────────────────────────────────────────────── */
