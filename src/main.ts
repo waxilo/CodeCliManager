@@ -1937,7 +1937,6 @@ function handleMessageChunk(payload: MessageChunkPayload) {
     });
     // 此时尚无会话数据，保留 pendingUserMessage 以确保用户消息可见
     updateSendButtonState();
-    updateProjectDirDisplay();
     ensureChatViewVisible();
     updateConversationListSpinner();
     refreshCommandQueueUI();
@@ -2393,16 +2392,6 @@ async function copyTextToClipboard(text: string): Promise<boolean> {
   return _copyToClipboard(trimmed);
 }
 
-function formatProjectDirShortName(dir: string): string {
-  const trimmed = dir.trim();
-  if (!trimmed) return '';
-  if (trimmed === '/') return '/';
-  if (/^[A-Za-z]:\\?$/.test(trimmed)) return trimmed.replace(/\\$/, '');
-  const normalized = trimmed.replace(/[\\/]+$/, '');
-  const segments = normalized.split(/[\\/]/).filter(Boolean);
-  return segments[segments.length - 1] || trimmed;
-}
-
 async function openPathInFileManager(path: string): Promise<void> {
   try {
     await invoke('plugin:opener|open_path', { path });
@@ -2475,58 +2464,6 @@ function renderSendButtonHtml(): string {
   `;
 }
 
-/** 更新右下角工作目录展示（无需重建 DOM） */
-function updateProjectDirDisplay() {
-  const el = document.querySelector('#project-dir-display') as HTMLButtonElement | null;
-  if (!el) return;
-
-  const dir = getEffectiveProjectDir();
-  const shortName = formatProjectDirShortName(dir);
-  const label = shortName || '—';
-  const title = dir ? `工作目录: ${dir}（点击打开）` : '未设置工作目录';
-  const hasDir = Boolean(dir);
-
-  el.title = title;
-  el.setAttribute('aria-label', title);
-  el.disabled = !hasDir;
-
-  const labelEl = el.querySelector('.project-dir-display-label');
-  if (labelEl) labelEl.textContent = label;
-
-  // 更新外部链接图标
-  el.querySelector('.project-dir-display-open')?.remove();
-  if (hasDir) {
-    el.insertAdjacentHTML('beforeend', '<span class="project-dir-display-open" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>');
-  }
-}
-
-function renderProjectDirDisplayHtml(): string {
-  const dir = getEffectiveProjectDir();
-  const shortName = formatProjectDirShortName(dir);
-  const label = shortName || '—';
-  const title = dir ? `工作目录: ${dir}（点击打开）` : '未设置工作目录';
-  const hasDir = Boolean(dir);
-
-  return `
-    <button
-      type="button"
-      class="project-dir-display"
-      id="project-dir-display"
-      title="${escapeHtml(title)}"
-      aria-label="${escapeHtml(title)}"
-      ${!hasDir ? 'disabled' : ''}
-    >
-      <span class="project-dir-display-icon" aria-hidden="true">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-        </svg>
-      </span>
-      <span class="project-dir-display-label">${escapeHtml(label)}</span>
-      ${hasDir ? '<span class="project-dir-display-open" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg></span>' : ''}
-    </button>
-  `;
-}
-
 function renderInputComposerHtml(): string {
   return `
     <div class="input-area">
@@ -2557,7 +2494,6 @@ function renderInputComposerHtml(): string {
             </button>
           </div>
           <div class="input-composer-toolbar-end">
-            ${renderProjectDirDisplayHtml()}
             ${renderChatModelPickerHtml()}
             ${renderContextIndicatorHtml()}
             ${renderSendButtonHtml()}
@@ -3960,15 +3896,6 @@ function attachEventListeners() {
   document.querySelector('#send-btn')?.addEventListener('click', handleSendButtonClick);
   bindCommandQueueEvents();
   refreshCommandQueueUI();
-
-  // 右下角工作目录展示：点击在文件管理器中打开
-  const projectDirDisplay = document.querySelector('#project-dir-display');
-  if (projectDirDisplay) {
-    projectDirDisplay.addEventListener('click', () => {
-      const dir = getEffectiveProjectDir().trim();
-      if (dir) void openPathInFileManager(dir);
-    });
-  }
 
   bindChatModelPickerEvents();
   bindSessionIdCopyEvents();
@@ -7319,7 +7246,6 @@ function refreshChatContent() {
   }
 
   updateSendButtonState();
-  updateProjectDirDisplay();
   if (messageList) {
     // 重建前记录滚动状态：输出结束时若用户在阅读上方消息，重建后不应强制跳回底部
     const scrollSnap = captureScrollState();
