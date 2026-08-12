@@ -32,9 +32,14 @@ pub fn is_known_kiro_model(model: &str) -> bool {
 /// 模型支持的 effort 级别（none/low/medium/high/xhigh/max）。
 pub fn effort_levels_for_model(kiro_model: &str) -> &'static [&'static str] {
     match kiro_model {
-        "claude-sonnet-5" | "claude-opus-5" | "claude-opus-4.8" | "claude-opus-4.7" => {
-            &["low", "medium", "high", "xhigh", "max"]
-        }
+        "claude-sonnet-5"
+        | "claude-opus-5"
+        | "claude-opus-4.8"
+        | "claude-opus-4.7"
+        | "claude-opus-4.5"
+        | "claude-sonnet-4.5"
+        | "claude-sonnet-4"
+        | "claude-haiku-4.5" => &["low", "medium", "high", "xhigh", "max"],
         "claude-opus-4.6" | "claude-sonnet-4.6" => &["low", "medium", "high", "max"],
         "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna" => {
             &["none", "low", "medium", "high", "xhigh", "max"]

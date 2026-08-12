@@ -23,7 +23,8 @@ use uuid::Uuid;
 
 use crate::kiro::auth::Auth;
 use crate::kiro::eventstream::{
-    collect_kiro_text, parse_event_stream, IncrementalEventStream, KiroEvent,
+    collect_kiro_text, extract_reasoning_parts, parse_event_stream, IncrementalEventStream,
+    KiroEvent,
 };
 use crate::kiro::models::{
     estimate_tokens, get_supported_effort_levels, kiro_model_to_public_model_id, normalize_kiro_model,
@@ -383,6 +384,60 @@ fn ensure_text_block_index(
     })
 }
 
+fn emit_thinking_start_sse(index: usize, mut send: impl FnMut(String)) {
+    send(sse_event(
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": { "type": "thinking", "thinking": "" },
+        }),
+    ));
+}
+
+fn emit_thinking_delta_sse(index: usize, text: &str, mut send: impl FnMut(String)) {
+    if text.is_empty() {
+        return;
+    }
+    send(sse_event(
+        "content_block_delta",
+        &json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": { "type": "thinking_delta", "thinking": text },
+        }),
+    ));
+}
+
+fn close_thinking_block_sse(
+    thinking_started: &mut bool,
+    thinking_index: Option<usize>,
+    signature: &Option<String>,
+    mut send: impl FnMut(String),
+) {
+    if !*thinking_started {
+        return;
+    }
+    let index = thinking_index.unwrap_or(0);
+    if let Some(sig) = signature {
+        if !sig.is_empty() {
+            send(sse_event(
+                "content_block_delta",
+                &json!({
+                    "type": "content_block_delta",
+                    "index": index,
+                    "delta": { "type": "signature_delta", "signature": sig },
+                }),
+            ));
+        }
+    }
+    send(sse_event(
+        "content_block_stop",
+        &json!({ "type": "content_block_stop", "index": index }),
+    ));
+    *thinking_started = false;
+}
+
 fn emit_tool_use_start_sse(index: usize, tool_id: &str, name: &str, mut send: impl FnMut(String)) {
     send(sse_event(
         "content_block_start",
@@ -432,6 +487,9 @@ fn pipe_kiro_body_to_anthropic_sse(
     let mut tool_mode: Option<bool> = None;
     let mut text_started = false;
     let mut text_block_index: Option<usize> = None;
+    let mut thinking_started = false;
+    let mut thinking_block_index: Option<usize> = None;
+    let mut thinking_signature: Option<String> = None;
     let mut saw_native_tool = false;
     let mut block_counter = 0usize;
     // toolUseId -> (name, index, started)
@@ -456,6 +514,24 @@ fn pipe_kiro_body_to_anthropic_sse(
 
         for event in parser.push(&read_buf[..n]) {
             match event.event_type.as_str() {
+                "reasoningContentEvent" => {
+                    let (text, signature) = extract_reasoning_parts(&event.payload);
+                    if signature.is_some() {
+                        thinking_signature = signature;
+                    }
+                    if text.is_empty() {
+                        continue;
+                    }
+                    if !thinking_started {
+                        let index = block_counter;
+                        block_counter += 1;
+                        thinking_block_index = Some(index);
+                        emit_thinking_start_sse(index, &mut send);
+                        thinking_started = true;
+                    }
+                    let index = thinking_block_index.unwrap_or(0);
+                    emit_thinking_delta_sse(index, &text, &mut send);
+                }
                 "assistantResponseEvent" => {
                     let Some(chunk) = event.payload.get("content").and_then(|v| v.as_str()) else {
                         continue;
@@ -470,6 +546,14 @@ fn pipe_kiro_body_to_anthropic_sse(
                         pending_flush.push_str(chunk);
                         continue;
                     }
+
+                    // 文本开始前先收尾 thinking 块
+                    close_thinking_block_sse(
+                        &mut thinking_started,
+                        thinking_block_index,
+                        &thinking_signature,
+                        &mut send,
+                    );
 
                     // 已锁定文本模式：立刻转发，不等待聚合
                     if tool_mode == Some(false) {
@@ -486,7 +570,6 @@ fn pipe_kiro_body_to_anthropic_sse(
                         let flush = std::mem::take(&mut pending_flush);
                         let index =
                             ensure_text_block_index(&mut text_block_index, &mut block_counter);
-                        // 若一次读到大包，拆开节奏；否则立即转发
                         send_text_paced(&mut text_started, index, &flush, &mut send);
                     }
                 }
@@ -509,8 +592,14 @@ fn pipe_kiro_body_to_anthropic_sse(
                         .to_string();
 
                     if !native_tool_blocks.contains_key(&tool_id) {
-                        // 原生 tool 到达：丢掉未发出的疑似 JSON 缓冲；已发出的文本正常收尾
+                        // 原生 tool 到达：丢掉未发出的疑似 JSON 缓冲；先收尾 thinking/text
                         pending_flush.clear();
+                        close_thinking_block_sse(
+                            &mut thinking_started,
+                            thinking_block_index,
+                            &thinking_signature,
+                            &mut send,
+                        );
                         if text_started {
                             let index = text_block_index.unwrap_or(0);
                             send(sse_event(
@@ -574,6 +663,12 @@ fn pipe_kiro_body_to_anthropic_sse(
         }
 
         if !text_started && parsed_tool_blocks.is_some() {
+            close_thinking_block_sse(
+                &mut thinking_started,
+                thinking_block_index,
+                &thinking_signature,
+                &mut send,
+            );
             tool_mode = Some(true);
             if let Some(blocks) = parsed_tool_blocks {
                 let mut out = String::new();
@@ -584,14 +679,33 @@ fn pipe_kiro_body_to_anthropic_sse(
                 }
             }
         } else if !pending_flush.is_empty() {
+            close_thinking_block_sse(
+                &mut thinking_started,
+                thinking_block_index,
+                &thinking_signature,
+                &mut send,
+            );
             let flush = std::mem::take(&mut pending_flush);
             let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
             send_text_paced(&mut text_started, index, &flush, &mut send);
         } else if !text_started && !full_text.is_empty() {
+            close_thinking_block_sse(
+                &mut thinking_started,
+                thinking_block_index,
+                &thinking_signature,
+                &mut send,
+            );
             let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
             send_text_paced(&mut text_started, index, &full_text, &mut send);
         }
     }
+
+    close_thinking_block_sse(
+        &mut thinking_started,
+        thinking_block_index,
+        &thinking_signature,
+        &mut send,
+    );
 
     if text_started {
         let index = text_block_index.unwrap_or(0);
@@ -987,6 +1101,8 @@ fn handle_messages(mut request: Request, config: &ProxyConfig, auth: &Arc<Auth>)
         &id,
         &response_model,
         &collected.text,
+        &collected.thinking,
+        collected.thinking_signature.as_deref(),
         &collected.tool_uses,
         &collected.stop_reason,
     );

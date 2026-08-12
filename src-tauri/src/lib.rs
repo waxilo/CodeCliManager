@@ -2292,6 +2292,8 @@ fn is_version_newer(latest: &str, installed: &str) -> bool {
     false
 }
 
+const CLAUDE_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn read_installed_claude_version() -> Result<(String, String), String> {
     let claude_bin = resolve_claude_executable();
     let mut cmd = Command::new(&claude_bin);
@@ -2300,10 +2302,35 @@ fn read_installed_claude_version() -> Result<(String, String), String> {
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("无法执行 Claude Code（{}）: {}", claude_bin.display(), e))?;
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started_at.elapsed() < CLAUDE_VERSION_TIMEOUT => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "读取 Claude Code 版本超时（{} 秒）",
+                    CLAUDE_VERSION_TIMEOUT.as_secs()
+                ));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("等待 Claude Code 版本命令失败: {e}"));
+            }
+        }
+    }
 
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("读取 Claude Code 版本输出失败: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let combined = format!("{}\n{}", stdout, stderr);
@@ -2362,11 +2389,19 @@ struct ClaudeCodeUpdateInfo {
     error: Option<String>,
 }
 
-/// 检查本机 Claude Code 版本与 npm 最新版
+/// 检查本机 Claude Code 版本与 npm 最新版。
+/// CLI 探测和阻塞 HTTP 请求分别在线程池执行，避免占用 Tauri 主线程。
 #[tauri::command]
-fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
-    let installed_result = read_installed_claude_version();
-    let latest_result = fetch_latest_claude_version();
+async fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
+    let installed_task = tauri::async_runtime::spawn_blocking(read_installed_claude_version);
+    let latest_task = tauri::async_runtime::spawn_blocking(fetch_latest_claude_version);
+
+    let installed_result = installed_task
+        .await
+        .unwrap_or_else(|e| Err(format!("Claude Code 版本检查任务失败: {e}")));
+    let latest_result = latest_task
+        .await
+        .unwrap_or_else(|e| Err(format!("npm 版本检查任务失败: {e}")));
 
     match (installed_result, latest_result) {
         (Ok((installed, path)), Ok(latest)) => ClaudeCodeUpdateInfo {
@@ -2400,9 +2435,8 @@ fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
     }
 }
 
-/// 在系统终端中执行 `claude update`
-#[tauri::command]
-fn open_claude_code_update_terminal() -> Result<(), String> {
+/// 在系统终端中执行 `claude update`（阻塞部分由异步命令调度到后台线程）
+fn open_claude_code_update_terminal_blocking() -> Result<(), String> {
     let claude_path = resolve_claude_executable();
     let claude_cmd = if claude_path.exists() {
         #[cfg(target_os = "windows")]
@@ -2484,6 +2518,13 @@ fn open_claude_code_update_terminal() -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[tauri::command]
+async fn open_claude_code_update_terminal() -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(open_claude_code_update_terminal_blocking)
+        .await
+        .map_err(|e| format!("启动更新终端任务失败: {e}"))?
 }
 
 #[cfg(target_os = "linux")]

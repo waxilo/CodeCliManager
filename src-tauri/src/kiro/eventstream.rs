@@ -21,6 +21,10 @@ pub struct KiroEvent {
 #[derive(Debug, Default, Clone)]
 pub struct CollectedText {
     pub text: String,
+    /// 可见思考过程（Claude adaptive thinking / 其它模型的 reasoning 事件）。
+    pub thinking: String,
+    /// Anthropic thinking 块所需的签名（有则原样回传）。
+    pub thinking_signature: Option<String>,
     /// 已拼装完成的原生 tool_use 块（Anthropic 格式）。
     pub tool_uses: Vec<Value>,
     pub stop_reason: String,
@@ -336,6 +340,30 @@ mod tests {
         assert_eq!(collected.tool_uses[0]["input"]["command"], "echo hi");
         assert_eq!(collected.stop_reason, "tool_use");
     }
+
+    #[test]
+    fn collects_reasoning_content_event() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_frame(
+            "reasoningContentEvent",
+            &json!({
+                "text": "先分析问题。",
+                "signature": "sig_abc"
+            }),
+        ));
+        data.extend_from_slice(&build_frame(
+            "reasoningContentEvent",
+            &json!({ "reasoningText": { "text": "再给出答案。" } }),
+        ));
+        data.extend_from_slice(&build_frame(
+            "assistantResponseEvent",
+            &json!({ "content": "结论" }),
+        ));
+        let collected = collect_kiro_text(&parse_event_stream(&data));
+        assert_eq!(collected.thinking, "先分析问题。再给出答案。");
+        assert_eq!(collected.thinking_signature.as_deref(), Some("sig_abc"));
+        assert_eq!(collected.text, "结论");
+    }
 }
 
 fn map_stop_reason(stop_reason: &str) -> String {
@@ -344,6 +372,36 @@ fn map_stop_reason(stop_reason: &str) -> String {
         "MAX_TOKENS" => "max_tokens".to_string(),
         _ => "end_turn".to_string(),
     }
+}
+
+/// 从 Kiro reasoning 相关 payload 提取可见思考文本与签名。
+pub fn extract_reasoning_parts(payload: &Value) -> (String, Option<String>) {
+    let signature = payload
+        .get("signature")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    let text = if let Some(rt) = payload.get("reasoningText") {
+        match rt {
+            Value::String(s) => s.clone(),
+            Value::Object(obj) => obj
+                .get("text")
+                .or_else(|| obj.get("Text"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string(),
+            _ => String::new(),
+        }
+    } else if let Some(s) = payload.get("text").and_then(|v| v.as_str()) {
+        s.to_string()
+    } else if let Some(s) = payload.get("content").and_then(|v| v.as_str()) {
+        s.to_string()
+    } else {
+        String::new()
+    };
+
+    (text, signature)
 }
 
 fn tool_use_event_to_block(payload: &Value) -> Option<Value> {
@@ -392,6 +450,15 @@ pub fn collect_kiro_text(events: &[KiroEvent]) -> CollectedText {
             "assistantResponseEvent" => {
                 if let Some(content) = event.payload.get("content").and_then(|v| v.as_str()) {
                     collected.text.push_str(content);
+                }
+            }
+            "reasoningContentEvent" => {
+                let (text, signature) = extract_reasoning_parts(&event.payload);
+                if !text.is_empty() {
+                    collected.thinking.push_str(&text);
+                }
+                if signature.is_some() {
+                    collected.thinking_signature = signature;
                 }
             }
             "toolUseEvent" => {

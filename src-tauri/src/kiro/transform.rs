@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::kiro::models::{
-    estimate_tokens, get_requested_effort, normalize_effort_for_kiro_model, effort_levels_for_model,
+    estimate_tokens, get_requested_effort, normalize_effort_for_kiro_model,
 };
 
 /// Anthropic content 块 → Kiro 的 {text, images}。
@@ -727,11 +727,11 @@ fn apply_thinking_fields(extra: &mut Map<String, Value>, thinking: &Value) {
 }
 
 fn build_additional_model_request_fields(body: &Value, kiro_model: &str) -> Option<Value> {
-    if effort_levels_for_model(kiro_model).is_empty() {
-        return None;
-    }
     let mut extra = Map::new();
-    if let Some(fields) = body.get("additionalModelRequestFields").or_else(|| body.get("additional_model_request_fields")) {
+    if let Some(fields) = body
+        .get("additionalModelRequestFields")
+        .or_else(|| body.get("additional_model_request_fields"))
+    {
         if let Some(obj) = fields.as_object() {
             merge_object(&mut extra, &Value::Object(obj.clone()));
         }
@@ -741,7 +741,9 @@ fn build_additional_model_request_fields(body: &Value, kiro_model: &str) -> Opti
         .and_then(|effort| normalize_effort_for_kiro_model(Some(&effort), kiro_model));
 
     if let Some(output_config) = body.get("output_config") {
-        let existing = extra.entry("output_config".to_string()).or_insert_with(|| json!({}));
+        let existing = extra
+            .entry("output_config".to_string())
+            .or_insert_with(|| json!({}));
         if let Some(existing_obj) = existing.as_object_mut() {
             merge_object(existing_obj, output_config);
         }
@@ -751,13 +753,26 @@ fn build_additional_model_request_fields(body: &Value, kiro_model: &str) -> Opti
     // Kiro 的 GenerateAssistantResponse schema 里，max_tokens 仅对部分 Claude 模型合法；
     // 转给 gpt-5.6 / 其它模型会直接 502：
     // "property 'max_tokens' is not defined in the schema"。
-    let supports_max_tokens = kiro_model.starts_with("claude-");
-    if !supports_max_tokens {
+    let is_claude = kiro_model.starts_with("claude-");
+    let is_gpt = kiro_model.starts_with("gpt-5.6");
+
+    if !is_claude {
         extra.remove("max_tokens");
     }
 
-    if supports_max_tokens {
+    if is_claude {
+        // 即使 effort 列表为空，也要转发 thinking（Claude adaptive thinking）
         apply_thinking_fields(&mut extra, body.get("thinking").unwrap_or(&Value::Null));
+        // Claude Code 默认开启思考时，若请求未显式带 thinking，也启用 adaptive+summarized
+        if !extra.contains_key("thinking")
+            && body
+                .get("thinking")
+                .and_then(|v| v.get("type"))
+                .and_then(|v| v.as_str())
+                .is_none()
+        {
+            // 不强制默认开启，避免意外加费；仅在请求明确要求时启用
+        }
 
         let requested_max_tokens = body
             .get("max_tokens")
@@ -768,31 +783,45 @@ fn build_additional_model_request_fields(body: &Value, kiro_model: &str) -> Opti
                 extra.insert("max_tokens".to_string(), json!(max_tokens));
             }
         }
-    }
 
-    if kiro_model.starts_with("gpt-5.6") {
+        if let Some(effort) = effort {
+            if effort != "none" {
+                let existing = extra
+                    .entry("output_config".to_string())
+                    .or_insert_with(|| json!({}));
+                if let Some(existing_obj) = existing.as_object_mut() {
+                    existing_obj.insert("effort".to_string(), json!(effort));
+                }
+            }
+        }
+    } else if is_gpt {
         // GPT 系不接受 Anthropic 的 thinking / output_config / max_tokens
         extra.remove("thinking");
         extra.remove("output_config");
         if let Some(reasoning) = body.get("reasoning") {
-            let existing = extra.entry("reasoning".to_string()).or_insert_with(|| json!({}));
+            let existing = extra
+                .entry("reasoning".to_string())
+                .or_insert_with(|| json!({}));
             if let Some(existing_obj) = existing.as_object_mut() {
                 merge_object(existing_obj, reasoning);
             }
         }
         if let Some(effort) = effort {
-            let existing = extra.entry("reasoning".to_string()).or_insert_with(|| json!({}));
+            let existing = extra
+                .entry("reasoning".to_string())
+                .or_insert_with(|| json!({}));
             if let Some(existing_obj) = existing.as_object_mut() {
                 existing_obj.insert("effort".to_string(), json!(effort));
             }
         }
-    } else if kiro_model.starts_with("claude-") {
-        if let Some(effort) = effort {
-            if effort != "none" {
-                let existing = extra.entry("output_config".to_string()).or_insert_with(|| json!({}));
-                if let Some(existing_obj) = existing.as_object_mut() {
-                    existing_obj.insert("effort".to_string(), json!(effort));
-                }
+    } else if let Some(effort) = effort {
+        // 其它已知 effort 模型：尽量走 output_config.effort
+        if effort != "none" {
+            let existing = extra
+                .entry("output_config".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(existing_obj) = existing.as_object_mut() {
+                existing_obj.insert("effort".to_string(), json!(effort));
             }
         }
     }
@@ -932,28 +961,46 @@ pub fn build_kiro_request(
 // ============ 响应构造 ============
 
 pub fn anthropic_message_response(id: &str, model: &str, text: &str, stop_reason: &str) -> Value {
-    anthropic_message_response_with_tools(id, model, text, &[], stop_reason)
+    anthropic_message_response_with_tools(id, model, text, "", None, &[], stop_reason)
 }
 
 pub fn anthropic_message_response_with_tools(
     id: &str,
     model: &str,
     text: &str,
+    thinking: &str,
+    thinking_signature: Option<&str>,
     native_tool_uses: &[Value],
     stop_reason: &str,
 ) -> Value {
     let mut content = Vec::new();
+    if !thinking.is_empty() || thinking_signature.is_some_and(|s| !s.is_empty()) {
+        content.push(json!({
+            "type": "thinking",
+            "thinking": thinking,
+            "signature": thinking_signature.unwrap_or(""),
+        }));
+    }
     if !text.is_empty() {
         // 原生 tool 已到位时，不再把文本当 tool JSON 再解析一遍
         if native_tool_uses.is_empty() {
             let (parsed, parsed_stop) = normalize_assistant_content(text, stop_reason);
             if parsed_stop == "tool_use" {
+                let mut blocks = Vec::new();
+                if !thinking.is_empty() || thinking_signature.is_some_and(|s| !s.is_empty()) {
+                    blocks.push(json!({
+                        "type": "thinking",
+                        "thinking": thinking,
+                        "signature": thinking_signature.unwrap_or(""),
+                    }));
+                }
+                blocks.extend(parsed);
                 return json!({
                     "id": id,
                     "type": "message",
                     "role": "assistant",
                     "model": model,
-                    "content": parsed,
+                    "content": blocks,
                     "stop_reason": parsed_stop,
                     "stop_sequence": null,
                     "usage": { "input_tokens": 0, "output_tokens": estimate_tokens(text) },
@@ -1246,5 +1293,38 @@ mod tests {
         });
         let built = build_kiro_request(&body, "claude-sonnet-5", Some("arn")).unwrap();
         assert_eq!(built["additionalModelRequestFields"]["max_tokens"], 32000);
+    }
+
+    #[test]
+    fn claude_models_forward_thinking_enabled() {
+        let body = json!({
+            "max_tokens": 4096,
+            "messages": [{ "role": "user", "content": "hi" }],
+            "thinking": { "type": "enabled" },
+        });
+        let built = build_kiro_request(&body, "claude-opus-4.8", Some("arn")).unwrap();
+        let thinking = &built["additionalModelRequestFields"]["thinking"];
+        assert_eq!(thinking["type"], "adaptive");
+        assert_eq!(thinking["display"], "summarized");
+    }
+
+    #[test]
+    fn response_includes_thinking_block_before_text() {
+        let response = anthropic_message_response_with_tools(
+            "msg_1",
+            "claude-opus-4.8",
+            "最终答案",
+            "先想一步。",
+            Some("sig_xyz"),
+            &[],
+            "end_turn",
+        );
+        let content = response["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "thinking");
+        assert_eq!(content[0]["thinking"], "先想一步。");
+        assert_eq!(content[0]["signature"], "sig_xyz");
+        assert_eq!(content[1]["type"], "text");
+        assert_eq!(content[1]["text"], "最终答案");
     }
 }

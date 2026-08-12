@@ -1068,8 +1068,11 @@ async function init() {
   setupEventListeners();
   setupExternalLinkInterceptor();
   bindSidebarResponsive();
-  void checkClaudeCodeUpdate(false);
-  void initAppUpdate();
+  // 先让首屏完成绘制，再启动两个独立的后台版本检查。
+  setTimeout(() => {
+    void checkClaudeCodeUpdate(false);
+    void initAppUpdate();
+  }, 0);
   void setupKiroAutostartListener();
 }
 
@@ -1135,9 +1138,10 @@ function syncClaudeUpdateButtonUI() {
   btn.setAttribute('aria-label', title);
 }
 
-async function checkClaudeCodeUpdate(force = false): Promise<void> {
+async function checkClaudeCodeUpdate(_force = false): Promise<void> {
+  // 手动重查与启动检查共享同一个任务，避免并发结果相互覆盖。
   if (claudeUpdateCheckPromise) {
-    if (!force) return claudeUpdateCheckPromise;
+    return claudeUpdateCheckPromise;
   }
 
   claudeUpdateCheckStatus = 'checking';
@@ -1377,9 +1381,10 @@ async function initAppUpdate(): Promise<void> {
   void checkAppUpdate(false);
 }
 
-async function checkAppUpdate(force = false): Promise<void> {
+async function checkAppUpdate(_force = false): Promise<void> {
+  // 自动检查和手动重查必须串行，避免 updater 句柄与 UI 状态竞态。
   if (appUpdateCheckPromise) {
-    if (!force) return appUpdateCheckPromise;
+    return appUpdateCheckPromise;
   }
 
   appUpdateCheckStatus = 'checking';
