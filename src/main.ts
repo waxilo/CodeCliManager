@@ -713,9 +713,17 @@ function toggleTheme() {
 }
 
 function getActiveChatModelForRender(): string {
-  // 始终以配置文件读取到的当前默认模型为准
+  // 优先使用配置文件中的默认模型；同步刷新时尽量保留页面上已选模型，避免跳回列表第一项
   if (currentDefaultModel && chatModelOptions.includes(currentDefaultModel)) {
     return currentDefaultModel;
+  }
+  if (currentDefaultModel) {
+    return currentDefaultModel;
+  }
+  const trigger = document.querySelector('#chat-model-picker-trigger') as HTMLButtonElement | null;
+  const fromUi = trigger?.dataset.value?.trim() || '';
+  if (fromUi && chatModelOptions.includes(fromUi)) {
+    return fromUi;
   }
   return chatModelOptions[0] || '';
 }
@@ -1004,6 +1012,11 @@ async function applyChatModelSelection(model: string): Promise<void> {
 }
 
 async function loadChatModelOptions(): Promise<void> {
+  const previousSelected =
+    currentDefaultModel.trim() ||
+    (document.querySelector('#chat-model-picker-trigger') as HTMLButtonElement | null)?.dataset.value?.trim() ||
+    '';
+
   try {
     const config = await invoke<ClaudeCodeApiConfig>('get_claude_api_config');
     currentDefaultModel = (config.defaultModel || '').trim();
@@ -1038,13 +1051,18 @@ async function loadChatModelOptions(): Promise<void> {
       chatModelOptions = merged;
     }
 
+    // 同步后配置未带回默认模型时，若原先选中的模型仍在新列表中则继续沿用
+    if (!currentDefaultModel && previousSelected && chatModelOptions.includes(previousSelected)) {
+      currentDefaultModel = previousSelected;
+    }
+
     // 若配置文件里的当前默认模型不在候选列表，附加到首位以便展示与切换
     if (currentDefaultModel && !chatModelOptions.includes(currentDefaultModel)) {
       chatModelOptions = [currentDefaultModel, ...chatModelOptions];
     }
   } catch {
     chatModelOptions = [];
-    currentDefaultModel = '';
+    currentDefaultModel = previousSelected || '';
   }
   updateChatModelPicker();
 }
@@ -1346,6 +1364,9 @@ function bindClaudeUpdatePopoverEvents(panel: Element) {
     btn.addEventListener('click', () => {
       const action = btn.dataset.action;
       if (action === 'recheck') {
+        if (claudeUpdateCheckStatus === 'checking' || claudeUpdateCheckStatus === 'updating') return;
+        btn.disabled = true;
+        btn.textContent = '检查中…';
         void checkClaudeCodeUpdate(true);
       } else if (action === 'update') {
         void runClaudeCodeSilentUpdate();
@@ -1442,8 +1463,9 @@ async function checkAppUpdate(_force = false): Promise<void> {
       // 本机清单代理会改写 GitHub 下载地址为镜像；超时放宽避免慢网误判
       const update = await checkAppUpdateRemote({ timeout: 60_000 });
       appUpdate = update;
-      appUpdateInfo.latestVersion = update?.version ?? null;
       appUpdateInfo.updateAvailable = Boolean(update);
+      // updater 在当前版本已是最新时返回 null，此时最新版本就是当前版本。
+      appUpdateInfo.latestVersion = update?.version ?? appUpdateInfo.currentVersion;
       appUpdateInfo.body = update?.body ?? null;
       appUpdateInfo.error = null;
       appUpdateCheckStatus = 'ready';
@@ -1508,6 +1530,9 @@ function renderAppUpdatePopoverBody(): string {
   const current = appUpdateInfo.currentVersion || '—';
   const latest = appUpdateInfo.latestVersion || '—';
   const error = appUpdateInfo.error || '';
+  const hint = !checking && !hasUpdate && appUpdateInfo.currentVersion && appUpdateInfo.latestVersion
+    ? '已是最新版本。'
+    : '';
 
   return `
     <div class="claude-update-popover-header">
@@ -1525,6 +1550,7 @@ function renderAppUpdatePopoverBody(): string {
       </div>
     </div>
     ${checking ? `<p class="claude-update-popover-status">正在检查更新…</p>` : ''}
+    ${hint ? `<p class="claude-update-popover-status">${hint}</p>` : ''}
     ${hasUpdate && appUpdateInfo.body ? renderAppUpdateNotes(appUpdateInfo.body) : ''}
     ${downloading ? renderAppUpdateProgressHtml() : ''}
     ${error && !downloading ? `<p class="claude-update-popover-error">${escapeHtml(error)}</p>` : ''}
@@ -1550,6 +1576,9 @@ function bindAppUpdatePopoverEvents(panel: Element) {
     btn.addEventListener('click', () => {
       const action = btn.dataset.action;
       if (action === 'recheck') {
+        if (appUpdateCheckStatus === 'checking' || appUpdateCheckStatus === 'downloading') return;
+        btn.disabled = true;
+        btn.textContent = '检查中…';
         void checkAppUpdate(true);
       } else if (action === 'install') {
         void installAppUpdate();
@@ -3961,6 +3990,12 @@ function attachEventListeners() {
   });
 
   if (isApiConfigViewActive) {
+    const updatePanel = document.querySelector('.settings-update-view');
+    if (updatePanel && settingsSection === 'app-update') {
+      bindAppUpdatePopoverEvents(updatePanel);
+    } else if (updatePanel && settingsSection === 'claude-update') {
+      bindClaudeUpdatePopoverEvents(updatePanel);
+    }
     void mountApiConfigView();
   }
 
@@ -4819,7 +4854,6 @@ async function mountApiConfigView() {
   document.addEventListener('keydown', onEscapeKey);
   const livePathEl = overlay.querySelector('.settings-live-path') as HTMLElement | null;
   let fetchedModels: FetchedModel[] = [];
-  let modelsFetchKey = '';
   let modelsFetchInFlight = 0;
   let refreshOpenModelPicker: (() => void) | null = null;
   /** 空数组表示展示 API 拉取到的全部模型 */
@@ -4856,8 +4890,6 @@ async function mountApiConfigView() {
     `;
   };
 
-  const usesAllFetchedModels = (): boolean => displayModels.length === 0;
-
   const getFetchedModelIds = (): Set<string> => new Set(fetchedModels.map((model) => model.id));
 
   const getApiDisplayModels = (): string[] => {
@@ -4879,6 +4911,14 @@ async function mountApiConfigView() {
 
   const splitDraftModels = (draft: string[]) => {
     const fetchedIds = getFetchedModelIds();
+    // 未手动同步时没有 fetched 缓存，按已保存的自定义列表区分，避免把 API 模型误存成自定义
+    if (fetchedIds.size === 0) {
+      const customSet = new Set(customModels);
+      return {
+        apiModels: draft.filter((modelId) => !customSet.has(modelId)),
+        customInDraft: draft.filter((modelId) => customSet.has(modelId)),
+      };
+    }
     return {
       apiModels: draft.filter((modelId) => fetchedIds.has(modelId)),
       customInDraft: draft.filter((modelId) => !fetchedIds.has(modelId)),
@@ -4910,38 +4950,34 @@ async function mountApiConfigView() {
     }
 
     input.classList.remove('is-loading');
-    const ids = getEffectiveDisplayModels();
+    const apiCount = displayModels.length > 0 ? displayModels.length : fetchedModels.length;
+    const hasModels = apiCount > 0 || customModels.length > 0;
 
-    if (ids.length === 0) {
+    if (!hasModels) {
       input.value = '';
       input.placeholder = '点击配置模型';
     } else {
-      const displayPart = usesAllFetchedModels()
-        ? `API ${getApiDisplayModels().length} 个`
-        : `API ${displayModels.length} 个`;
+      const displayPart = apiCount > 0 ? `API ${apiCount} 个` : 'API 0 个';
       const customPart = customModels.length > 0 ? ` · 自定义 ${customModels.length} 个` : '';
       input.value = `${displayPart}${customPart}`;
     }
 
     if (hintEl) {
-      hintEl.textContent = '配置展示模型与自定义模型列表，点击输入框管理';
+      hintEl.textContent = '配置展示模型与自定义模型列表；同步一次后会保存，无需每次重新同步';
     }
   };
 
   const normalizeDisplayModelsForSave = (models: string[]): string[] => {
-    if (models.length === 0) {
-      return [];
+    // 始终持久化具体模型 ID，避免存成空数组导致下次必须重新同步才能看到列表
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const model of models) {
+      const id = model.trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      normalized.push(id);
     }
-
-    const fetchedIds = fetchedModels.map((model) => model.id);
-    if (fetchedIds.length === 0) {
-      return models;
-    }
-
-    const modelSet = new Set(models);
-    const isSameAsAllFetched =
-      models.length === fetchedIds.length && fetchedIds.every((id) => modelSet.has(id));
-    return isSameAsAllFetched ? [] : models;
+    return normalized;
   };
 
   const setModelConfigFromConfig = (
@@ -4953,41 +4989,9 @@ async function mountApiConfigView() {
     updateModelConfigSummary();
   };
 
-  const tryAutoFetchDisplayModels = async () => {
-    const baseUrl =
-      (overlay.querySelector('input[name="baseUrl"]') as HTMLInputElement | null)?.value.trim() || '';
-    if (!baseUrl) {
-      updateModelConfigSummary();
-      return;
-    }
-
-    if (fetchedModels.length > 0 && modelsFetchKey === getModelsFetchKey()) {
-      updateModelConfigSummary();
-      return;
-    }
-
-    try {
-      await fetchModelsForSettings();
-    } catch {
-      // 无 Key 或网络失败时仍展示已保存的自定义列表
-    }
-    updateModelConfigSummary();
-  };
-
   const handleProfileConfigLoaded = (config: ClaudeCodeApiConfig) => {
     fetchedModels = [];
-    modelsFetchKey = '';
     setModelConfigFromConfig(config.displayModels, config.customModels);
-    void tryAutoFetchDisplayModels();
-  };
-
-  const getModelsFetchKey = (): string => {
-    const baseUrl =
-      (overlay.querySelector('input[name="baseUrl"]') as HTMLInputElement | null)?.value.trim() || '';
-    const apiKeyRaw =
-      (overlay.querySelector('input[name="apiKey"]') as HTMLInputElement | null)?.value.trim() || '';
-    const profileId = overlay.dataset.profileId || '';
-    return `${baseUrl}|${profileId}|${apiKeyRaw}`;
   };
 
   const fetchModelsForSettings = async (): Promise<FetchedModel[]> => {
@@ -5006,7 +5010,6 @@ async function mountApiConfigView() {
         apiKey: apiKeyRaw || null,
         profileId,
       });
-      modelsFetchKey = getModelsFetchKey();
       return fetchedModels;
     } finally {
       setModelsLoading(false);
@@ -5033,6 +5036,11 @@ async function mountApiConfigView() {
 
     const profileId = overlay.dataset.profileId || null;
     const apiKeyRaw = String(formData.get('apiKey') || '').trim();
+    // 同步/保存展示列表时保留当前聊天页已选模型，避免被清空后回退到列表第一项
+    const preferredModel =
+      currentDefaultModel.trim() ||
+      getActiveChatModel().trim() ||
+      '';
 
     try {
       const result = await invoke<ApiProfilesState>('upsert_api_profile', {
@@ -5041,7 +5049,7 @@ async function mountApiConfigView() {
         config: {
           baseUrl: String(formData.get('baseUrl') || '').trim(),
           apiKey: apiKeyRaw || null,
-          defaultModel: '',
+          defaultModel: preferredModel,
           haikuModel: '',
           sonnetModel: '',
           opusModel: '',
@@ -5062,6 +5070,10 @@ async function mountApiConfigView() {
       }
 
       await loadChatModelOptions();
+      if (preferredModel && chatModelOptions.includes(preferredModel) && currentDefaultModel !== preferredModel) {
+        currentDefaultModel = preferredModel;
+        updateChatModelPicker();
+      }
       return true;
     } catch (e) {
       console.error('保存模型配置失败:', e);
@@ -5076,7 +5088,9 @@ async function mountApiConfigView() {
     }
 
     let draftModels = [...getEffectiveDisplayModels()];
-    let bulkSelectedModels = new Set<string>();
+    let selectedModels = new Set<string>();
+    let customAddFeedback = '';
+    let isCustomAddFeedbackError = false;
 
     const getSearchQuery = (): string =>
       (
@@ -5093,7 +5107,39 @@ async function mountApiConfigView() {
       return modelIds.filter((modelId) => modelId.toLowerCase().includes(query));
     };
 
-    const getAllFilteredModelIds = (): string[] => filterModelIds(draftModels);
+    const getDraftModelGroups = () => {
+      const fetchedIds = getFetchedModelIds();
+      if (fetchedIds.size > 0) {
+        return {
+          api: draftModels.filter((modelId) => fetchedIds.has(modelId)),
+          custom: draftModels.filter((modelId) => !fetchedIds.has(modelId)),
+        };
+      }
+      // 未同步时按已保存分类展示，避免把 API 模型误放到自定义区
+      const customSet = new Set(customModels);
+      return {
+        api: draftModels.filter((modelId) => !customSet.has(modelId)),
+        custom: draftModels.filter((modelId) => customSet.has(modelId)),
+      };
+    };
+
+    const getFilteredModelGroups = () => {
+      const groups = getDraftModelGroups();
+      return {
+        api: filterModelIds(groups.api),
+        custom: filterModelIds(groups.custom),
+      };
+    };
+
+    const getAllFilteredModelIds = (): string[] => {
+      const groups = getFilteredModelGroups();
+      return [...groups.api, ...groups.custom];
+    };
+
+    const retainVisibleSelection = () => {
+      const visible = new Set(getAllFilteredModelIds());
+      selectedModels = new Set([...selectedModels].filter((modelId) => visible.has(modelId)));
+    };
 
     const getFilterEmptyText = (defaultText: string): string =>
       getSearchQuery() ? '无匹配模型' : defaultText;
@@ -5104,38 +5150,39 @@ async function mountApiConfigView() {
         return;
       }
 
-      const query = getSearchQuery();
       const filtered = getAllFilteredModelIds();
-      if (!query) {
-        bar.classList.add('is-hidden');
-        bulkSelectedModels.clear();
-        return;
-      }
-
-      bar.classList.remove('is-hidden');
       const countEl = bar.querySelector('.display-models-bulk-count');
+      const selectedCountEl = bar.querySelector('.display-models-bulk-selected-count');
       const checkbox = bar.querySelector('.display-models-bulk-checkbox') as HTMLInputElement | null;
+      const invertBtn = bar.querySelector('.display-models-bulk-invert') as HTMLButtonElement | null;
       const removeBtn = bar.querySelector('.display-models-bulk-remove') as HTMLButtonElement | null;
 
       if (countEl) {
         countEl.textContent = String(filtered.length);
       }
+      if (selectedCountEl) {
+        selectedCountEl.textContent = String(selectedModels.size);
+      }
 
       const allSelected =
-        filtered.length > 0 && filtered.every((modelId) => bulkSelectedModels.has(modelId));
-      const someSelected = filtered.some((modelId) => bulkSelectedModels.has(modelId));
+        filtered.length > 0 && filtered.every((modelId) => selectedModels.has(modelId));
+      const someSelected = filtered.some((modelId) => selectedModels.has(modelId));
 
       if (checkbox) {
         checkbox.checked = allSelected;
         checkbox.indeterminate = !allSelected && someSelected;
+        checkbox.disabled = filtered.length === 0;
+      }
+      if (invertBtn) {
+        invertBtn.disabled = filtered.length === 0;
       }
 
       if (removeBtn) {
-        removeBtn.disabled = bulkSelectedModels.size === 0;
+        removeBtn.disabled = selectedModels.size === 0;
         removeBtn.textContent =
-          bulkSelectedModels.size > 0
-            ? `移除已选 (${bulkSelectedModels.size})`
-            : '移除已选';
+          selectedModels.size > 0
+            ? `删除已选 (${selectedModels.size})`
+            : '删除已选';
       }
     };
 
@@ -5151,35 +5198,43 @@ async function mountApiConfigView() {
           <input
             type="search"
             class="model-picker-search display-models-picker-search"
-            placeholder="搜索模型，可全选批量移除"
+            placeholder="搜索 API 与自定义模型"
           />
           <button type="button" class="display-models-picker-sync">同步 API</button>
         </div>
-        <div class="display-models-picker-bulk is-hidden">
+        <div class="display-models-picker-bulk">
           <label class="display-models-bulk-select-all">
             <input type="checkbox" class="display-models-bulk-checkbox" />
-            <span>全选 (<span class="display-models-bulk-count">0</span>)</span>
+            <span>全选当前结果 (<span class="display-models-bulk-count">0</span>)</span>
           </label>
-          <button type="button" class="display-models-bulk-remove" disabled>移除已选</button>
+          <span class="display-models-bulk-summary">已选 <span class="display-models-bulk-selected-count">0</span></span>
+          <div class="display-models-bulk-actions">
+            <button type="button" class="display-models-bulk-invert">反选</button>
+            <button type="button" class="display-models-bulk-remove" disabled>删除已选</button>
+          </div>
         </div>
         <div class="display-models-picker-section">
-          <span class="display-models-picker-section-title">展示模型</span>
+          <span class="display-models-picker-section-title">
+            展示模型 <span class="display-models-picker-section-count" data-model-count="api">0</span>
+          </span>
           <div class="display-models-api-list"></div>
         </div>
         <div class="display-models-picker-section">
-          <span class="display-models-picker-section-title">自定义模型</span>
+          <span class="display-models-picker-section-title">
+            自定义模型 <span class="display-models-picker-section-count" data-model-count="custom">0</span>
+          </span>
           <div class="display-models-custom-add">
-            <input
-              type="text"
+            <textarea
               class="display-models-custom-add-input"
-              placeholder="输入自定义模型名"
-              autocomplete="off"
-            />
-            <button type="button" class="display-models-custom-add-btn">添加</button>
+              placeholder="每行一个模型，也支持逗号分隔"
+              rows="2"
+            ></textarea>
+            <button type="button" class="display-models-custom-add-btn">批量添加</button>
           </div>
+          <p class="display-models-custom-add-feedback" aria-live="polite"></p>
           <div class="display-models-custom-list"></div>
         </div>
-        <p class="model-picker-tip">展示模型来自 API 同步；自定义模型需手动添加，操作后立即保存</p>
+        <p class="model-picker-tip">点击方块选中模型；同步后的模型列表会保存，下次打开无需再同步</p>
       </div>
     `;
 
@@ -5205,33 +5260,27 @@ async function mountApiConfigView() {
     ) => {
       const filteredIds = filterModelIds(modelIds);
       if (filteredIds.length === 0) {
-        listEl.innerHTML = `<div class="model-picker-empty">${escapeHtml(getFilterEmptyText(emptyText))}</div>`;
+        listEl.innerHTML = `<div class="model-picker-empty${getSearchQuery() ? ' is-filter-empty' : ''}">${escapeHtml(getFilterEmptyText(emptyText))}</div>`;
         return;
       }
 
-      const showBulk = !!getSearchQuery();
       const fetchedById = new Map(fetchedModels.map((model) => [model.id, model]));
       listEl.innerHTML = filteredIds
         .map((modelId) => {
           const fetched = fetchedById.get(modelId);
-          const isSelected = bulkSelectedModels.has(modelId);
+          const isSelected = selectedModels.has(modelId);
           return `
-            <div class="display-models-row${isSelected ? ' is-selected' : ''}" data-model-id="${escapeHtml(modelId)}">
-              ${showBulk
-                ? `
-                <label class="display-models-row-check">
-                  <input type="checkbox" data-action="toggle-select" ${isSelected ? 'checked' : ''} aria-label="选择 ${escapeHtml(modelId)}" />
-                </label>
-              `
-                : ''}
-              <div class="display-models-row-main">
-                <span class="display-models-row-id">${escapeHtml(modelId)}</span>
-                ${fetched?.ownedBy ? `<span class="display-models-row-owner">${escapeHtml(fetched.ownedBy)}</span>` : ''}
-              </div>
-              <div class="display-models-row-actions">
-                <button type="button" class="display-models-row-btn display-models-row-btn-danger" data-action="delete">删除</button>
-              </div>
-            </div>
+            <button
+              type="button"
+              class="display-models-tile${isSelected ? ' is-selected' : ''}"
+              data-model-id="${escapeHtml(modelId)}"
+              data-action="toggle-select"
+              title="${escapeHtml(modelId)}"
+              aria-pressed="${isSelected ? 'true' : 'false'}"
+            >
+              <span class="display-models-tile-id">${escapeHtml(modelId)}</span>
+              ${fetched?.ownedBy ? `<span class="display-models-tile-owner">${escapeHtml(fetched.ownedBy)}</span>` : ''}
+            </button>
           `;
         })
         .join('');
@@ -5246,8 +5295,11 @@ async function mountApiConfigView() {
         return;
       }
 
-      const fetchedIds = getFetchedModelIds();
-      const apiModelIds = draftModels.filter((modelId) => fetchedIds.has(modelId));
+      const apiModelIds = getDraftModelGroups().api;
+      const countEl = pickerOverlay.querySelector('[data-model-count="api"]');
+      if (countEl) {
+        countEl.textContent = String(filterModelIds(apiModelIds).length);
+      }
       renderModelRows(
         listEl,
         apiModelIds,
@@ -5259,46 +5311,80 @@ async function mountApiConfigView() {
       const listEl = pickerOverlay.querySelector('.display-models-custom-list');
       if (!listEl) return;
 
-      const fetchedIds = getFetchedModelIds();
-      const customModelIds = draftModels.filter((modelId) => !fetchedIds.has(modelId));
+      const customModelIds = getDraftModelGroups().custom;
+      const countEl = pickerOverlay.querySelector('[data-model-count="custom"]');
+      if (countEl) {
+        countEl.textContent = String(filterModelIds(customModelIds).length);
+      }
       renderModelRows(listEl, customModelIds, '暂无自定义模型');
     };
 
-    const submitCustomModelAdd = async () => {
+    const parseCustomModelInput = (input: string): { models: string[]; duplicateCount: number } => {
+      const tokens = input
+        .split(/[\n,，]+/)
+        .map((modelId) => modelId.trim())
+        .filter(Boolean);
+      const models = [...new Set(tokens)];
+      return {
+        models,
+        duplicateCount: tokens.length - models.length,
+      };
+    };
+
+    const submitCustomModelsAdd = async () => {
       const addInput = pickerOverlay.querySelector(
         '.display-models-custom-add-input',
-      ) as HTMLInputElement | null;
-      const modelId = addInput?.value.trim() || '';
-      if (!modelId) {
+      ) as HTMLTextAreaElement | null;
+      const parsed = parseCustomModelInput(addInput?.value || '');
+      if (parsed.models.length === 0) {
+        customAddFeedback = '请输入至少一个模型名称';
+        isCustomAddFeedbackError = true;
+        renderCustomAddFeedback();
         addInput?.focus();
         return;
       }
 
-      if (draftModels.includes(modelId)) {
-        alert('该模型已存在');
+      const existing = new Set(draftModels);
+      const modelsToAdd = parsed.models.filter((modelId) => !existing.has(modelId));
+      const skippedCount = parsed.duplicateCount + parsed.models.length - modelsToAdd.length;
+      if (modelsToAdd.length === 0) {
+        customAddFeedback = `没有新增模型，已跳过 ${skippedCount} 个重复项`;
+        isCustomAddFeedbackError = true;
+        renderCustomAddFeedback();
         addInput?.focus();
         return;
       }
 
-      await addDraftModel(modelId);
+      draftModels = [...draftModels, ...modelsToAdd];
+      customAddFeedback = `已新增 ${modelsToAdd.length} 个模型${skippedCount > 0 ? `，跳过 ${skippedCount} 个重复项` : ''}`;
+      isCustomAddFeedbackError = false;
+      renderDialog();
+      const saved = await persistDraft();
+      if (!saved) {
+        customAddFeedback = '模型已加入草稿，但保存失败，请重试';
+        isCustomAddFeedbackError = true;
+        renderCustomAddFeedback();
+        return;
+      }
       if (addInput) {
         addInput.value = '';
         addInput.focus();
       }
     };
 
+    const renderCustomAddFeedback = () => {
+      const feedback = pickerOverlay.querySelector('.display-models-custom-add-feedback');
+      if (!feedback) return;
+      feedback.textContent = customAddFeedback;
+      feedback.classList.toggle('is-error', isCustomAddFeedbackError);
+      feedback.classList.toggle('is-visible', Boolean(customAddFeedback));
+    };
+
     const renderDialog = () => {
       renderApiModelsList();
       renderCustomModelsList();
       renderBulkBar();
-    };
-
-    const addDraftModel = async (modelId: string) => {
-      const trimmed = modelId.trim();
-      if (!trimmed || draftModels.includes(trimmed)) return;
-      draftModels = [...draftModels, trimmed];
-      renderDialog();
-      await persistDraft();
+      renderCustomAddFeedback();
     };
 
     const deleteDraftModels = async (modelIds: string[]) => {
@@ -5308,19 +5394,16 @@ async function mountApiConfigView() {
 
       const toDelete = new Set(modelIds);
       draftModels = draftModels.filter((id) => !toDelete.has(id));
-      bulkSelectedModels.clear();
+      selectedModels.clear();
       renderDialog();
 
       await persistDraft();
     };
 
-    const deleteDraftModel = async (modelId: string) => {
-      await deleteDraftModels([modelId]);
-    };
-
     const mergeDraftWithApiModels = (apiModelIds: string[]) => {
       const customPart = draftModels.filter((modelId) => !getFetchedModelIds().has(modelId));
       draftModels = [...apiModelIds, ...customPart];
+      selectedModels = new Set([...selectedModels].filter((modelId) => draftModels.includes(modelId)));
     };
 
     pickerOverlay.querySelector('.model-picker-close')?.addEventListener('click', closePicker);
@@ -5336,10 +5419,21 @@ async function mountApiConfigView() {
       }
 
       try {
+        const previousSelected =
+          currentDefaultModel.trim() ||
+          getActiveChatModel().trim() ||
+          '';
         await fetchModelsForSettings();
         mergeDraftWithApiModels(fetchedModels.map((model) => model.id));
         renderDialog();
         await persistDraft();
+        // 同步后若原先选中模型仍在新列表中，明确保留，避免跳回第一项
+        if (previousSelected && chatModelOptions.includes(previousSelected)) {
+          if (currentDefaultModel !== previousSelected) {
+            currentDefaultModel = previousSelected;
+            updateChatModelPicker();
+          }
+        }
       } catch (e) {
         alert('同步模型失败: ' + String(e));
       } finally {
@@ -5351,117 +5445,73 @@ async function mountApiConfigView() {
     });
 
     pickerOverlay.querySelector('.display-models-picker-search')?.addEventListener('input', () => {
-      const filtered = new Set(getAllFilteredModelIds());
-      bulkSelectedModels = new Set(
-        [...bulkSelectedModels].filter((modelId) => filtered.has(modelId)),
-      );
+      retainVisibleSelection();
       renderDialog();
     });
 
     pickerOverlay.querySelector('.display-models-custom-add-btn')?.addEventListener('click', () => {
-      void submitCustomModelAdd();
+      void submitCustomModelsAdd();
     });
 
     pickerOverlay.querySelector('.display-models-custom-add-input')?.addEventListener('keydown', (event) => {
       const keyboardEvent = event as KeyboardEvent;
-      if (keyboardEvent.key !== 'Enter') {
+      if (keyboardEvent.key !== 'Enter' || (!keyboardEvent.metaKey && !keyboardEvent.ctrlKey)) {
         return;
       }
       keyboardEvent.preventDefault();
-      void submitCustomModelAdd();
+      void submitCustomModelsAdd();
     });
 
     pickerOverlay.querySelector('.display-models-bulk-checkbox')?.addEventListener('change', (event) => {
       const checkbox = event.target as HTMLInputElement;
       const filtered = getAllFilteredModelIds();
       if (checkbox.checked) {
-        bulkSelectedModels = new Set(filtered);
+        selectedModels = new Set(filtered);
       } else {
-        bulkSelectedModels.clear();
+        selectedModels.clear();
       }
+      renderDialog();
+    });
+
+    pickerOverlay.querySelector('.display-models-bulk-invert')?.addEventListener('click', () => {
+      const filtered = getAllFilteredModelIds();
+      selectedModels = new Set(filtered.filter((modelId) => !selectedModels.has(modelId)));
       renderDialog();
     });
 
     pickerOverlay.querySelector('.display-models-bulk-remove')?.addEventListener('click', () => {
-      if (bulkSelectedModels.size === 0) {
+      if (selectedModels.size === 0) {
         return;
       }
-      void deleteDraftModels([...bulkSelectedModels]);
+      void deleteDraftModels([...selectedModels]);
     });
 
-    const handleModelRowCheckbox = (event: Event) => {
-      const checkbox = event.target as HTMLInputElement;
-      if (checkbox.dataset.action !== 'toggle-select') {
+    const handleModelTileClick = (event: Event) => {
+      const target = event.target as HTMLElement;
+      const tile = target.closest('.display-models-tile') as HTMLElement | null;
+      if (!tile || tile.dataset.action !== 'toggle-select') {
         return;
       }
 
-      const row = checkbox.closest('.display-models-row') as HTMLElement | null;
-      const modelId = row?.dataset.modelId;
+      const modelId = tile.dataset.modelId;
       if (!modelId) {
         return;
       }
 
-      if (checkbox.checked) {
-        bulkSelectedModels.add(modelId);
+      if (selectedModels.has(modelId)) {
+        selectedModels.delete(modelId);
       } else {
-        bulkSelectedModels.delete(modelId);
+        selectedModels.add(modelId);
       }
       renderDialog();
     };
 
-    const handleModelRowAction = (event: Event) => {
-      const target = event.target as HTMLElement;
-      const actionEl = target.closest('[data-action]') as HTMLElement | null;
-      const row = target.closest('.display-models-row') as HTMLElement | null;
-      const modelId = row?.dataset.modelId;
-      if (!actionEl || !modelId) return;
-
-      const action = actionEl.dataset.action;
-      if (action === 'toggle-select') {
-        return;
-      }
-      if (action === 'delete') {
-        void deleteDraftModel(modelId);
-      }
-    };
-
-    pickerOverlay.querySelector('.display-models-api-list')?.addEventListener('change', handleModelRowCheckbox);
-    pickerOverlay.querySelector('.display-models-custom-list')?.addEventListener('change', handleModelRowCheckbox);
-    pickerOverlay.querySelector('.display-models-api-list')?.addEventListener('click', handleModelRowAction);
-    pickerOverlay.querySelector('.display-models-custom-list')?.addEventListener('click', handleModelRowAction);
+    pickerOverlay.querySelector('.display-models-api-list')?.addEventListener('click', handleModelTileClick);
+    pickerOverlay.querySelector('.display-models-custom-list')?.addEventListener('click', handleModelTileClick);
 
     document.body.appendChild(pickerOverlay);
     refreshOpenModelPicker = renderDialog;
     renderDialog();
-
-    const baseUrl =
-      (overlay.querySelector('input[name="baseUrl"]') as HTMLInputElement | null)?.value.trim() || '';
-    if (baseUrl && (fetchedModels.length === 0 || modelsFetchKey !== getModelsFetchKey())) {
-      void (async () => {
-        const syncBtn = pickerOverlay.querySelector('.display-models-picker-sync') as HTMLButtonElement | null;
-        if (syncBtn) {
-          syncBtn.disabled = true;
-          syncBtn.textContent = '正在同步…';
-        }
-        try {
-          await fetchModelsForSettings();
-          if (draftModels.length === 0) {
-            mergeDraftWithApiModels(fetchedModels.map((model) => model.id));
-          }
-          renderDialog();
-        } catch {
-          const listEl = pickerOverlay.querySelector('.display-models-api-list');
-          if (listEl && fetchedModels.length === 0) {
-            listEl.innerHTML = `<div class="model-picker-empty">未能自动加载模型，请点击右上角「同步 API」重试</div>`;
-          }
-        } finally {
-          if (syncBtn) {
-            syncBtn.disabled = false;
-            syncBtn.textContent = '同步 API';
-          }
-        }
-      })();
-    }
 
     const searchInput = pickerOverlay.querySelector('.display-models-picker-search') as HTMLInputElement | null;
     searchInput?.focus();
@@ -5542,7 +5592,6 @@ async function mountApiConfigView() {
         }
         // 清空上一个配置遗留的模型缓存，避免官方详情里看到别的配置的模型
         fetchedModels = [];
-        modelsFetchKey = '';
         displayModels = [];
         customModels = [];
         fillOfficialView(overlay);
@@ -5678,13 +5727,17 @@ async function mountApiConfigView() {
     try {
       const displayModelsToSave = [...displayModels];
       const customModelsToSave = [...customModels];
+      const preferredModel =
+        currentDefaultModel.trim() ||
+        getActiveChatModel().trim() ||
+        '';
       const result = await invoke<ApiProfilesState>('upsert_api_profile', {
         profileId: profileId || null,
         name: profileName,
         config: {
           baseUrl: String(formData.get('baseUrl') || '').trim(),
           apiKey: apiKeyRaw || null,
-          defaultModel: '',
+          defaultModel: preferredModel,
           haikuModel: '',
           sonnetModel: '',
           opusModel: '',
@@ -5796,7 +5849,6 @@ async function mountApiConfigView() {
       item.classList.remove('selected');
     });
     fetchedModels = [];
-    modelsFetchKey = '';
     customModels = [];
     setModelConfigFromConfig([], []);
     (overlay.querySelector('input[name="profileName"]') as HTMLInputElement | null)?.focus();

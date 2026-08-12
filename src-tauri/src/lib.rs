@@ -595,25 +595,23 @@ fn config_from_profile(profile: &ApiProfile) -> ClaudeCodeApiConfig {
 }
 
 fn resolve_profile_env_model(profile: &ApiProfile) -> String {
+    // 优先保留用户选中的默认模型；仅在缺失时回退到展示/自定义列表首项
+    let default = profile.default_model.trim();
+    if !default.is_empty() {
+        return default.to_string();
+    }
+
     profile
-        .custom_models
+        .display_models
         .iter()
         .find(|model| !model.trim().is_empty())
         .cloned()
         .or_else(|| {
             profile
-                .display_models
+                .custom_models
                 .iter()
                 .find(|model| !model.trim().is_empty())
                 .cloned()
-        })
-        .or_else(|| {
-            let default = profile.default_model.trim();
-            if default.is_empty() {
-                None
-            } else {
-                Some(default.to_string())
-            }
         })
         .unwrap_or_default()
 }
@@ -826,7 +824,11 @@ fn upsert_api_profile(
 
         profile.name = trimmed_name.to_string();
         profile.base_url = config.base_url.trim().to_string();
-        profile.default_model.clear();
+        // 空字符串表示“本次不改默认模型”，避免同步展示列表时把用户已选模型清掉
+        let next_default = config.default_model.trim();
+        if !next_default.is_empty() {
+            profile.default_model = next_default.to_string();
+        }
         profile.haiku_model.clear();
         profile.sonnet_model.clear();
         profile.opus_model.clear();
@@ -859,7 +861,7 @@ fn upsert_api_profile(
             name: trimmed_name.to_string(),
             base_url: config.base_url.trim().to_string(),
             api_key: api_key.trim().to_string(),
-            default_model: String::new(),
+            default_model: config.default_model.trim().to_string(),
             haiku_model: String::new(),
             sonnet_model: String::new(),
             opus_model: String::new(),
@@ -4925,8 +4927,21 @@ fn sync_kiro_profile_models(port: u16, api_key: &str) -> Result<Vec<String>, Str
         return Err("未找到 Kiro profile".to_string());
     };
     profile.display_models = ids.clone();
-    // 若当前默认模型不在列表里，切到第一个可用模型
-    if !ids.is_empty() && !ids.iter().any(|id| id == &profile.default_model) {
+    // 若当前默认模型不在新列表里，才回退到列表首项；否则保留用户已选模型
+    let settings = read_claude_settings_json();
+    let env_model = settings
+        .get("env")
+        .and_then(|value| value.as_object())
+        .map(|env| env_string(env, "ANTHROPIC_MODEL"))
+        .unwrap_or_default();
+    let preferred = [profile.default_model.as_str(), env_model.as_str()]
+        .into_iter()
+        .map(str::trim)
+        .find(|model| !model.is_empty() && ids.iter().any(|id| id == model))
+        .map(str::to_string);
+    if let Some(model) = preferred {
+        profile.default_model = model;
+    } else if !ids.is_empty() {
         let first = ids[0].clone();
         profile.default_model = first.clone();
         profile.haiku_model = first.clone();
