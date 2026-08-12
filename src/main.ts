@@ -1266,7 +1266,7 @@ function renderClaudeUpdatePopoverBody(): string {
     : hasUpdate
       ? canSilent
         ? '发现新版本，可直接静默安装。'
-        : '当前安装位于系统目录。将尝试系统授权或安装到用户目录。'
+        : '当前安装位于系统目录。将尝试原生安装或系统授权更新。'
       : '';
   const upToDateHint = !checking && !updating && !hasUpdate && currentVersion && latestVersion
     ? '已是最新版本。'

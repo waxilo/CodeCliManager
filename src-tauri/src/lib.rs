@@ -2565,6 +2565,25 @@ fn looks_like_permission_error(text: &str) -> bool {
         || lower.contains("sudo")
 }
 
+/// `claude update` 走 npm 全局安装失败时的典型文案；应回退到 `claude install` 原生安装。
+fn looks_like_global_update_failed(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.contains("npm global")
+        || lower.contains("isn't writable")
+        || lower.contains("is not writable")
+        || lower.contains("native install")
+        || lower.contains("global install")
+        || lower.contains("update installation failed")
+        || text.contains("原生安装")
+        || text.contains("全局安装")
+        || text.contains("更新安装失败")
+        || text.contains("使用 claude 工具")
+}
+
+fn should_fallback_claude_update(text: &str) -> bool {
+    looks_like_permission_error(text) || looks_like_global_update_failed(text)
+}
+
 /// 在用户可写目录静默执行 `claude update`。
 fn run_claude_update_process(claude_bin: &Path) -> Result<String, String> {
     let mut cmd = Command::new(claude_bin);
@@ -2641,6 +2660,43 @@ fn run_claude_update_elevated_macos(claude_bin: &Path) -> Result<String, String>
     }
 }
 
+/// 通过官方原生安装器更新/迁移（无需 sudo；npm 全局目录不可写时的推荐路径）。
+fn run_claude_native_install(claude_bin: &Path) -> Result<String, String> {
+    let mut cmd = Command::new(claude_bin);
+    apply_cli_runtime_env(&mut cmd);
+    apply_create_no_window(&mut cmd);
+    // latest + --force：即使已有 npm 安装也迁移到原生构建
+    cmd.args(["install", "latest", "--force"]);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = cmd.spawn().map_err(|e| {
+        format!(
+            "启动 Claude Code 原生安装失败（{}）: {}",
+            claude_bin.display(),
+            e
+        )
+    })?;
+    let output = wait_child_with_timeout(child, CLAUDE_UPDATE_TIMEOUT, "Claude Code 原生安装")?;
+    let combined = output_combined_text(&output);
+    if output.status.success() {
+        Ok(if combined.is_empty() {
+            "已通过原生安装器完成更新".to_string()
+        } else {
+            combined
+        })
+    } else {
+        Err(if combined.is_empty() {
+            format!(
+                "Claude Code 原生安装失败（退出码 {}）",
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            combined
+        })
+    }
+}
+
 /// 当系统目录不可写时，静默安装到用户 `~/.local`（无需 sudo）。
 fn run_npm_user_prefix_install() -> Result<String, String> {
     let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())?;
@@ -2690,57 +2746,52 @@ fn run_claude_code_update_silent_blocking() -> Result<ClaudeCodeSilentUpdateResu
     let can_silent = claude_install_allows_silent(&path);
 
     let mut used_elevation = false;
-    let message = if can_silent {
+    let mut errors: Vec<String> = Vec::new();
+    let mut message: Option<String> = None;
+
+    // 1) 可写安装：先走 `claude update`
+    if can_silent {
         match run_claude_update_process(&claude_bin) {
-            Ok(msg) => msg,
-            Err(err) if looks_like_permission_error(&err) => {
-                // 权限探测偶发误判，再尝试用户目录安装 / 提权
-                #[cfg(target_os = "macos")]
-                {
-                    used_elevation = true;
-                    run_claude_update_elevated_macos(&claude_bin).or_else(|elev_err| {
-                        run_npm_user_prefix_install().map_err(|npm_err| {
-                            format!(
-                                "静默更新失败。\n原地更新: {}\n管理员授权: {}\n用户目录安装: {}",
-                                err, elev_err, npm_err
-                            )
-                        })
-                    })?
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    run_npm_user_prefix_install().map_err(|npm_err| {
-                        format!("静默更新失败。\n原地更新: {}\n用户目录安装: {}", err, npm_err)
-                    })?
-                }
+            Ok(msg) => message = Some(msg),
+            Err(err) if should_fallback_claude_update(&err) => {
+                errors.push(format!("原地更新: {err}"));
             }
             Err(err) => return Err(err),
         }
     } else {
-        #[cfg(target_os = "macos")]
-        {
-            used_elevation = true;
-            match run_claude_update_elevated_macos(&claude_bin) {
-                Ok(msg) => msg,
-                Err(elev_err) => run_npm_user_prefix_install().map_err(|npm_err| {
-                    format!(
-                        "当前安装位于系统目录，需要管理员权限。\n管理员授权: {}\n用户目录安装: {}",
-                        elev_err, npm_err
-                    )
-                })?,
+        errors.push("当前安装目录不可写，跳过原地更新".to_string());
+    }
+
+    // 2) npm 全局更新失败时的官方推荐：原生安装（无需 sudo）
+    if message.is_none() {
+        match run_claude_native_install(&claude_bin) {
+            Ok(msg) => message = Some(msg),
+            Err(err) => errors.push(format!("原生安装: {err}")),
+        }
+    }
+
+    // 3) macOS：系统授权再试一次原地更新
+    #[cfg(target_os = "macos")]
+    if message.is_none() {
+        used_elevation = true;
+        match run_claude_update_elevated_macos(&claude_bin) {
+            Ok(msg) => message = Some(msg),
+            Err(err) => errors.push(format!("管理员授权: {err}")),
+        }
+    }
+
+    // 4) 最后回退：npm 安装到 ~/.local
+    if message.is_none() {
+        match run_npm_user_prefix_install() {
+            Ok(msg) => message = Some(msg),
+            Err(err) => {
+                errors.push(format!("用户目录 npm 安装: {err}"));
+                return Err(format!("静默更新失败：\n{}", errors.join("\n")));
             }
         }
-        #[cfg(not(target_os = "macos"))]
-        {
-            // Windows / Linux：系统目录不可写时改走用户目录，避免弹黑框/提权
-            run_npm_user_prefix_install().map_err(|npm_err| {
-                format!(
-                    "当前安装目录不可写，无法静默更新。\n用户目录安装失败: {}\n可改用「终端更新」。",
-                    npm_err
-                )
-            })?
-        }
-    };
+    }
+
+    let message = message.unwrap_or_else(|| "Claude Code 已更新".to_string());
 
     // 更新后重新读版本；用户目录新装可能暂时仍解析到旧路径，尽量再探测一次
     let installed_after = read_installed_claude_version()
@@ -2756,7 +2807,7 @@ fn run_claude_code_update_silent_blocking() -> Result<ClaudeCodeSilentUpdateResu
     })
 }
 
-/// 静默更新 Claude Code：Windows 隐藏控制台；macOS 可写目录直接更新，系统目录则系统授权或安装到 ~/.local。
+/// 静默更新 Claude Code：优先 `claude update`，失败则回退原生安装 / 提权 / 用户目录 npm。
 #[tauri::command]
 async fn run_claude_code_update_silent() -> Result<ClaudeCodeSilentUpdateResult, String> {
     tauri::async_runtime::spawn_blocking(run_claude_code_update_silent_blocking)
