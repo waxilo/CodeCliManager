@@ -66,6 +66,9 @@ pub(crate) fn is_version_newer(latest: &str, installed: &str) -> bool {
 
 pub(crate) const CLAUDE_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const CLAUDE_UPDATE_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const CLAUDE_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+pub(crate) const CLAUDE_INSTALL_SH_URL: &str = "https://claude.ai/install.sh";
+pub(crate) const CLAUDE_INSTALL_PS1_URL: &str = "https://claude.ai/install.ps1";
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;
 
@@ -311,6 +314,91 @@ pub(crate) fn output_combined_text(output: &std::process::Output) -> String {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     format!("{}\n{}", stdout, stderr).trim().to_string()
+}
+
+fn run_claude_install_process() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let powershell = if Command::new("powershell.exe").arg("-NoProfile").arg("-Command").arg("$PSVersionTable.PSVersion").output().is_ok() {
+            "powershell.exe"
+        } else {
+            "pwsh"
+        };
+        let mut command = Command::new(powershell);
+        command.args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &format!("irm {} | iex", CLAUDE_INSTALL_PS1_URL),
+        ]);
+        command
+    };
+
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut command = Command::new("/bin/bash");
+        command.args(["-c", &format!("curl -fsSL {} | bash", CLAUDE_INSTALL_SH_URL)]);
+        command
+    };
+
+    apply_cli_runtime_env(&mut cmd);
+    apply_create_no_window(&mut cmd);
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("启动 Claude Code 安装程序失败: {e}"))?;
+    let output = wait_child_with_timeout(child, CLAUDE_INSTALL_TIMEOUT, "Claude Code 安装")?;
+    let combined = output_combined_text(&output);
+    if output.status.success() {
+        Ok(if combined.is_empty() {
+            "Claude Code 安装脚本执行完成".to_string()
+        } else {
+            combined
+        })
+    } else {
+        Err(if combined.is_empty() {
+            format!(
+                "Claude Code 安装失败（退出码 {}）",
+                output.status.code().unwrap_or(-1)
+            )
+        } else {
+            combined
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClaudeCodeInstallResult {
+    pub(crate) success: bool,
+    pub(crate) message: String,
+    pub(crate) installed: Option<String>,
+    pub(crate) executable_path: Option<String>,
+}
+
+/// 执行 Claude 官方安装脚本，并确认安装后可以读取版本。
+#[tauri::command]
+pub async fn run_claude_code_install() -> Result<ClaudeCodeInstallResult, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let message = run_claude_install_process()?;
+        let (installed, executable_path) = match read_installed_claude_version() {
+            Ok((version, path)) => (Some(version), Some(path)),
+            Err(err) => {
+                return Err(format!("安装脚本已完成，但未检测到可用的 Claude Code: {err}"));
+            }
+        };
+        Ok(ClaudeCodeInstallResult {
+            success: true,
+            message,
+            installed,
+            executable_path,
+        })
+    })
+    .await
+    .map_err(|e| format!("Claude Code 安装任务失败: {e}"))?
 }
 
 pub(crate) fn looks_like_permission_error(text: &str) -> bool {

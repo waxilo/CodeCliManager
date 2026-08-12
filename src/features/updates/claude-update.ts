@@ -13,6 +13,7 @@ export function shouldShowClaudeUpdateBadge(): boolean {
 }
 
 export function getClaudeUpdateButtonTitle(): string {
+  if (appState.claudeUpdateCheckStatus === 'installing') return '正在安装 Claude Code…';
   if (appState.claudeUpdateCheckStatus === 'updating') return '正在静默更新 Claude Code…';
   if (appState.claudeUpdateCheckStatus === 'checking') return '正在检查 Claude Code 更新…';
   if (shouldShowClaudeUpdateBadge() && appState.claudeUpdateInfo?.latest) {
@@ -37,7 +38,7 @@ export function renderClaudeUpdateIcon(): string {
 
 export function syncClaudeUpdateButtonUI() {
   const showBadge = shouldShowClaudeUpdateBadge();
-  const checking = appState.claudeUpdateCheckStatus === 'checking' || appState.claudeUpdateCheckStatus === 'updating';
+  const checking = appState.claudeUpdateCheckStatus === 'checking' || appState.claudeUpdateCheckStatus === 'updating' || appState.claudeUpdateCheckStatus === 'installing';
   const btn = document.querySelector('#claude-update-btn') as HTMLButtonElement | null;
   if (btn) {
     btn.classList.toggle('has-update', showBadge);
@@ -126,8 +127,30 @@ export function renderSettingsUpdateSectionIfOpen(): void {
   else bindClaudeUpdatePopoverEvents(view);
 }
 
+export async function runClaudeCodeInstall(): Promise<void> {
+  if (appState.claudeUpdateCheckStatus === 'installing' || appState.claudeUpdateCheckStatus === 'updating') return;
+  if (!window.confirm('将从 claude.ai 下载并执行官方 Claude Code 安装脚本。是否继续？')) return;
+
+  appState.claudeUpdateCheckStatus = 'installing';
+  appState.claudeUpdateError = null;
+  syncClaudeUpdateButtonUI();
+  refreshClaudeUpdatePopoverIfOpen();
+
+  try {
+    const result = await api.runClaudeCodeInstall();
+    showCopyToastMsg(`Claude Code ${result.installed || ''} 安装成功`);
+    appState.claudeUpdateCheckStatus = 'ready';
+    await checkClaudeCodeUpdate(true);
+  } catch (e) {
+    appState.claudeUpdateError = String(e);
+    appState.claudeUpdateCheckStatus = 'ready';
+    syncClaudeUpdateButtonUI();
+    refreshClaudeUpdatePopoverIfOpen();
+  }
+}
+
 export async function runClaudeCodeSilentUpdate(): Promise<void> {
-  if (appState.claudeUpdateCheckStatus === 'updating') return;
+  if (appState.claudeUpdateCheckStatus === 'updating' || appState.claudeUpdateCheckStatus === 'installing') return;
 
   appState.claudeUpdateCheckStatus = 'updating';
   appState.claudeUpdateError = null;
@@ -152,6 +175,7 @@ export async function runClaudeCodeSilentUpdate(): Promise<void> {
 export function renderClaudeUpdatePopoverBody(): string {
   const info = appState.claudeUpdateInfo;
   const checking = appState.claudeUpdateCheckStatus === 'checking';
+  const installing = appState.claudeUpdateCheckStatus === 'installing';
   const updating = appState.claudeUpdateCheckStatus === 'updating';
   const hasUpdate = Boolean(info?.updateAvailable && info.latest);
   // 与 CCM 一致：已是最新时「最新版本」回填为当前版本，避免显示 —
@@ -162,14 +186,18 @@ export function renderClaudeUpdatePopoverBody(): string {
   const path = info?.executablePath || '';
   const error = appState.claudeUpdateError || info?.error || '';
   const canSilent = info?.canSilentUpdate !== false;
-  const statusHint = updating
-    ? '正在后台静默更新，请稍候…'
-    : hasUpdate
-      ? canSilent
-        ? '发现新版本，可直接静默安装。'
-        : '当前安装位于系统目录。将尝试原生安装或系统授权更新。'
-      : '';
-  const upToDateHint = !checking && !updating && !hasUpdate && currentVersion && latestVersion
+  const statusHint = installing
+    ? '正在执行 Claude 官方安装脚本，请稍候…'
+    : updating
+      ? '正在后台静默更新，请稍候…'
+      : hasUpdate
+        ? canSilent
+          ? '发现新版本，可直接静默安装。'
+          : '当前安装位于系统目录。将尝试原生安装或系统授权更新。'
+        : !currentVersion
+          ? '未检测到 Claude Code，可从 CCM 直接安装。'
+          : '';
+  const upToDateHint = !checking && !installing && !updating && !hasUpdate && currentVersion && latestVersion
     ? '已是最新版本。'
     : '';
 
@@ -196,6 +224,14 @@ export function renderClaudeUpdatePopoverBody(): string {
     ${checking ? `<p class="claude-update-popover-status">正在检查更新…</p>` : ''}
     ${statusHint ? `<p class="claude-update-popover-status">${escapeHtml(statusHint)}</p>` : ''}
     ${upToDateHint ? `<p class="claude-update-popover-status">${upToDateHint}</p>` : ''}
+    ${installing ? `
+      <div class="app-update-progress">
+        <div class="app-update-progress-track">
+          <div class="app-update-progress-bar claude-update-progress-indeterminate"></div>
+        </div>
+        <span class="app-update-progress-pct">安装中</span>
+      </div>
+    ` : ''}
     ${updating ? `
       <div class="app-update-progress">
         <div class="app-update-progress-track">
@@ -206,10 +242,13 @@ export function renderClaudeUpdatePopoverBody(): string {
     ` : ''}
     ${error && !updating ? `<p class="claude-update-popover-error">${escapeHtml(error)}</p>` : ''}
     <div class="claude-update-popover-actions">
-      <button type="button" class="claude-update-action" data-action="recheck" ${checking || updating ? 'disabled' : ''}>
+      <button type="button" class="claude-update-action" data-action="recheck" ${checking || updating || installing ? 'disabled' : ''}>
         ${checking ? '检查中…' : '重新检查'}
       </button>
-      ${hasUpdate && !updating ? `
+      ${!currentVersion && !checking && !installing ? `
+        <button type="button" class="claude-update-action primary" data-action="install">安装 Claude Code</button>
+      ` : ''}
+      ${hasUpdate && !updating && !installing ? `
         <button type="button" class="claude-update-action primary" data-action="update">立即更新</button>
       ` : ''}
     </div>
@@ -226,10 +265,12 @@ export function bindClaudeUpdatePopoverEvents(panel: Element) {
     btn.addEventListener('click', () => {
       const action = btn.dataset.action;
       if (action === 'recheck') {
-        if (appState.claudeUpdateCheckStatus === 'checking' || appState.claudeUpdateCheckStatus === 'updating') return;
+        if (appState.claudeUpdateCheckStatus === 'checking' || appState.claudeUpdateCheckStatus === 'updating' || appState.claudeUpdateCheckStatus === 'installing') return;
         btn.disabled = true;
         btn.textContent = '检查中…';
         void checkClaudeCodeUpdate(true);
+      } else if (action === 'install') {
+        void runClaudeCodeInstall();
       } else if (action === 'update') {
         void runClaudeCodeSilentUpdate();
       }

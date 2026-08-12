@@ -15,7 +15,14 @@ export interface ClaudeCodeSilentUpdateResult {
   usedElevation: boolean;
 }
 
-export type ClaudeUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'updating' | 'error';
+export interface ClaudeCodeInstallResult {
+  success: boolean;
+  message: string;
+  installed: string | null;
+  executablePath: string | null;
+}
+
+export type ClaudeUpdateCheckStatus = 'idle' | 'checking' | 'installing' | 'updating' | 'ready' | 'error';
 
 export type AppUpdateCheckStatus = 'idle' | 'checking' | 'ready' | 'downloading' | 'error';
 

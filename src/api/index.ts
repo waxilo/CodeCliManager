@@ -53,6 +53,7 @@ export {
 
 export {
   checkClaudeCodeUpdate,
+  runClaudeCodeInstall,
   runClaudeCodeUpdateSilent,
 } from './updates';
 

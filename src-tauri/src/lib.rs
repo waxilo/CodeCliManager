@@ -72,6 +72,7 @@ pub fn run() {
             open_terminal,
             open_terminal_resume,
             check_claude_code_update,
+            run_claude_code_install,
             run_claude_code_update_silent,
         ])
         .run(tauri::generate_context!())

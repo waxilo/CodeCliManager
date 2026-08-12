@@ -200,6 +200,62 @@ fn sse_event(event: &str, data: &Value) -> String {
     format!("event: {event}\ndata: {data}\n\n")
 }
 
+/// 在已发送 `message_start` 后的失败收尾。
+///
+/// Claude Code 若只收到 error + message_stop、没有 message_delta，
+/// 会以 `stop_reason=null` + `result_type=user` 报 `[ede_diagnostic]`。
+/// 这里补齐文本错误块与 message_delta，让客户端能正常结束本轮。
+fn finish_sse_after_error(mut send: impl FnMut(String), message: &str) {
+    send(sse_event(
+        "error",
+        &json!({
+            "type": "error",
+            "error": { "type": "api_error", "message": message },
+        }),
+    ));
+
+    let error_text = if message.trim().is_empty() {
+        "API Error: upstream request failed".to_string()
+    } else if message.trim().starts_with("API Error:") {
+        message.trim().to_string()
+    } else {
+        format!("API Error: {message}")
+    };
+
+    let mut started = false;
+    let mut out = String::new();
+    emit_text_block_sse(&mut started, 0, &error_text, &mut out);
+    if !out.is_empty() {
+        send(out);
+        send(sse_event(
+            "content_block_stop",
+            &json!({ "type": "content_block_stop", "index": 0 }),
+        ));
+    }
+
+    send(sse_event(
+        "message_delta",
+        &json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+            "usage": { "output_tokens": estimate_tokens(&error_text) },
+        }),
+    ));
+    send(sse_event("message_stop", &json!({ "type": "message_stop" })));
+}
+
+fn emit_sse_message_delta_stop(mut send: impl FnMut(String), stop_reason: &str, output_tokens: i64) {
+    send(sse_event(
+        "message_delta",
+        &json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+            "usage": { "output_tokens": output_tokens },
+        }),
+    ));
+    send(sse_event("message_stop", &json!({ "type": "message_stop" })));
+}
+
 /// 把 mpsc 字节块适配成 Read，供 tiny_http 以 chunked 方式边写边发。
 struct ChannelReader {
     rx: Receiver<Vec<u8>>,
@@ -501,13 +557,47 @@ fn pipe_kiro_body_to_anthropic_sse(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
+                // 已 message_start：必须补 message_delta，否则 Claude Code 报 ede_diagnostic
+                let msg = format!("读取 Kiro 流失败: {e}");
                 send(sse_event(
                     "error",
                     &json!({
                         "type": "error",
-                        "error": { "type": "api_error", "message": format!("读取 Kiro 流失败: {e}") },
+                        "error": { "type": "api_error", "message": msg },
                     }),
                 ));
+                let had_assistant_content =
+                    text_started || thinking_started || saw_native_tool || !full_text.is_empty();
+                close_thinking_block_sse(
+                    &mut thinking_started,
+                    thinking_block_index,
+                    &thinking_signature,
+                    &mut send,
+                );
+                if text_started {
+                    let index = text_block_index.unwrap_or(0);
+                    send(sse_event(
+                        "content_block_stop",
+                        &json!({ "type": "content_block_stop", "index": index }),
+                    ));
+                    text_started = false;
+                }
+                // 若本轮尚未产出任何助手内容，补一条 API Error 文本，避免 result_type=user
+                if !had_assistant_content {
+                    let error_text = format!("API Error: {msg}");
+                    let mut started = false;
+                    let index = block_counter;
+                    let mut out = String::new();
+                    emit_text_block_sse(&mut started, index, &error_text, &mut out);
+                    if !out.is_empty() {
+                        send(out);
+                        send(sse_event(
+                            "content_block_stop",
+                            &json!({ "type": "content_block_stop", "index": index }),
+                        ));
+                    }
+                }
+                emit_sse_message_delta_stop(&mut send, "end_turn", estimate_tokens(&full_text));
                 return;
             }
         };
@@ -743,7 +833,7 @@ fn respond_sse_stream_fetch(
 ) {
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
     let producer = thread::spawn(move || {
-        let send = |chunk: String| {
+        let mut send = |chunk: String| {
             let _ = tx.send(chunk.into_bytes());
         };
 
@@ -775,11 +865,8 @@ fn respond_sse_stream_fetch(
         ) {
             Ok(response) => response,
             Err(e) => {
-                send(sse_event(
-                    "error",
-                    &json!({ "type": "error", "error": { "type": "api_error", "message": e } }),
-                ));
-                send(sse_event("message_stop", &json!({ "type": "message_stop" })));
+                // 已提前 message_start：不可只发 error + message_stop（会触发 ede_diagnostic）
+                finish_sse_after_error(&mut send, &e);
                 let _ = tx.send(Vec::new());
                 return;
             }
@@ -798,11 +885,7 @@ fn respond_sse_stream_fetch(
                         .map(|s| s.to_string())
                 })
                 .unwrap_or(text);
-            send(sse_event(
-                "error",
-                &json!({ "type": "error", "error": { "type": "api_error", "message": message } }),
-            ));
-            send(sse_event("message_stop", &json!({ "type": "message_stop" })));
+            finish_sse_after_error(&mut send, &message);
             let _ = tx.send(Vec::new());
             return;
         }
