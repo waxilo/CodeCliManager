@@ -16,6 +16,9 @@ use serde_json::{json, Value};
 const TOKEN_REFRESH_SKEW_SECS: i64 = 120;
 /// 避免 Windows 网络异常时无超时阻塞导致 UI/IPC 卡死
 const KIRO_HTTP_TIMEOUT_SECS: u64 = 30;
+/// Kiro 生成/流式请求的总超时：单次 GenerateAssistantResponse（含长思考/大上下文）可能远超 30s，
+/// 不能用短超时一刀切，否则会话越用越长后流会被中途切断。
+const KIRO_RUNTIME_TIMEOUT_SECS: u64 = 1500;
 const PROFILE_ARN_RE: &str = r"^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:profile/[A-Za-z0-9_-]+$";
 
 #[derive(Default)]
@@ -45,7 +48,11 @@ pub struct Auth {
     pub sso_cache_dir: PathBuf,
     pub profile_arn_override: Option<String>,
     pub management_url: String,
+    /// 认证/控制面客户端：短超时（30s），用于 OIDC 刷新、ListAvailableModels、Profile 发现等。
     pub http: Client,
+    /// 生成/流式客户端：长超时（1500s），用于 GenerateAssistantResponse 及其流式 body 读取，
+    /// 避免单次长生成或大上下文会话被短超时切断。
+    pub runtime: Client,
     cache: Mutex<AuthCache>,
 }
 
@@ -60,11 +67,17 @@ impl Auth {
             .timeout(Duration::from_secs(KIRO_HTTP_TIMEOUT_SECS))
             .build()
             .unwrap_or_else(|_| Client::new());
+        let runtime = Client::builder()
+            .connect_timeout(Duration::from_secs(KIRO_HTTP_TIMEOUT_SECS))
+            .timeout(Duration::from_secs(KIRO_RUNTIME_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
             sso_cache_dir,
             profile_arn_override,
             management_url,
             http,
+            runtime,
             cache: Mutex::new(AuthCache::default()),
         }
     }
@@ -570,10 +583,33 @@ impl Auth {
     /// 拉取当前账户可用模型列表（Kiro 模型 ID），带缓存。
     /// 账户套餐可能不含 Claude 模型（如仅有 GPT/DeepSeek/GLM 等），
     /// 代理据此做默认模型与降级选择，避免向 Kiro 请求不可用模型。
+    ///
+    /// 管理面网络/上游失败时回退到上次成功缓存：请求热路径在弱网下不会
+    /// 每次都等满 30s 短超时，而是用已缓存的模型列表继续服务。
     pub fn list_available_models(&self) -> Result<Vec<String>, String> {
         if let Some(cached) = self.cache.lock().ok().and_then(|c| c.cached_available_models.clone()) {
             return Ok(cached);
         }
+        match self.fetch_available_models() {
+            Ok(ids) => {
+                if !ids.is_empty() {
+                    if let Ok(mut cache) = self.cache.lock() {
+                        cache.cached_available_models = Some(ids.clone());
+                    }
+                }
+                Ok(ids)
+            }
+            Err(e) => {
+                if let Some(cached) = self.cache.lock().ok().and_then(|c| c.cached_available_models.clone()) {
+                    return Ok(cached);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// 实际打 `ListAvailableModels` 的拉取逻辑（不含缓存兜底），供 list_available_models 调用。
+    fn fetch_available_models(&self) -> Result<Vec<String>, String> {
         let profile_arn = match self.get_sso_profile_arn() {
             Some(arn) => arn,
             None => match self.discover_profile_arn()? {
@@ -610,9 +646,6 @@ impl Auth {
                     }
                 }
             }
-        }
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.cached_available_models = Some(ids.clone());
         }
         Ok(ids)
     }

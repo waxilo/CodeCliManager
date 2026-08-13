@@ -7,14 +7,16 @@
 //! - POST /v1/messages/count_tokens → token 估算
 //! - POST /v1/messages        → 对话（SSE 流式 / 非流式）
 
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::io::{self, Read};
+use std::hash::{Hash, Hasher};
+use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use reqwest::blocking::{Client, Response as ReqwestResponse};
 use serde_json::{json, Value};
@@ -37,6 +39,275 @@ use crate::protocol_guard::{normalize_stop_reason, sanitize_protocol_text, Proto
 
 const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 16;
+/// 连续失败达到该阈值时，判定进入了「Claude Code 重试」状态，重试请求前先自检/恢复代理。
+/// 阈值 = 1 表示首次失败后、下一次请求（往往就是第一次重试）前就恢复，最多浪费一次尝试。
+const RETRY_HEALTH_THRESHOLD: usize = 1;
+/// 自检恢复的最小间隔，避免高频失败时反复打 OIDC。
+const RETRY_RECOVERY_MIN_INTERVAL: Duration = Duration::from_secs(5);
+/// 连续失败的有效时间窗：窗口外的失败不视为「正在重试」。
+const RETRY_HEALTH_WINDOW: Duration = Duration::from_secs(30);
+/// 等待 Kiro 首字节 / 事件间隙期间的心跳间隔。SSE 注释行，客户端必须忽略；
+/// 防止连接长时间空转被 CC / 系统 idle timeout 掐断（「用着用着就超时」的根因之一）。
+const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
+/// 完成响应可被同 body 请求重放的有效期。
+const DEDUP_TTL: Duration = Duration::from_secs(300);
+/// 同 body 请求撞上 in-flight 时，等待原请求完成的最大时长；超时返回 429 让客户端稍后重试。
+const DEDUP_REPLAY_WAIT: Duration = Duration::from_secs(5);
+/// 重放缓冲上限，超过则放弃缓冲（该请求不再可重放），避免内存膨胀。
+const DEDUP_BUFFER_CAP: usize = 16 * 1024 * 1024;
+
+/// 代理自愈状态：跟踪连续失败（重试风暴），在重试请求前自检并恢复 token / ARN / 模型缓存。
+///
+/// 只做认证/控制面恢复，**不重放生成请求**，因此不会额外消耗 Kiro Credits——
+/// 重试请求本身由 Claude Code 发出（必然生成一次），这里保证它带着有效凭据去打。
+struct ProxyHealth {
+    consecutive_failures: AtomicUsize,
+    last_failure: Mutex<Option<Instant>>,
+    recovery_lock: Mutex<()>,
+    last_recovery: Mutex<Option<Instant>>,
+}
+
+impl ProxyHealth {
+    fn new() -> Self {
+        Self {
+            consecutive_failures: AtomicUsize::new(0),
+            last_failure: Mutex::new(None),
+            recovery_lock: Mutex::new(()),
+            last_recovery: Mutex::new(None),
+        }
+    }
+
+    fn record_success(&self) {
+        self.consecutive_failures.store(0, Ordering::SeqCst);
+    }
+
+    fn record_failure(&self) {
+        self.consecutive_failures.fetch_add(1, Ordering::SeqCst);
+        if let Ok(mut guard) = self.last_failure.lock() {
+            *guard = Some(Instant::now());
+        }
+    }
+
+    /// 是否需要请求前自检：窗口内连续失败达到阈值（即很可能正被 Claude Code 重试）。
+    fn needs_preflight(&self) -> bool {
+        let count = self.consecutive_failures.load(Ordering::SeqCst);
+        if count == 0 {
+            return false;
+        }
+        let recent = self
+            .last_failure
+            .lock()
+            .map(|g| {
+                g.map(|t| t.elapsed() < RETRY_HEALTH_WINDOW)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if !recent {
+            self.consecutive_failures.store(0, Ordering::SeqCst);
+            return false;
+        }
+        count >= RETRY_HEALTH_THRESHOLD
+    }
+
+    /// 请求前自检 + 恢复：强制刷新凭据、重拉 ARN / 模型缓存。
+    /// 带互斥与冷却期，避免并发请求同时触发恢复；全部尽力而为，失败不阻断请求。
+    fn run_preflight_recovery(&self, auth: &Auth) {
+        let Ok(_guard) = self.recovery_lock.try_lock() else {
+            return; // 已有请求正在恢复，跳过本次
+        };
+        let now = Instant::now();
+        let within_cooldown = self
+            .last_recovery
+            .lock()
+            .map(|g| {
+                g.map(|t| now.duration_since(t) < RETRY_RECOVERY_MIN_INTERVAL)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+        if within_cooldown {
+            return;
+        }
+        if let Ok(mut guard) = self.last_recovery.lock() {
+            *guard = Some(now);
+        }
+
+        match auth.force_refresh() {
+            Ok((true, _)) => eprintln!("[kiro] preflight recovery: credentials refreshed"),
+            Ok((false, _)) => eprintln!("[kiro] preflight recovery: no refreshToken (env auth?)"),
+            Err(e) => eprintln!("[kiro] preflight recovery: credential refresh failed: {e}"),
+        }
+        match auth.discover_profile_arn() {
+            Ok(_) => {}
+            Err(e) => eprintln!("[kiro] preflight recovery: discover_profile_arn failed: {e}"),
+        }
+        match auth.list_available_models() {
+            Ok(_) => {}
+            Err(e) => eprintln!("[kiro] preflight recovery: list_available_models failed: {e}"),
+        }
+    }
+}
+
+/// 同 body 请求的去重存储：in-flight 时复用/429，完成后短 TTL 内重放缓冲的完整 SSE。
+///
+/// 重试/重发同一条消息时，若原生成还在进行或已完成，直接复用其结果，**不再打一次 Kiro 生成**，
+/// 从而结构性保证不重复扣 Credits。缓冲有上限，超限的请求不做重放。
+struct DedupStore {
+    entries: Mutex<HashMap<u64, Arc<DedupEntry>>>,
+}
+
+#[derive(Clone)]
+enum DedupStatus {
+    InFlight,
+    Completed,
+    Failed,
+}
+
+struct DedupEntry {
+    buffer: Mutex<Vec<u8>>,
+    status: Mutex<DedupStatus>,
+    created: Instant,
+    overflow: AtomicBool,
+}
+
+#[derive(Debug)]
+enum DedupLookup {
+    Miss,
+    Replay(Vec<u8>),
+    Busy,
+}
+
+impl DedupStore {
+    fn new() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 同 body 请求的稳定指纹：以原始 Anthropic body 的紧凑 JSON 为准。
+    /// 客户端重试/重发同一条消息时字节级一致，天然稳定。
+    fn fingerprint(body: &Value) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        body.to_string().hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn lookup(&self, key: u64) -> DedupLookup {
+        let entry = {
+            let entries = match self.entries.lock() {
+                Ok(g) => g,
+                Err(_) => return DedupLookup::Miss,
+            };
+            match entries.get(&key) {
+                Some(e) => Arc::clone(e),
+                None => return DedupLookup::Miss,
+            }
+        };
+        let status = entry.status.lock().map(|g| g.clone()).unwrap_or(DedupStatus::Failed);
+        match status {
+            DedupStatus::Completed if entry.created.elapsed() >= DEDUP_TTL => {
+                self.remove(&key);
+                DedupLookup::Miss
+            }
+            DedupStatus::Completed => self.replay_or_clear(entry, key),
+            DedupStatus::Failed => {
+                self.remove(&key);
+                DedupLookup::Miss
+            }
+            DedupStatus::InFlight => {
+                // 原请求仍在生成：等它完成（至多 DEDUP_REPLAY_WAIT），完成后直接重放。
+                let deadline = Instant::now() + DEDUP_REPLAY_WAIT;
+                loop {
+                    let done = match entry.status.lock().map(|g| g.clone()).unwrap_or(DedupStatus::Failed) {
+                        DedupStatus::Completed => true,
+                        DedupStatus::Failed => {
+                            self.remove(&key);
+                            return DedupLookup::Miss;
+                        }
+                        _ => false,
+                    };
+                    if done {
+                        break;
+                    }
+                    if Instant::now() >= deadline {
+                        return DedupLookup::Busy;
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                self.replay_or_clear(entry, key)
+            }
+        }
+    }
+
+    fn replay_or_clear(&self, entry: Arc<DedupEntry>, key: u64) -> DedupLookup {
+        if entry.overflow.load(Ordering::Relaxed) {
+            self.remove(&key);
+            return DedupLookup::Miss;
+        }
+        let bytes = entry.buffer.lock().map(|g| g.clone()).unwrap_or_default();
+        if bytes.is_empty() {
+            self.remove(&key);
+            return DedupLookup::Miss;
+        }
+        DedupLookup::Replay(bytes)
+    }
+
+    fn register(&self, key: u64) -> Arc<DedupEntry> {
+        // 顺手清掉过期条目，避免长期 in-flight（如挂死线程）撑爆内存
+        if let Ok(mut entries) = self.entries.lock() {
+            if entries.len() >= 64 {
+                let now = Instant::now();
+                entries.retain(|_, e| now.duration_since(e.created) < DEDUP_TTL);
+            }
+            let entry = Arc::new(DedupEntry {
+                buffer: Mutex::new(Vec::new()),
+                status: Mutex::new(DedupStatus::InFlight),
+                created: Instant::now(),
+                overflow: AtomicBool::new(false),
+            });
+            entries.insert(key, Arc::clone(&entry));
+            return entry;
+        }
+        Arc::new(DedupEntry {
+            buffer: Mutex::new(Vec::new()),
+            status: Mutex::new(DedupStatus::InFlight),
+            created: Instant::now(),
+            overflow: AtomicBool::new(false),
+        })
+    }
+
+    fn append(&self, entry: &DedupEntry, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let mut buf = match entry.buffer.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if buf.len() + bytes.len() > DEDUP_BUFFER_CAP {
+            entry.overflow.store(true, Ordering::Relaxed);
+            return;
+        }
+        buf.extend_from_slice(bytes);
+    }
+
+    fn mark_completed(&self, entry: &DedupEntry) {
+        if let Ok(mut s) = entry.status.lock() {
+            *s = DedupStatus::Completed;
+        }
+    }
+
+    fn mark_failed(&self, entry: &DedupEntry) {
+        if let Ok(mut s) = entry.status.lock() {
+            *s = DedupStatus::Failed;
+        }
+    }
+
+    fn remove(&self, key: &u64) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.remove(key);
+        }
+    }
+}
 
 #[derive(Debug)]
 enum BodyReadError {
@@ -167,6 +438,9 @@ pub fn start_proxy(mut config: ProxyConfig) -> Result<ProxyHandle, String> {
     let stop_flag = stop.clone();
     let thread_config = config.clone();
     let active_requests = Arc::new(AtomicUsize::new(0));
+    let warmup_auth = Arc::clone(&auth);
+    let health = Arc::new(ProxyHealth::new());
+    let dedup = Arc::new(DedupStore::new());
 
     let handle = thread::spawn(move || {
         loop {
@@ -188,9 +462,11 @@ pub fn start_proxy(mut config: ProxyConfig) -> Result<ProxyHandle, String> {
                     };
                     let auth = auth.clone();
                     let config = thread_config.clone();
+                    let health = Arc::clone(&health);
+                    let dedup = Arc::clone(&dedup);
                     thread::spawn(move || {
                         let _permit = permit;
-                        handle_request(request, &config, &auth);
+                        handle_request(request, &config, &auth, health, dedup);
                     });
                 }
                 Ok(None) => {}
@@ -199,12 +475,33 @@ pub fn start_proxy(mut config: ProxyConfig) -> Result<ProxyHandle, String> {
         }
     });
 
+    // 后台预热 profile ARN 与可用模型列表，避免冷缓存时首条请求在热路径上等管理面网络调用。
+    // 无凭据时这些调用立即返回，不产生网络开销。
+    {
+        thread::spawn(move || {
+            match warmup_auth.discover_profile_arn() {
+                Ok(_) => {}
+                Err(e) => eprintln!("[kiro] warmup discover_profile_arn failed: {e}"),
+            }
+            match warmup_auth.list_available_models() {
+                Ok(_) => {}
+                Err(e) => eprintln!("[kiro] warmup list_available_models failed: {e}"),
+            }
+        });
+    }
+
     Ok(ProxyHandle { port, stop, thread: Some(handle) })
 }
 
 // ============ 路由 ============
 
-fn handle_request(request: Request, config: &ProxyConfig, auth: &Arc<Auth>) {
+fn handle_request(
+    request: Request,
+    config: &ProxyConfig,
+    auth: &Arc<Auth>,
+    health: Arc<ProxyHealth>,
+    dedup: Arc<DedupStore>,
+) {
     // Host 校验：仅接受本机回环地址，阻断 DNS rebinding（浏览器把恶意域名解析到 127.0.0.1）
     let host_ok = request
         .headers()
@@ -252,7 +549,7 @@ fn handle_request(request: Request, config: &ProxyConfig, auth: &Arc<Auth>) {
         (Method::Get, "/") | (Method::Get, "/health") => handle_health(request, config, auth),
         (Method::Get, "/v1/models") => handle_models(request, config, auth),
         (Method::Post, "/v1/messages/count_tokens") => handle_count_tokens(request, config),
-        (Method::Post, "/v1/messages") => handle_messages(request, config, auth),
+        (Method::Post, "/v1/messages") => handle_messages(request, config, auth, health, dedup),
         _ => {
             let body = json!({ "type": "error", "error": { "type": "invalid_request_error", "message": format!("No route for {method} {path}") } });
             json_response(request, 404, &body);
@@ -684,7 +981,7 @@ fn emit_fallback_text_block_sse(
     ));
 }
 
-/// 解析上游 Event Stream，边收边推 Anthropic SSE。
+/// 解析上游 Event Stream，边收边推 Anthropic SSE。返回是否干净结束（流是否被完整读完）。
 ///
 /// 原生 `toolUseEvent` 是主路径：文本增量不再为 tools 整包缓冲。
 /// 仅当内容像「文本里嵌 tool JSON」时短暂暂缓；真正的 tool 调用走增量 toolUseEvent。
@@ -692,7 +989,7 @@ fn pipe_kiro_body_to_anthropic_sse(
     response: ReqwestResponse,
     _has_tools: bool,
     mut send: impl FnMut(String),
-) {
+) -> bool {
     let mut parser = IncrementalEventStream::new();
     let mut reader = response;
     let mut read_buf = [0u8; 8192];
@@ -756,7 +1053,7 @@ fn pipe_kiro_body_to_anthropic_sse(
                     );
                 }
                 emit_sse_message_delta_stop(&mut send, "end_turn", estimate_tokens(&full_text));
-                return;
+                return false;
             }
         };
 
@@ -1009,6 +1306,7 @@ fn pipe_kiro_body_to_anthropic_sse(
         }),
     ));
     send(sse_event("message_stop", &json!({ "type": "message_stop" })));
+    true
 }
 
 /// 先立刻打开 SSE（message_start），再请求 Kiro；避免等上游整包结束后才开始响应。
@@ -1020,10 +1318,53 @@ fn respond_sse_stream_fetch(
     runtime_url: String,
     built: Value,
     has_tools: bool,
+    health: Arc<ProxyHealth>,
+    dedup_key: Option<u64>,
+    dedup: Arc<DedupStore>,
 ) {
+    // 同 body 去重：已生成完（TTL 内）→ 直接重放，不再打 Kiro；仍在生成 → 429 让客户端稍后重试命中重放。
+    // 只在响应还没开始时判定，因此不会破坏「200 后不可重试」的流式语义。
+    if let Some(key) = dedup_key {
+        match dedup.lookup(key) {
+            DedupLookup::Replay(bytes) => {
+                return respond_replayed_sse(request, bytes);
+            }
+            DedupLookup::Busy => {
+                return error_response(
+                    request,
+                    429,
+                    "A request with the same body is already in progress; retry shortly.",
+                    "rate_limit_error",
+                );
+            }
+            DedupLookup::Miss => {}
+        }
+    }
+    // Miss：注册去重条目（可选，busy 降级时不再注册，避免覆盖原条目）
+    let entry = dedup_key.map(|key| dedup.register(key));
+
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
+    // 心跳：producer 阻塞等 Kiro 首字节 / 事件间隙期间持续发 SSE 注释，防止连接空转被掐。
+    let hb_tx = tx.clone();
+    let done = Arc::new(AtomicBool::new(false));
+    let hb_done = Arc::clone(&done);
+    thread::spawn(move || {
+        while !hb_done.load(Ordering::Relaxed) {
+            thread::sleep(SSE_HEARTBEAT_INTERVAL);
+            if hb_done.load(Ordering::Relaxed) {
+                break;
+            }
+            // try_send：通道满（说明数据在流动）时跳过，绝不阻塞心跳
+            let _ = hb_tx.try_send(b": keepalive\n\n".to_vec());
+        }
+    });
+
+    let eof_tx = tx.clone();
     let producer = thread::spawn(move || {
         let mut send = |chunk: String| {
+            if let Some(e) = &entry {
+                dedup.append(e, chunk.as_bytes());
+            }
             let _ = tx.send(chunk.into_bytes());
         };
 
@@ -1047,7 +1388,7 @@ fn respond_sse_stream_fetch(
         send(": keepalive\n\n".to_string());
 
         let upstream = match kiro_post(
-            &auth.http,
+            &auth.runtime,
             auth.as_ref(),
             &runtime_url,
             "KiroRuntimeService.GenerateAssistantResponse",
@@ -1055,15 +1396,24 @@ fn respond_sse_stream_fetch(
         ) {
             Ok(response) => response,
             Err(e) => {
+                health.record_failure();
+                if let Some(e) = &entry {
+                    dedup.mark_failed(e);
+                }
                 // 已提前 message_start：不可只发 error + message_stop（会触发 ede_diagnostic）
                 finish_sse_after_error(&mut send, &e);
-                let _ = tx.send(Vec::new());
+                let _ = eof_tx.send(Vec::new());
+                done.store(true, Ordering::Relaxed);
                 return;
             }
         };
 
         let status = upstream.status();
         if !status.is_success() {
+            health.record_failure();
+            if let Some(e) = &entry {
+                dedup.mark_failed(e);
+            }
             let bytes = upstream.bytes().unwrap_or_default();
             let text = String::from_utf8_lossy(&bytes).to_string();
             let message = serde_json::from_str::<Value>(&text)
@@ -1076,12 +1426,25 @@ fn respond_sse_stream_fetch(
                 })
                 .unwrap_or(text);
             finish_sse_after_error(&mut send, &message);
-            let _ = tx.send(Vec::new());
+            let _ = eof_tx.send(Vec::new());
+            done.store(true, Ordering::Relaxed);
             return;
         }
 
-        pipe_kiro_body_to_anthropic_sse(upstream, has_tools, send);
-        let _ = tx.send(Vec::new());
+        let clean = pipe_kiro_body_to_anthropic_sse(upstream, has_tools, send);
+        if clean {
+            health.record_success();
+            if let Some(e) = &entry {
+                dedup.mark_completed(e);
+            }
+        } else {
+            health.record_failure();
+            if let Some(e) = &entry {
+                dedup.mark_failed(e);
+            }
+        }
+        let _ = eof_tx.send(Vec::new());
+        done.store(true, Ordering::Relaxed);
     });
 
     let reader = ChannelReader {
@@ -1102,6 +1465,19 @@ fn respond_sse_stream_fetch(
 
     let _ = request.respond(response);
     let _ = producer.join();
+}
+
+/// 把已缓冲的完整 SSE 流原样回放给客户端（同 body 请求的复用路径，不产生新的 Kiro 生成）。
+fn respond_replayed_sse(request: Request, bytes: Vec<u8>) {
+    let mut headers = vec![
+        Header::from_bytes("Content-Type", "text/event-stream; charset=utf-8").unwrap(),
+        Header::from_bytes("Cache-Control", "no-cache").unwrap(),
+        Header::from_bytes("Connection", "keep-alive").unwrap(),
+        Header::from_bytes("X-Accel-Buffering", "no").unwrap(),
+    ];
+    headers.extend(cors_headers_for(&request));
+    let response = Response::new(StatusCode(200), headers, Cursor::new(bytes), None, None);
+    let _ = request.respond(response);
 }
 
 // ============ Kiro 上游调用 ============
@@ -1311,10 +1687,23 @@ fn handle_count_tokens(mut request: Request, config: &ProxyConfig) {
     json_response(request, 200, &json!({ "input_tokens": estimate_tokens(&text) }));
 }
 
-fn handle_messages(mut request: Request, config: &ProxyConfig, auth: &Arc<Auth>) {
+fn handle_messages(
+    mut request: Request,
+    config: &ProxyConfig,
+    auth: &Arc<Auth>,
+    health: Arc<ProxyHealth>,
+    dedup: Arc<DedupStore>,
+) {
     if !check_proxy_auth(&request, config) {
         return error_response(request, 401, "Invalid proxy API key.", "authentication_error");
     }
+
+    // 检测到连续失败（Claude Code 重试风暴）时，先自检/恢复代理状态再继续服务，
+    // 避免重试请求带着失效凭据/过期 token 再白白打一次生成。恢复只碰认证/控制面，不扣 Credits。
+    if health.needs_preflight() {
+        health.run_preflight_recovery(auth);
+    }
+
     let body = match read_json_body(&mut request) {
         Ok(body) => body,
         Err(error) => return respond_body_error(request, error),
@@ -1324,7 +1713,10 @@ fn handle_messages(mut request: Request, config: &ProxyConfig, auth: &Arc<Auth>)
     let kiro_model = resolve_kiro_model(auth, model, &config.default_model);
     let profile_arn = match resolve_profile_arn(auth) {
         Ok(arn) => arn,
-        Err(e) => return error_response(request, 502, &e, "api_error"),
+        Err(e) => {
+            health.record_failure();
+            return error_response(request, 502, &e, "api_error");
+        }
     };
 
     let built = match build_kiro_request(&body, &kiro_model, profile_arn.as_deref()) {
@@ -1343,6 +1735,8 @@ fn handle_messages(mut request: Request, config: &ProxyConfig, auth: &Arc<Auth>)
 
     // 先发 SSE 头/message_start，再请求 Kiro；文本按节奏拆开，改善“整包突发”观感
     if is_stream {
+        // 去重仅对流式生成生效（Claude Code 的主路径）
+        let dedup_key = Some(DedupStore::fingerprint(&body));
         return respond_sse_stream_fetch(
             request,
             id,
@@ -1351,12 +1745,18 @@ fn handle_messages(mut request: Request, config: &ProxyConfig, auth: &Arc<Auth>)
             config.runtime_url.clone(),
             built,
             has_tools,
+            health,
+            dedup_key,
+            dedup,
         );
     }
 
-    let events = match call_kiro_generate(&auth.http, auth, config, &built) {
+    let events = match call_kiro_generate(&auth.runtime, auth, config, &built) {
         Ok(events) => events,
-        Err(e) => return error_response(request, 502, &e, "api_error"),
+        Err(e) => {
+            health.record_failure();
+            return error_response(request, 502, &e, "api_error");
+        }
     };
     let mut collected = collect_kiro_text(&events);
     let (visible_text, protocol_leak_detected) = sanitize_protocol_text(&collected.text);
@@ -1376,6 +1776,7 @@ fn handle_messages(mut request: Request, config: &ProxyConfig, auth: &Arc<Auth>)
         &collected.tool_uses,
         &collected.stop_reason,
     );
+    health.record_success();
     json_response(request, 200, &response);
 }
 
@@ -1423,6 +1824,51 @@ mod tests {
     #[test]
     fn waits_on_short_json_prefix() {
         assert_eq!(classify_stream_content("{\"type\":"), None);
+    }
+
+    #[test]
+    fn dedup_replays_completed_buffer_within_ttl() {
+        let store = DedupStore::new();
+        let entry = store.register(42);
+        store.append(&entry, b"event: message_start\ndata: {}\n\n".as_ref());
+        store.append(&entry, b"event: message_stop\ndata: {}\n\n".as_ref());
+        store.mark_completed(&entry);
+        match store.lookup(42) {
+            DedupLookup::Replay(bytes) => {
+                let text = String::from_utf8_lossy(&bytes);
+                assert!(text.contains("message_start"));
+                assert!(text.contains("message_stop"));
+            }
+            other => panic!("expected Replay, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dedup_failed_entry_is_removed() {
+        let store = DedupStore::new();
+        let entry = store.register(7);
+        store.mark_failed(&entry);
+        assert!(matches!(store.lookup(7), DedupLookup::Miss));
+    }
+
+    #[test]
+    fn dedup_overflow_disables_replay() {
+        let store = DedupStore::new();
+        let entry = store.register(9);
+        store.append(&entry, vec![b'x'; DEDUP_BUFFER_CAP].as_ref());
+        // 越过上限后标记 overflow，不再继续缓冲
+        store.append(&entry, b"extra".as_ref());
+        store.mark_completed(&entry);
+        assert!(matches!(store.lookup(9), DedupLookup::Miss));
+    }
+
+    #[test]
+    fn dedup_fingerprint_is_stable_and_distinct() {
+        let a = json!({ "model": "claude", "messages": [{ "role": "user", "content": "hi" }], "stream": true });
+        let b = json!({ "model": "claude", "messages": [{ "role": "user", "content": "hi" }], "stream": true });
+        let c = json!({ "model": "claude", "messages": [{ "role": "user", "content": "hi!" }], "stream": true });
+        assert_eq!(DedupStore::fingerprint(&a), DedupStore::fingerprint(&b));
+        assert_ne!(DedupStore::fingerprint(&a), DedupStore::fingerprint(&c));
     }
 
     #[test]
