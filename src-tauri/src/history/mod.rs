@@ -441,7 +441,10 @@ pub(crate) fn effective_message_uuids(lines: &[serde_json::Value]) -> Option<Has
         .and_then(|uuid| uuid.as_str())
         .map(str::to_string)?;
     let mut parents = HashMap::new();
-    for value in linked {
+    let mut compact_uuids = HashSet::new();
+    let mut system_uuids = HashSet::new();
+    let mut positions: HashMap<String, usize> = HashMap::new();
+    for (idx, value) in lines.iter().enumerate() {
         if let Some(uuid) = value.get("uuid").and_then(|uuid| uuid.as_str()) {
             parents.insert(
                 uuid.to_string(),
@@ -450,16 +453,45 @@ pub(crate) fn effective_message_uuids(lines: &[serde_json::Value]) -> Option<Has
                     .and_then(|parent| parent.as_str())
                     .map(str::to_string),
             );
+            positions.insert(uuid.to_string(), idx);
+            if value.get("isCompactSummary").and_then(|flag| flag.as_bool()) == Some(true) {
+                compact_uuids.insert(uuid.to_string());
+            }
+            if value.get("type").and_then(|kind| kind.as_str()) == Some("system") {
+                system_uuids.insert(uuid.to_string());
+            }
         }
     }
 
+    // 主链后向遍历。会话被压缩（isCompactSummary）时，Claude 会插入一条 system 行并重挂根，
+    // 压缩点之前的所有消息（含首条用户消息）都会从主链断开。遇到 compact summary 时，
+    // 把压缩点之前那段历史的末尾重新并入，否则整段旧历史会在 CCM 里消失。
     let mut active = HashSet::new();
-    let mut cursor = Some(current_uuid);
-    while let Some(uuid) = cursor {
+    let mut stack: Vec<String> = vec![current_uuid];
+    while let Some(uuid) = stack.pop() {
         if !active.insert(uuid.clone()) {
-            break;
+            continue;
         }
-        cursor = parents.get(&uuid).cloned().flatten();
+        if compact_uuids.contains(&uuid) {
+            if let Some(compact_pos) = positions.get(&uuid) {
+                if let Some(prev_uuid) = lines[..*compact_pos]
+                    .iter()
+                    .rev()
+                    .filter_map(|value| value.get("uuid").and_then(|uuid| uuid.as_str()))
+                    .find(|candidate| {
+                        let candidate = *candidate;
+                        !active.contains(candidate)
+                            && !compact_uuids.contains(candidate)
+                            && !system_uuids.contains(candidate)
+                    })
+                {
+                    stack.push(prev_uuid.to_string());
+                }
+            }
+        }
+        if let Some(parent) = parents.get(&uuid).cloned().flatten() {
+            stack.push(parent);
+        }
     }
     Some(active)
 }
@@ -1368,6 +1400,30 @@ mod tests {
         assert_eq!(content, vec!["question", "new answer"]);
         assert_eq!(conversation.messages[0].id, "msg_root_0");
         assert_eq!(conversation.messages[1].id, "msg_new_0");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn compacted_session_keeps_pre_compaction_history() {
+        // 会话被压缩后，Claude 以 system 行重挂根，压缩前消息从主链断开。
+        // 它们必须仍保留在 CCM 视图里（首条用户消息尤其不能丢）。
+        let contents = concat!(
+            r#"{"sessionId":"compact","uuid":"root","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"first question"}}"#,
+            "\n",
+            r#"{"sessionId":"compact","uuid":"a1","parentUuid":"root","type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":"first answer"}}"#,
+            "\n",
+            r#"{"sessionId":"compact","uuid":"sys","parentUuid":null,"type":"system","timestamp":"2026-01-01T00:00:02Z"}"#,
+            "\n",
+            r#"{"sessionId":"compact","uuid":"summary","parentUuid":"sys","type":"user","isCompactSummary":true,"timestamp":"2026-01-01T00:00:03Z","message":{"role":"user","content":"Summary of prior context"}}"#,
+            "\n",
+            r#"{"sessionId":"compact","uuid":"a2","parentUuid":"summary","type":"assistant","timestamp":"2026-01-01T00:00:04Z","message":{"role":"assistant","content":"continued answer"}}"#,
+        );
+        let path = temp_jsonl("compact.jsonl", contents);
+        let conversation = parse_claude_session(&path).unwrap();
+        let content: Vec<&str> = conversation.messages.iter().map(|message| message.content.as_str()).collect();
+        assert_eq!(content, vec!["first question", "first answer", "continued answer"]);
+        assert_eq!(conversation.messages[0].id, "msg_root_0");
+        assert_eq!(conversation.messages[2].id, "msg_a2_0");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
