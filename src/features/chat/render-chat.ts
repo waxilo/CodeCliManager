@@ -4,7 +4,7 @@ import { escapeHtml } from '../../utils';
 import * as api from '../../api';
 import { renderMessageListHtml, TOOL_CONFIG_MAP, getDefaultToolConfig, extractToolUseId, processToolMessages } from './render-messages';
 import { getEffectiveProjectDir } from './session-context';
-import { renderCopyIconHtml } from './input-composer';
+import { renderCopyIconHtml, renderInputComposerHtml } from './input-composer';
 import { getActiveChatModelForRender } from './model-picker';
 import { dedupeAdjacentDuplicateMessages, getActiveConversation } from '../conversations/normalize';
 import { normalizeMessageForCompare } from '../files/index';
@@ -181,6 +181,49 @@ export function renderChatContent(): string {
     <div class="message-list" id="message-list">
       ${renderConversationMessagesInnerHtml(messages)}
     </div>
+  `;
+}
+
+/**
+ * 聊天主区的唯一结构来源。全量渲染（performRender）与增量挂载（ensureChatMessageShell）
+ * 都从这里取结构，杜绝两个路径在 DOM 顺序 / 类名上漂移。
+ *
+ * shellOnly 时消息列表留空（内容由 refreshChatContent 填充），
+ * 供空状态 → 会话的增量路径挂载；全量渲染则直接内嵌消息。
+ */
+export function renderChatAreaHtml(opts: { shellOnly?: boolean } = {}): string {
+  const conversation = getActiveConversation();
+  const hasActive = Boolean(appState.activeConversationId || appState.pendingUserMessage);
+  const messagesHtml =
+    hasActive && !opts.shellOnly
+      ? renderConversationMessagesInnerHtml(buildDisplayMessages(conversation))
+      : '';
+
+  return `
+    <div class="drop-zone-overlay" id="drop-zone-overlay">
+      <div class="drop-zone-content">
+        <div class="drop-zone-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+            <polyline points="17 8 12 3 7 8"/>
+            <line x1="12" y1="3" x2="12" y2="15"/>
+          </svg>
+        </div>
+        <p class="drop-zone-title">拖拽文件到此处引用</p>
+        <p class="drop-zone-hint">支持项目内文件自动匹配，外部文件以绝对路径引用</p>
+      </div>
+    </div>
+    ${hasActive ? `
+    <div class="main-topbar">
+      <div class="main-topbar-main">
+        ${renderChatHeaderHtml(conversation)}
+      </div>
+    </div>
+    ` : ''}
+    ${hasActive
+      ? `<div class="message-list" id="message-list">${messagesHtml}</div>`
+      : renderEmptyState()}
+    ${renderInputComposerHtml()}
   `;
 }
 

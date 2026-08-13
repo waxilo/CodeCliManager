@@ -6,12 +6,12 @@ import { showPendingAssistantIndicator } from '../chat/retry';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshStreamingUI } from '../chat/streaming';
 import { refreshConversationFromBackend } from './load';
-import { conversationInstanceKey, isConversationInstance } from './normalize';
+import { conversationInstanceKey } from './normalize';
 import { dismissMcpViewState } from '../mcp/mount';
 import { dismissSettingsViewState } from '../settings/mount';
 import { dismissKiroViewState } from '../kiro/mount';
 import { updateConversationListSpinner } from '../sidebar/render-list';
-import { renderChatHeaderHtml } from '../chat/render-chat';
+import { renderChatAreaHtml } from '../chat/render-chat';
 import { syncQueuedPromptsUI } from '../chat/input-composer';
 import { clearInteractionHostUi, remountActiveInteractionPanel } from '../permissions/interaction-panel';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
@@ -45,39 +45,36 @@ function syncConversationActiveHighlight(id: string, sourcePath: string | null):
  * 空状态 → 会话：只补齐主区 topbar + message-list 壳，内容由 refreshChatContent 填充。
  * @returns 是否已具备可刷新的消息列表壳
  */
-function ensureChatMessageShell(): boolean {
+export function ensureChatMessageShell(): boolean {
   if (document.querySelector('#message-list')) return true;
   const main = document.querySelector('.main-content');
   if (!main || main.classList.contains('is-api-config') || main.classList.contains('is-mcp')) {
     return false;
   }
 
-  const conversation = appState.activeConversationId
-    ? appState.conversations.find((candidate) =>
-        isConversationInstance(
-          candidate,
-          appState.activeConversationId,
-          appState.activeConversationSourcePath,
-        ),
-      )
-    : undefined;
+  // 复用全量渲染的聊天区结构（shellOnly 只取壳，消息内容由 refreshChatContent 填充）。
+  // 顺序恒为 drop-zone-overlay → main-topbar → #message-list → input-area，
+  // 增量路径与全量渲染共用同一份结构定义，杜绝漂移。
+  const shell = document.createElement('div');
+  shell.innerHTML = renderChatAreaHtml({ shellOnly: true });
+  const topbar = shell.querySelector<HTMLElement>('.main-topbar');
+  const list = shell.querySelector<HTMLElement>('#message-list');
+  if (!topbar || !list) return false;
+
   const composer = main.querySelector('.input-area');
   const empty = main.querySelector('.empty-chat');
+  // 防御：清掉异常中间态可能遗留的重复 topbar
+  main.querySelector('.main-topbar')?.remove();
 
-  if (!main.querySelector('.main-topbar')) {
-    const topbar = document.createElement('div');
-    topbar.className = 'main-topbar';
-    topbar.innerHTML = `<div class="main-topbar-main">${renderChatHeaderHtml(conversation)}</div>`;
-    if (composer) main.insertBefore(topbar, composer);
-    else main.appendChild(topbar);
+  if (empty) {
+    empty.replaceWith(topbar, list);
+  } else if (composer) {
+    main.insertBefore(topbar, composer);
+    main.insertBefore(list, composer);
+  } else {
+    main.appendChild(topbar);
+    main.appendChild(list);
   }
-
-  const list = document.createElement('div');
-  list.className = 'message-list';
-  list.id = 'message-list';
-  if (empty) empty.replaceWith(list);
-  else if (composer) main.insertBefore(list, composer);
-  else main.appendChild(list);
   return true;
 }
 

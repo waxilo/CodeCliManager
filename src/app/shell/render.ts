@@ -21,8 +21,8 @@ import {
   handleConversationListContextMenu,
   refreshConversationListDom,
 } from '../../features/sidebar';
-import { renderChatContent, renderEmptyState, renderChatHeaderHtml } from '../../features/chat/render-chat';
-import { renderInputComposerHtml, renderBalanceStatusBarHtml, bindSessionIdCopyEvents, bindQueuedPromptEvents } from '../../features/chat/input-composer';
+import { renderChatAreaHtml } from '../../features/chat/render-chat';
+import { renderBalanceStatusBarHtml, bindSessionIdCopyEvents, bindQueuedPromptEvents } from '../../features/chat/input-composer';
 import { setSendButtonLoading, isActiveConversationRunning, updateSendButtonState } from '../../features/chat/session-context';
 import { refreshStreamingUI } from '../../features/chat/streaming';
 import { renderSubagentProgressHtml, syncSubagentProgressUI } from '../../features/chat/subagent-progress';
@@ -46,7 +46,6 @@ import { openMcpView, closeMcpView, mountMcpView, renderMcpViewHtml } from '../.
 import { openKiroView, closeKiroView } from '../../features/kiro';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { loadData } from '../../features/conversations';
-import { getActiveConversation } from '../../features/conversations/normalize';
 import { newChat } from '../../features/chat/send';
 import { handleSendButtonClick } from '../../features/chat/retry';
 import { handleKeydown, setupMessageListPostRender } from '../../features/chat/refresh';
@@ -157,30 +156,7 @@ function performRender() {
         aria-label="调整侧边栏宽度"
       ></div>
       <div class="main-content${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
-        ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isMcpViewActive ? renderMcpViewHtml() : `
-        <div class="drop-zone-overlay" id="drop-zone-overlay">
-          <div class="drop-zone-content">
-            <div class="drop-zone-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="17 8 12 3 7 8"/>
-                <line x1="12" y1="3" x2="12" y2="15"/>
-              </svg>
-            </div>
-            <p class="drop-zone-title">拖拽文件到此处引用</p>
-            <p class="drop-zone-hint">支持项目内文件自动匹配，外部文件以绝对路径引用</p>
-          </div>
-        </div>
-        ${appState.activeConversationId || appState.pendingUserMessage ? `
-        <div class="main-topbar">
-          <div class="main-topbar-main">
-            ${renderChatHeaderHtml(getActiveConversation())}
-          </div>
-        </div>
-        ` : ''}
-        ${appState.activeConversationId || appState.pendingUserMessage ? renderChatContent() : renderEmptyState()}
-        ${renderInputComposerHtml()}
-        `}
+        ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isMcpViewActive ? renderMcpViewHtml() : renderChatAreaHtml()}
       </div>
       ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderSubagentProgressHtml() : ''}
       </div>
