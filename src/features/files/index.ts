@@ -7,19 +7,123 @@ import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type { FileRef } from '../../types';
 import { getEffectiveProjectDir } from '../chat/session-context';
 import { updateSendButtonState } from '../chat/session-context';
-import { ImportedFileRef } from '../../state/app-state';
+import type { ComposerDraft, ImportedFileRef, PasteAttachment } from '../../state/app-state';
 // ── @file 引用功能 ──────────────────────────────────────────────────
 
-// ── 粘贴图片附件 ────────────────────────────────────────────────────
-
-export function getPasteUploadsDir(): string {
-  const dir = getEffectiveProjectDir();
-  return dir.endsWith('/') ? dir + '.clipboard-uploads' : dir + '/.clipboard-uploads';
+export function getComposerDraftKey(): string {
+  if (appState.activeConversationId) return appState.activeConversationId;
+  return `new:${appState.pendingProjectDir?.trim() || ''}`;
 }
+
+function hasDraftContent(draft: ComposerDraft): boolean {
+  return Boolean(
+    draft.text.trim() ||
+    draft.pasteAttachments.length > 0 ||
+    draft.importedFileRefs.length > 0
+  );
+}
+
+function mergeDrafts(first: ComposerDraft, second: ComposerDraft): ComposerDraft {
+  const text = [first.text, second.text].filter((value) => value.trim()).join('\n');
+  return {
+    text,
+    pasteAttachments: [...first.pasteAttachments, ...second.pasteAttachments],
+    importedFileRefs: [...first.importedFileRefs, ...second.importedFileRefs],
+  };
+}
+
+function renderComposerDraft(): void {
+  const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  const draft = appState.composerDrafts.get(getComposerDraftKey());
+  if (draft) {
+    if (input) input.value = draft.text;
+    appState.pasteAttachments = draft.pasteAttachments;
+    appState.importedFileRefs = draft.importedFileRefs;
+    appState.composerDrafts.delete(getComposerDraftKey());
+  } else {
+    if (input) input.value = '';
+    appState.pasteAttachments = [];
+    appState.importedFileRefs = [];
+  }
+  renderPasteAttachmentsBar();
+  renderImportedFileBar();
+  updateSendButtonState();
+}
+
+/** 切走会话前保存输入和附件；object URL 仍由对应草稿持有，不在切换时释放。 */
+export function stashComposerDraft(key = getComposerDraftKey()): void {
+  const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  const draft: ComposerDraft = {
+    text: input?.value || '',
+    pasteAttachments: appState.pasteAttachments,
+    importedFileRefs: appState.importedFileRefs,
+  };
+  if (hasDraftContent(draft)) appState.composerDrafts.set(key, draft);
+  else appState.composerDrafts.delete(key);
+  appState.pasteAttachments = [];
+  appState.importedFileRefs = [];
+}
+
+/** 激活会话并完成 DOM 重建后恢复该会话自己的草稿。 */
+export function restoreComposerDraft(): void {
+  renderComposerDraft();
+}
+
+/** 发送开始即从编辑器取走不可变快照，防止后续异步阶段串到别的会话。 */
+export function takeComposerDraftSnapshot(key = getComposerDraftKey()): ComposerDraft {
+  const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  const snapshot: ComposerDraft = {
+    text: input?.value || '',
+    pasteAttachments: [...appState.pasteAttachments],
+    importedFileRefs: [...appState.importedFileRefs],
+  };
+  if (input) input.value = '';
+  appState.pasteAttachments = [];
+  appState.importedFileRefs = [];
+  appState.composerDrafts.delete(key);
+  renderPasteAttachmentsBar();
+  renderImportedFileBar();
+  updateSendButtonState();
+  return snapshot;
+}
+
+/** 失败时归还给源会话；若用户已切走，则只写入源会话草稿 map。 */
+export function restoreComposerDraftSnapshot(key: string, snapshot: ComposerDraft): void {
+  if (!hasDraftContent(snapshot)) return;
+  if (key === getComposerDraftKey()) {
+    const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+    const current: ComposerDraft = {
+      text: input?.value || '',
+      pasteAttachments: appState.pasteAttachments,
+      importedFileRefs: appState.importedFileRefs,
+    };
+    const merged = mergeDrafts(snapshot, current);
+    if (input) input.value = merged.text;
+    appState.pasteAttachments = merged.pasteAttachments;
+    appState.importedFileRefs = merged.importedFileRefs;
+    renderPasteAttachmentsBar();
+    renderImportedFileBar();
+    updateSendButtonState();
+    input?.focus();
+    return;
+  }
+  const existing = appState.composerDrafts.get(key);
+  appState.composerDrafts.set(key, existing ? mergeDrafts(snapshot, existing) : snapshot);
+}
+
+export function disposePasteAttachments(attachments: PasteAttachment[]): void {
+  attachments.forEach((attachment) => URL.revokeObjectURL(attachment.objectUrl));
+}
+
+
+// ── 粘贴图片附件 ────────────────────────────────────────────────────
 
 export async function handlePaste(e: ClipboardEvent) {
   const items = e.clipboardData?.items;
   if (!items) return;
+  const projectDir = getEffectiveProjectDir();
+  if (!projectDir) return;
+  const draftKey = getComposerDraftKey();
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
@@ -30,18 +134,30 @@ export async function handlePaste(e: ClipboardEvent) {
 
       const ext = item.type === 'image/png' ? 'png' : item.type === 'image/gif' ? 'gif' : item.type === 'image/webp' ? 'webp' : 'jpg';
       const fileName = `pasted-${Date.now()}-${i}.${ext}`;
-      const uploadsDir = getPasteUploadsDir();
-      const filePath = `${uploadsDir}/${fileName}`;
 
       try {
         const buf = await blob.arrayBuffer();
-        await api.writeFileBytes(filePath, Array.from(new Uint8Array(buf)));
+        const filePath = await api.writeClipboardImage(
+          projectDir,
+          fileName,
+          Array.from(new Uint8Array(buf)),
+        );
 
         const objectUrl = URL.createObjectURL(new Blob([buf], { type: item.type }));
-        // 保存绝对路径：prompt、消息内容与文件芯片均使用绝对路径，
-        // 避免切换会话（不同项目目录）后相对路径解析到错误位置
-        appState.pasteAttachments.push({ path: filePath, name: fileName, objectUrl });
-        renderPasteAttachmentsBar();
+        const attachment = { path: filePath, name: fileName, objectUrl };
+        if (draftKey === getComposerDraftKey()) {
+          appState.pasteAttachments.push(attachment);
+          renderPasteAttachmentsBar();
+          updateSendButtonState();
+        } else {
+          const draft = appState.composerDrafts.get(draftKey) || {
+            text: '',
+            pasteAttachments: [],
+            importedFileRefs: [],
+          };
+          draft.pasteAttachments.push(attachment);
+          appState.composerDrafts.set(draftKey, draft);
+        }
       } catch (e) {
         console.error('Failed to save pasted image:', e);
       }
@@ -78,6 +194,7 @@ export function renderPasteAttachmentsBar() {
         URL.revokeObjectURL(appState.pasteAttachments[idx].objectUrl);
         appState.pasteAttachments.splice(idx, 1);
         renderPasteAttachmentsBar();
+        updateSendButtonState();
       }
     });
   });
@@ -93,9 +210,10 @@ export function renderPasteAttachmentsBar() {
 }
 
 export function clearPasteAttachments() {
-  appState.pasteAttachments.forEach((att) => URL.revokeObjectURL(att.objectUrl));
+  disposePasteAttachments(appState.pasteAttachments);
   appState.pasteAttachments = [];
   renderPasteAttachmentsBar();
+  updateSendButtonState();
 }
 
 // ── @File[] 引用格式辅助函数 ────────────────────────────────────────
@@ -216,6 +334,7 @@ export function removeImportedFileRef(idx: number): void {
 export function clearImportedFileRefs(): void {
   appState.importedFileRefs = [];
   renderImportedFileBar();
+  updateSendButtonState();
 }
 
 export async function previewImportedFile(idx: number): Promise<void> {
@@ -359,8 +478,8 @@ export function openImageLightbox(src: string) {
   document.addEventListener('keydown', onKey);
 }
 
-export async function loadProjectFiles(): Promise<string[]> {
-  const dir = getEffectiveProjectDir();
+export async function loadProjectFiles(projectDir = getEffectiveProjectDir()): Promise<string[]> {
+  const dir = projectDir.trim();
   if (!dir) return [];
   if (appState._cachedFileList !== null && appState._cachedProjectDir === dir) {
     return appState._cachedFileList;
@@ -441,7 +560,7 @@ export function hideFileSuggestions() {
  * 只匹配含路径分隔符（/ 或 \）的 @引用，保留普通 @提及（如 @someone）。
  */
 export function stripFileRefsFromDisplay(text: string): string {
-  return text.replace(/@[^\s@]*[/\\][^\s@]*/g, '').replace(/\s{2,}/g, ' ').trim();
+  return stripFileRefTags(text).replace(/\s{2,}/g, ' ').trim();
 }
 
 /**
@@ -598,12 +717,18 @@ export function insertFileReference(filePath: string) {
   const value = textarea.value;
   const cursorPos = textarea.selectionStart;
   const textAfter = value.substring(cursorPos);
+  textarea.value = atInfo.before + textAfter;
+  textarea.setSelectionRange(atInfo.before.length, atInfo.before.length);
 
-  textarea.value = atInfo.before + '@' + filePath + ' ' + textAfter;
-
-  // 将光标移到插入内容之后
-  const newCursorPos = atInfo.before.length + filePath.length + 2; // @ + path + space
-  textarea.setSelectionRange(newCursorPos, newCursorPos);
+  const cleanPath = filePath.replace(/\/$/, '');
+  const parts = cleanPath.split(/[/\\]/).filter(Boolean);
+  const lastPart = parts[parts.length - 1] || filePath;
+  addImportedFileRef({
+    ref: wrapFileRef(filePath),
+    fileName: filePath.endsWith('/') ? `${lastPart}/` : lastPart,
+    isImage: isImageFile(filePath),
+    isDir: filePath.endsWith('/'),
+  });
   textarea.focus();
   updateSendButtonState();
 }
@@ -787,6 +912,19 @@ export async function handleImportExternalFolder(): Promise<void> {
 
 // ── 拖拽文件自动引用 ────────────────────────────────────────────────
 
+export function projectRelativePath(projectDir: string, fullPath: string): string | null {
+  const normalize = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '');
+  const root = normalize(projectDir);
+  const path = normalize(fullPath);
+  const windowsPath = /^[A-Za-z]:\//.test(root);
+  const comparableRoot = windowsPath ? root.toLowerCase() : root;
+  const comparablePath = windowsPath ? path.toLowerCase() : path;
+  const prefix = `${comparableRoot}/`;
+  if (!comparablePath.startsWith(prefix)) return null;
+  const relative = path.slice(root.length + 1);
+  return relative || null;
+}
+
 export async function bindDragDropFileRefs() {
   // 避免重复注册监听器
   if (appState._unlistenDragDrop) appState._unlistenDragDrop();
@@ -816,42 +954,24 @@ export async function bindDragDropFileRefs() {
         return;
       }
 
-      const projectFiles = await loadProjectFiles();
       const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
       if (!textarea) return;
 
       const refs: string[] = [];
 
       for (const fullPath of paths) {
-        const normalizedPath = fullPath.replace(/\\/g, '/');
-        const normalizedProjectDir = projectDir.replace(/\\/g, '/');
-        const segments = normalizedPath.split('/').filter(Boolean);
-        const fileName = segments[segments.length - 1] || '';
+        const relativePath = projectRelativePath(projectDir, fullPath);
+        if (relativePath) {
+          if (!refs.includes(relativePath)) refs.push(relativePath);
+          continue;
+        }
 
-        // 按文件名匹配项目文件列表
-        const matches = projectFiles.filter((f) => {
-          const parts = f.split('/');
-          return parts[parts.length - 1] === fileName;
-        });
-
-        if (matches.length === 1) {
-          if (!refs.includes(matches[0])) refs.push(matches[0]);
-        } else if (matches.length > 1) {
-          const shortest = matches.reduce((a, b) => (a.length <= b.length ? a : b));
-          if (!refs.includes(shortest)) refs.push(shortest);
-        } else if (normalizedPath.startsWith(normalizedProjectDir)) {
-          // 项目内文件（含 target/ 等被索引跳过的目录）→ 相对路径
-          const relPath = normalizedPath.slice(normalizedProjectDir.length).replace(/^\//, '');
-          if (relPath && !refs.includes(relPath)) refs.push(relPath);
-        } else {
-          // 外部文件/文件夹 → 验证后使用绝对路径
-          try {
-            const result = await api.importExternalPath({ source: fullPath, projectDir });
-            const absRef = result.is_dir ? `${result.absolute_path}/` : result.absolute_path;
-            if (!refs.includes(absRef)) refs.push(absRef);
-          } catch (err) {
-            console.error('[drop] 引用外部文件失败:', fullPath, err);
-          }
+        try {
+          const result = await api.importExternalPath({ source: fullPath, projectDir });
+          const absRef = result.is_dir ? `${result.absolute_path}/` : result.absolute_path;
+          if (!refs.includes(absRef)) refs.push(absRef);
+        } catch (err) {
+          console.error('[drop] 引用外部文件失败:', fullPath, err);
         }
       }
 
@@ -884,19 +1004,20 @@ export async function bindDragDropFileRefs() {
  *   displayPrompt — 用于消息气泡展示的干净文本（已剥离已解析的 @path 引用）
  *   refs          — 匹配到的文件引用列表
  */
-export async function resolveFileReferences(prompt: string): Promise<{ prompt: string; displayPrompt: string; refs: FileRef[] }> {
+export async function resolveFileReferences(
+  prompt: string,
+  projectDir = getEffectiveProjectDir(),
+): Promise<{ prompt: string; displayPrompt: string; refs: FileRef[] }> {
   const atPattern = /@([^\s@]+)/g;
   const rawRefs: string[] = [];
   let match: RegExpExecArray | null;
-  const files = await loadProjectFiles();
+  const files = await loadProjectFiles(projectDir);
 
   while ((match = atPattern.exec(prompt)) !== null) {
     rawRefs.push(match[1]);
   }
 
   if (rawRefs.length === 0) return { prompt, displayPrompt: prompt, refs: [] };
-
-  const projectDir = getEffectiveProjectDir();
 
   // 分离：项目索引文件 vs 绝对路径 vs 其他（可能是未索引的项目内文件）
   const projectRefs = rawRefs.filter((ref) => files.some((f) => f === ref));

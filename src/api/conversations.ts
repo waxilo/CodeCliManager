@@ -7,8 +7,11 @@ export function getConversations(): Promise<ConversationRaw[]> {
   return invoke<ConversationRaw[]>('get_conversations');
 }
 
-export function getConversation(conversationId: string): Promise<ConversationRaw | null> {
-  return invoke<ConversationRaw | null>('get_conversation', { conversationId });
+export function getConversation(
+  conversationId: string,
+  sourcePath?: string | null,
+): Promise<ConversationRaw | null> {
+  return invoke<ConversationRaw | null>('get_conversation', { conversationId, sourcePath });
 }
 
 export function deleteConversation(args: {

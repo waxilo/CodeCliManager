@@ -6,8 +6,11 @@ import { clearStreamingState } from '../chat/streaming';
 import { loadData } from './load';
 import { groupConversationsByWorkspace } from '../sidebar/workspace-grouping';
 import { escapeHtml } from '../../utils';
-export async function deleteConversation(id: string) {
-  const conversation = appState.conversations.find((c) => c.id === id);
+import { isConversationInstance } from './normalize';
+export async function deleteConversation(id: string, sourcePath: string | null = null) {
+  const conversation = appState.conversations.find((candidate) =>
+    isConversationInstance(candidate, id, sourcePath),
+  );
   if (!conversation) return;
 
   const confirmed = await showDeleteConfirm(conversation.title);
@@ -19,16 +22,24 @@ export async function deleteConversation(id: string) {
       sourcePath: conversation.source_path ?? null,
     });
 
+    const deletedSourcePath = conversation.source_path ?? null;
     clearStreamingState(id);
     appState.runningSessions.delete(id);
     appState.abortingSessions.delete(id);
     void api.abortSession({ conversationId: id, force: true }).catch(() => {});
     appState.pendingUserMessage = null;
     appState.pendingUserMessageConvId = null;
-    appState.conversations = appState.conversations.filter((c) => c.id !== id);
+    appState.conversations = appState.conversations.filter(
+      (candidate) => candidate.id !== id || (candidate.source_path ?? null) !== deletedSourcePath,
+    );
 
-    if (appState.activeConversationId === id) {
-      appState.activeConversationId = appState.conversations.length > 0 ? appState.conversations[0].id : '';
+    if (
+      appState.activeConversationId === id &&
+      appState.activeConversationSourcePath === deletedSourcePath
+    ) {
+      const next = appState.conversations[0];
+      appState.activeConversationId = next?.id || '';
+      appState.activeConversationSourcePath = next?.source_path ?? null;
     }
 
     shellApi.render();
@@ -71,6 +82,7 @@ export async function deleteWorkspaceConversations(workspacePath: string) {
     const deletedIds = new Set(ws.conversations.map((c) => c.id));
     if (appState.activeConversationId && deletedIds.has(appState.activeConversationId)) {
       appState.activeConversationId = '';
+      appState.activeConversationSourcePath = null;
       appState.pendingUserMessage = null;
       appState.pendingUserMessageConvId = null;
       appState.transientSessionError = null;

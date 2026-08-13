@@ -11,7 +11,9 @@ Push-Location $ROOT
 
 $TAURI_CONF   = 'src-tauri/tauri.conf.json'
 $PACKAGE_JSON = 'package.json'
+$PACKAGE_LOCK = 'package-lock.json'
 $CARGO_TOML   = 'src-tauri/Cargo.toml'
+$CARGO_LOCK   = 'src-tauri/Cargo.lock'
 $REMOTE       = if ($env:REMOTE) { $env:REMOTE } else { 'origin' }
 $BRANCH       = (git rev-parse --abbrev-ref HEAD 2>&1).Trim()
 
@@ -56,10 +58,9 @@ function Write-Version {
     $c = $c -replace '("version"\s*:\s*)"[^"]*"', "`$1`"$ver`""
     [System.IO.File]::WriteAllText((Resolve-Path $TAURI_CONF), $c)
 
-    # package.json  (first "version" field)
-    $c = Get-Content $PACKAGE_JSON -Raw
-    $c = $c -replace '("version"\s*:\s*)"[^"]*"', "`$1`"$ver`""
-    [System.IO.File]::WriteAllText((Resolve-Path $PACKAGE_JSON), $c)
+    # package.json + package-lock.json root package version
+    node -e "const fs=require('fs');const v=process.argv[1];for(const f of ['package.json','package-lock.json']){const j=JSON.parse(fs.readFileSync(f,'utf8'));j.version=v;if(f.endsWith('lock.json')){if(!j.packages||!j.packages[''])throw new Error('package-lock root package missing');j.packages[''].version=v;}fs.writeFileSync(f,JSON.stringify(j,null,2)+'\n');}" $ver
+    Assert-GitOK 'update npm versions'
 
     # Cargo.toml  (top-level version = "...")
     $c = Get-Content $CARGO_TOML -Raw
@@ -91,6 +92,22 @@ function Test-RemoteTag {
 
 # ── main ──────────────────────────────────────────────────
 
+# Allow pre-reviewed staged changes, but reject unstaged or untracked files.
+$unstaged = @(git diff --name-only)
+if ($unstaged.Count -gt 0) {
+    Write-Host 'Refusing release: unstaged changes exist:' -ForegroundColor Red
+    $unstaged | ForEach-Object { Write-Host "  $_" }
+    Pop-Location
+    exit 1
+}
+$untracked = @(git ls-files --others --exclude-standard)
+if ($untracked.Count -gt 0) {
+    Write-Host 'Refusing release: untracked files exist:' -ForegroundColor Red
+    $untracked | ForEach-Object { Write-Host "  $_" }
+    Pop-Location
+    exit 1
+}
+
 # Pre-fetch for tag checks
 git fetch $REMOTE
 
@@ -108,7 +125,29 @@ Write-Version $NEW
 $DATETIME = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
 $COMMIT_MSG = "release: v${NEW} (${DATETIME})"
 
-git add .
+Write-Host 'Running release checks...'
+npm run build
+Assert-GitOK 'frontend build'
+$package = Get-Content $PACKAGE_JSON -Raw | ConvertFrom-Json
+if ($package.scripts.test) {
+    npm test
+    Assert-GitOK 'frontend tests'
+}
+cargo test --manifest-path $CARGO_TOML
+Assert-GitOK 'Rust tests'
+
+$versionFiles = @($TAURI_CONF, $PACKAGE_JSON, $PACKAGE_LOCK, $CARGO_TOML)
+if (Test-Path $CARGO_LOCK) { $versionFiles += $CARGO_LOCK }
+git add -- $versionFiles
+
+$remaining = @(git diff --name-only)
+$generated = @(git ls-files --others --exclude-standard)
+if ($remaining.Count -gt 0 -or $generated.Count -gt 0) {
+    Write-Host 'Refusing release: checks produced non-version changes.' -ForegroundColor Red
+    git status --short
+    Pop-Location
+    exit 1
+}
 
 # Check if there are staged changes
 $null = git diff --cached --quiet 2>&1
@@ -122,13 +161,15 @@ if ($LASTEXITCODE -eq 0) {
 git commit -m $COMMIT_MSG
 Assert-GitOK "git commit"
 
-# Amend if there are still unstaged changes after commit
-$null = git diff --quiet 2>&1;          $d1 = $LASTEXITCODE
-$null = git diff --cached --quiet 2>&1;  $d2 = $LASTEXITCODE
-if ($d1 -ne 0 -or $d2 -ne 0) {
-    Write-Host 'Warning: unstaged changes remain, amending into this commit...'
-    git add -A
-    git commit --amend --no-edit
+# Never silently amend new working-tree changes into a release commit.
+$unstagedAfter = @(git diff --name-only)
+$stagedAfter = @(git diff --cached --name-only)
+$untrackedAfter = @(git ls-files --others --exclude-standard)
+if ($unstagedAfter.Count -gt 0 -or $stagedAfter.Count -gt 0 -or $untrackedAfter.Count -gt 0) {
+    Write-Host 'Refusing push: new working-tree changes appeared after release commit.' -ForegroundColor Red
+    git status --short
+    Pop-Location
+    exit 1
 }
 
 # Rebase onto remote (working tree is clean now)

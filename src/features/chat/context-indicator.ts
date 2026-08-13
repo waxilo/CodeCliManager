@@ -1,5 +1,5 @@
-import { appState } from '../../state';
 import { escapeHtml } from '../../utils';
+import { getActiveConversation } from '../conversations/normalize';
 export function formatTokenCount(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1).replace(/\.0$/, '') + 'M';
   if (n >= 1000) return Math.round(n / 1000) + 'K';
@@ -13,9 +13,7 @@ export function getContextWindowFor(tokens: number): number {
 
 /** 右下角上下文环形指示器（参考 Claude 桌面端），悬停显示剩余空间 */
 export function renderContextIndicatorInner(): string {
-  const conv = appState.activeConversationId
-    ? appState.conversations.find((c) => c.id === appState.activeConversationId)
-    : undefined;
+  const conv = getActiveConversation();
   const tokens = conv?.context_tokens ?? 0;
   if (!conv || tokens <= 0) return '';
 

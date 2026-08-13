@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -56,9 +56,15 @@ pub(crate) struct AppState {
 
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub(crate) struct AppOverlay {
+    /// Legacy overlays created before conversations had a source path.
+    #[serde(default)]
     pub(crate) deleted_session_ids: Vec<String>,
     #[serde(default)]
+    pub(crate) deleted_session_paths: Vec<String>,
+    #[serde(default)]
     pub(crate) title_overrides: HashMap<String, String>,
+    #[serde(default)]
+    pub(crate) path_title_overrides: HashMap<String, String>,
 }
 
 pub(crate) fn get_overlay_path() -> PathBuf {
@@ -86,19 +92,54 @@ pub(crate) fn save_overlay(overlay: &AppOverlay) {
     }
 }
 
-pub(crate) fn mark_session_deleted(session_id: &str) {
+pub(crate) fn conversation_overlay_key(source_path: &Path) -> String {
+    source_path.to_string_lossy().to_string()
+}
+
+pub(crate) fn is_session_deleted(
+    overlay: &AppOverlay,
+    session_id: &str,
+    source_path: Option<&str>,
+) -> bool {
+    source_path.is_some_and(|path| overlay.deleted_session_paths.iter().any(|p| p == path))
+        || overlay.deleted_session_ids.iter().any(|id| id == session_id)
+}
+
+pub(crate) fn mark_session_deleted(session_id: &str, source_path: Option<&Path>) {
     let mut overlay = load_overlay();
-    if !overlay.deleted_session_ids.iter().any(|id| id == session_id) {
+    if let Some(path) = source_path {
+        let key = conversation_overlay_key(path);
+        if !overlay.deleted_session_paths.iter().any(|p| p == &key) {
+            overlay.deleted_session_paths.push(key);
+            save_overlay(&overlay);
+        }
+    } else if !overlay.deleted_session_ids.iter().any(|id| id == session_id) {
         overlay.deleted_session_ids.push(session_id.to_string());
         save_overlay(&overlay);
     }
 }
 
-pub(crate) fn set_title_override(session_id: &str, title: &str) {
+pub(crate) fn title_override<'a>(
+    overlay: &'a AppOverlay,
+    session_id: &str,
+    source_path: Option<&str>,
+) -> Option<&'a String> {
+    source_path
+        .and_then(|path| overlay.path_title_overrides.get(path))
+        .or_else(|| overlay.title_overrides.get(session_id))
+}
+
+pub(crate) fn set_title_override(session_id: &str, source_path: Option<&Path>, title: &str) {
     let mut overlay = load_overlay();
-    overlay
-        .title_overrides
-        .insert(session_id.to_string(), title.to_string());
+    if let Some(path) = source_path {
+        overlay
+            .path_title_overrides
+            .insert(conversation_overlay_key(path), title.to_string());
+    } else {
+        overlay
+            .title_overrides
+            .insert(session_id.to_string(), title.to_string());
+    }
     save_overlay(&overlay);
 }
 
@@ -248,6 +289,41 @@ pub(crate) fn extract_human_user_prompt(message: &serde_json::Value) -> Option<S
     }
 }
 
+pub(crate) fn sort_conversations(conversations: &mut [Conversation]) {
+    conversations.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| a.source_path.cmp(&b.source_path))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+}
+
+pub(crate) fn merge_conversations(
+    claude_history: Vec<Conversation>,
+    persisted: Vec<Conversation>,
+) -> Vec<Conversation> {
+    let mut merged = claude_history;
+    let mut seen: HashSet<(String, Option<String>)> = merged
+        .iter()
+        .map(|conversation| (conversation.id.clone(), conversation.source_path.clone()))
+        .collect();
+
+    for conversation in persisted {
+        if conversation.source_path.is_none()
+            && merged.iter().any(|existing| existing.id == conversation.id)
+        {
+            continue;
+        }
+        let key = (conversation.id.clone(), conversation.source_path.clone());
+        if seen.insert(key) {
+            merged.push(conversation);
+        }
+    }
+    sort_conversations(&mut merged);
+    merged
+}
+
 pub(crate) fn load_claude_history() -> Vec<Conversation> {
     let root = get_claude_history_path();
     if !root.exists() {
@@ -265,17 +341,17 @@ pub(crate) fn load_claude_history() -> Vec<Conversation> {
             continue;
         }
         if let Some(mut conv) = parse_claude_session_cached(&path) {
-            if overlay.deleted_session_ids.iter().any(|id| id == &conv.id) {
+            if is_session_deleted(&overlay, &conv.id, conv.source_path.as_deref()) {
                 continue;
             }
-            if let Some(title) = overlay.title_overrides.get(&conv.id) {
+            if let Some(title) = title_override(&overlay, &conv.id, conv.source_path.as_deref()) {
                 conv.title = title.clone();
             }
             conversations.push(conv);
         }
     }
 
-    conversations.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    sort_conversations(&mut conversations);
     conversations
 }
 
@@ -283,14 +359,18 @@ pub(crate) fn load_claude_history() -> Vec<Conversation> {
 pub(crate) fn load_claude_conversation(path: &PathBuf) -> Option<Conversation> {
     let mut conversation = parse_claude_session_cached(path)?;
     let overlay = load_overlay();
-    if overlay
-        .deleted_session_ids
-        .iter()
-        .any(|id| id == &conversation.id)
-    {
+    if is_session_deleted(
+        &overlay,
+        &conversation.id,
+        conversation.source_path.as_deref(),
+    ) {
         return None;
     }
-    if let Some(title) = overlay.title_overrides.get(&conversation.id) {
+    if let Some(title) = title_override(
+        &overlay,
+        &conversation.id,
+        conversation.source_path.as_deref(),
+    ) {
         conversation.title = title.clone();
     }
     Some(conversation)
@@ -303,8 +383,14 @@ pub(crate) fn collect_jsonl_files(root: &PathBuf, files: &mut Vec<PathBuf>) {
     };
     
     for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
         let path = entry.path();
-        if path.is_dir() {
+        if file_type.is_dir() {
             collect_jsonl_files(&path, files);
         } else if path.extension().and_then(|ext| ext.to_str()) == Some("jsonl") {
             files.push(path);
@@ -312,12 +398,80 @@ pub(crate) fn collect_jsonl_files(root: &PathBuf, files: &mut Vec<PathBuf>) {
     }
 }
 
+pub(crate) fn effective_message_uuids(lines: &[serde_json::Value]) -> Option<HashSet<String>> {
+    let mut has_linked_message = false;
+    let mut has_legacy_message = false;
+    for value in lines {
+        if value.get("message").is_none()
+            || value.get("type").and_then(|kind| kind.as_str()) == Some("system")
+        {
+            continue;
+        }
+        if value.get("uuid").and_then(|uuid| uuid.as_str()).is_some() {
+            has_linked_message = true;
+        } else {
+            has_legacy_message = true;
+        }
+    }
+    // Mixed formats cannot be reconstructed without risking loss of legacy entries.
+    if !has_linked_message || has_legacy_message {
+        return None;
+    }
+
+    let linked: Vec<&serde_json::Value> = lines
+        .iter()
+        .filter(|value| value.get("uuid").and_then(|uuid| uuid.as_str()).is_some())
+        .collect();
+    if linked.is_empty() {
+        return None;
+    }
+
+    let current_uuid = linked
+        .iter()
+        .rev()
+        .find(|value| {
+            value.get("isSidechain").and_then(|flag| flag.as_bool()) != Some(true)
+                && value.get("type").and_then(|kind| kind.as_str()) != Some("system")
+        })?
+        .get("uuid")
+        .and_then(|uuid| uuid.as_str())
+        .map(str::to_string)?;
+    let mut parents = HashMap::new();
+    for value in linked {
+        if let Some(uuid) = value.get("uuid").and_then(|uuid| uuid.as_str()) {
+            parents.insert(
+                uuid.to_string(),
+                value
+                    .get("parentUuid")
+                    .and_then(|parent| parent.as_str())
+                    .map(str::to_string),
+            );
+        }
+    }
+
+    let mut active = HashSet::new();
+    let mut cursor = Some(current_uuid);
+    while let Some(uuid) = cursor {
+        if !active.insert(uuid.clone()) {
+            break;
+        }
+        cursor = parents.get(&uuid).cloned().flatten();
+    }
+    Some(active)
+}
+
 pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(_) => return None,
     };
-    
+    let lines: Vec<serde_json::Value> = content
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let active_uuids = effective_message_uuids(&lines);
+
     let mut session_id: Option<String> = None;
     let mut messages = Vec::new();
     let mut first_user_message: Option<String> = None;
@@ -327,28 +481,24 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     let mut project_dir: Option<String> = None;
     let mut last_context_tokens: Option<i64> = None;
     let mut last_model: Option<String> = None;
+    // 主链上已保留的 Task tool_use id，用于配对保留对应 tool_result
+    let mut visible_task_tool_ids: HashSet<String> = HashSet::new();
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        let value: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-
+    for (line_idx, value) in lines.iter().enumerate() {
         if project_dir.is_none() {
             project_dir = value
                 .get("cwd")
                 .and_then(|c| c.as_str())
                 .map(str::trim)
                 .filter(|cwd| !cwd.is_empty())
-                .map(|cwd| cwd.to_string());
+                .map(str::to_string);
         }
 
         if value.get("type").and_then(|t| t.as_str()) == Some("custom-title") {
-            custom_title = value.get("customTitle").and_then(|t| t.as_str()).map(|s| s.to_string());
+            custom_title = value
+                .get("customTitle")
+                .and_then(|t| t.as_str())
+                .map(str::to_string);
             continue;
         }
 
@@ -356,38 +506,51 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             continue;
         }
 
-        // 跳过 /compact 压缩摘要与系统元信息条目：
-        // Claude Code 把压缩摘要存成 isCompactSummary 的 user 消息，
-        // 不处理会被显示成用户发出的消息。
+        // Skip compact summaries and system metadata before selecting visible messages.
         if value.get("isCompactSummary").and_then(|v| v.as_bool()) == Some(true) {
             continue;
         }
         if value.get("type").and_then(|t| t.as_str()) == Some("system") {
             continue;
         }
+        if let (Some(active), Some(uuid)) = (
+            active_uuids.as_ref(),
+            value.get("uuid").and_then(|uuid| uuid.as_str()),
+        ) {
+            if !active.contains(uuid) {
+                continue;
+            }
+        }
 
         if session_id.is_none() {
-            session_id = value.get("sessionId").and_then(|s| s.as_str()).map(|s| s.to_string());
+            session_id = value
+                .get("sessionId")
+                .and_then(|s| s.as_str())
+                .map(str::to_string);
         }
-        
-        let ts = value.get("timestamp").and_then(|t| t.as_str()).and_then(parse_timestamp);
-        if ts.is_some() {
-            if created_at.is_none() {
-                created_at = ts;
-            }
-            updated_at = ts;
+
+        let ts = value
+            .get("timestamp")
+            .and_then(|t| t.as_str())
+            .and_then(parse_timestamp);
+        if let Some(timestamp) = ts {
+            created_at = Some(created_at.map_or(timestamp, |current| current.min(timestamp)));
+            updated_at = Some(updated_at.map_or(timestamp, |current| current.max(timestamp)));
         }
-        
-        // 处理 standalone thinking 类型消息
+
+        let source_uuid = value.get("uuid").and_then(|uuid| uuid.as_str());
         if value.get("type").and_then(|t| t.as_str()) == Some("thinking") {
             if let Some(msg) = value.get("message") {
-                let th_content = msg.get("content")
+                let th_content = msg
+                    .get("content")
                     .and_then(|c| c.as_str())
                     .unwrap_or("")
                     .to_string();
                 if !th_content.trim().is_empty() {
                     messages.push(Message {
-                        id: uuid::Uuid::new_v4().to_string(),
+                        id: source_uuid
+                            .map(|uuid| format!("{uuid}_0"))
+                            .unwrap_or_else(|| format!("thinking_line_{line_idx}")),
                         role: "thinking".to_string(),
                         content: th_content,
                         thinking: None,
@@ -398,17 +561,13 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             continue;
         }
 
-        let message = value.get("message");
-        if message.is_none() {
+        let Some(message) = value.get("message") else {
             continue;
-        }
-
-        let message = message.unwrap();
+        };
         if is_internal_recovery_message(message) {
             continue;
         }
 
-        // 捕获最近一轮 assistant 的上下文用量与实际模型（用户消息无此字段，自动跳过）
         if let Some(usage) = message.get("usage") {
             let field = |k: &str| usage.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
             let ctx = field("input_tokens")
@@ -424,21 +583,23 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             }
         }
 
-        let role = message.get("role").and_then(|r| r.as_str()).unwrap_or("unknown").to_string();
-
-        // 将 content 数组展开为独立消息，保留 thinking/text 穿插顺序
-        // 参考 claudecodeui: 每个 content part 生成独立的 NormalizedMessage
-        // toolUseResult：AskUserQuestion 的答案在 JSONL 行级字段，需一并传入
-        let id_prefix = format!("msg_{}", messages.len());
+        let role = message
+            .get("role")
+            .and_then(|r| r.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let id_prefix = source_uuid
+            .map(|uuid| format!("msg_{uuid}"))
+            .unwrap_or_else(|| format!("msg_line_{line_idx}"));
         let expanded = expand_content_parts(
             &role,
             message.get("content"),
             &id_prefix,
             ts.unwrap_or_default(),
             value.get("toolUseResult"),
+            &mut visible_task_tool_ids,
         );
 
-        // 记录第一条用户消息（用于会话标题）
         if first_user_message.is_none() && role == "user" {
             for msg in &expanded {
                 if msg.role == "user" && !msg.content.trim().is_empty() {
@@ -448,10 +609,8 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             }
         }
 
-        // 过滤并添加展开的消息
         for msg in expanded {
             let trimmed = msg.content.trim();
-            // 跳过内部系统消息
             if trimmed.starts_with("<system-reminder>")
                 || trimmed.starts_with("<local-command-caveat>")
                 || trimmed.starts_with("<command-name>")
@@ -462,25 +621,27 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             messages.push(msg);
         }
     }
-    
+
     let session_id = session_id.or_else(|| {
-        path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
-    });
-    
-    let session_id = session_id?;
-    
-    let title = custom_title.or_else(|| {
-        first_user_message.map(|t| {
-            if t.len() > 50 {
-                t.chars().take(50).collect::<String>() + "..."
-            } else {
-                t
-            }
+        path.file_stem()
+            .and_then(|s| s.to_str())
+            .map(str::to_string)
+    })?;
+
+    let title = custom_title
+        .or_else(|| {
+            first_user_message.map(|t| {
+                if t.len() > 50 {
+                    t.chars().take(50).collect::<String>() + "..."
+                } else {
+                    t
+                }
+            })
         })
-    }).unwrap_or_else(|| "Untitled".to_string());
+        .unwrap_or_else(|| "Untitled".to_string());
 
     let project_dir = project_dir.or_else(|| decode_project_dir_from_jsonl_path(path));
-    
+
     Some(Conversation {
         id: session_id,
         title,
@@ -495,29 +656,26 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     })
 }
 
-/// 从 JSONL 文件所在目录名反推工作目录（Claude 编码规则：`/` → `-`，并以 `-` 开头）
-pub(crate) fn decode_project_dir_from_jsonl_path(path: &PathBuf) -> Option<String> {
+/// Directory names are not reversibly encoded (`-` may be a separator or a literal hyphen).
+/// Only decode the unambiguous root sentinel; otherwise prefer no project directory to a wrong one.
+pub(crate) fn decode_project_dir_from_jsonl_path(path: &Path) -> Option<String> {
     let encoded = path
         .parent()
         .and_then(|p| p.file_name())
         .and_then(|name| name.to_str())?;
 
-    if !encoded.starts_with('-') {
-        return None;
-    }
+    (encoded == "-").then(|| "/".to_string())
+}
 
-    let decoded = encoded.replace('-', "/");
-    if decoded == "/" {
-        Some("/".to_string())
-    } else if decoded.is_empty() {
-        None
-    } else {
-        Some(decoded)
-    }
+/// 主链可见工具白名单：AskUserQuestion（互动卡片）+ Task（Subagent 状态）
+const VISIBLE_TOOL_NAMES: &[&str] = &["AskUserQuestion", "Task"];
+
+fn is_visible_tool_name(name: &str) -> bool {
+    VISIBLE_TOOL_NAMES.contains(&name)
 }
 
 /// 将 content（字符串或数组）展开为多条消息，保留 thinking/text 穿插顺序
-/// AskUserQuestion 的 tool_use / tool_result 会保留，供前端渲染选项卡片
+/// AskUserQuestion / Task 的 tool_use / tool_result 会保留，供前端渲染卡片
 /// 参考 claudecodeui: 每个 content part 生成独立的 NormalizedMessage
 pub(crate) fn expand_content_parts(
     role: &str,
@@ -525,6 +683,7 @@ pub(crate) fn expand_content_parts(
     id_prefix: &str,
     timestamp: i64,
     tool_use_result: Option<&serde_json::Value>,
+    visible_task_tool_ids: &mut HashSet<String>,
 ) -> Vec<Message> {
     let content = match content {
         Some(c) => c,
@@ -586,8 +745,12 @@ pub(crate) fn expand_content_parts(
                             .get("name")
                             .and_then(|n| n.as_str())
                             .unwrap_or("");
-                        // 仅保留 AskUserQuestion，供前端展示互动选项卡片
-                        if name == "AskUserQuestion" {
+                        if is_visible_tool_name(name) {
+                            if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                                if name == "Task" && !id.is_empty() {
+                                    visible_task_tool_ids.insert(id.to_string());
+                                }
+                            }
                             let payload = serde_json::json!({
                                 "name": name,
                                 "tool_name": name,
@@ -604,17 +767,24 @@ pub(crate) fn expand_content_parts(
                         }
                     }
                     Some("tool_result") => {
-                        // 搭配 AskUserQuestion：带上 JSONL 行级 toolUseResult（含 answers）
+                        // AskUserQuestion：带上 JSONL 行级 toolUseResult（含 answers）
                         let has_answers = tool_use_result
                             .and_then(|v| v.get("answers"))
                             .is_some();
                         let has_questions = tool_use_result
                             .and_then(|v| v.get("questions"))
                             .is_some();
-                        if has_answers || has_questions {
+                        let tool_use_id = item
+                            .get("tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let is_task_result = !tool_use_id.is_empty()
+                            && visible_task_tool_ids.contains(tool_use_id);
+                        if has_answers || has_questions || is_task_result {
                             let payload = serde_json::json!({
                                 "content": item.get("content").cloned().unwrap_or(serde_json::Value::Null),
                                 "tool_use_id": item.get("tool_use_id").cloned().unwrap_or(serde_json::Value::Null),
+                                "is_error": item.get("is_error").cloned().unwrap_or(serde_json::Value::Bool(false)),
                                 "toolUseResult": tool_use_result.cloned().unwrap_or(serde_json::Value::Null),
                             });
                             msgs.push(Message {
@@ -634,6 +804,23 @@ pub(crate) fn expand_content_parts(
         }
         _ => vec![],
     }
+}
+
+/// 消息是否为可见的 Task tool_use（供 turn-complete 落盘判定）
+pub(crate) fn message_is_task_tool_use(message: &Message) -> bool {
+    if message.role != "tool_use" {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(&message.content)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("name")
+                .or_else(|| value.get("tool_name"))
+                .and_then(|name| name.as_str())
+                .map(|name| name == "Task")
+        })
+        .unwrap_or(false)
 }
 
 pub(crate) fn parse_timestamp(iso_string: &str) -> Option<i64> {
@@ -667,18 +854,10 @@ pub(crate) fn load_persisted_state() -> AppState {
 
 pub(crate) fn load_app_state() -> AppState {
     let claude_history = load_claude_history();
-    let os = detect_os();
-
-    if !claude_history.is_empty() {
-        AppState {
-            conversations: claude_history,
-            platforms: get_default_platforms(),
-            active_platform: "claude".to_string(),
-            current_platform: os,
-        }
-    } else {
-        load_persisted_state()
-    }
+    let mut persisted = load_persisted_state();
+    persisted.conversations = merge_conversations(claude_history, persisted.conversations);
+    persisted.current_platform = detect_os();
+    persisted
 }
 
 pub(crate) fn get_default_state() -> AppState {
@@ -718,12 +897,6 @@ pub(crate) fn get_default_platforms() -> HashMap<String, PlatformConfig> {
 }
 
 pub(crate) fn read_claude_session_id_from_file(path: &Path) -> Option<String> {
-    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-        if !stem.is_empty() {
-            return Some(stem.to_string());
-        }
-    }
-
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
     for line in reader.lines().take(20) {
@@ -731,12 +904,19 @@ pub(crate) fn read_claude_session_id_from_file(path: &Path) -> Option<String> {
         if line.trim().is_empty() {
             continue;
         }
-        let value: serde_json::Value = serde_json::from_str(&line).ok()?;
+        let value: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
         if let Some(session_id) = value.get("sessionId").and_then(|s| s.as_str()) {
             return Some(session_id.to_string());
         }
     }
-    None
+
+    path.file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.is_empty())
+        .map(str::to_string)
 }
 
 pub(crate) fn session_id_matches_path(session_id: &str, path: &Path) -> bool {
@@ -961,7 +1141,43 @@ pub(crate) fn write_claude_custom_title(path: &Path, session_id: &str, title: &s
 
 #[cfg(test)]
 mod tests {
-    use super::{is_human_user_message_line, is_internal_recovery_message, INTERNAL_RECOVERY_PROMPT};
+    use super::{
+        decode_project_dir_from_jsonl_path, effective_message_uuids, expand_content_parts,
+        is_human_user_message_line, is_internal_recovery_message, merge_conversations,
+        message_is_task_tool_use, parse_claude_session, sort_conversations, Conversation,
+        INTERNAL_RECOVERY_PROMPT,
+    };
+    use std::collections::HashSet;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn conversation(id: &str, source_path: Option<&str>, created_at: i64, updated_at: i64) -> Conversation {
+        Conversation {
+            id: id.to_string(),
+            title: id.to_string(),
+            messages: Vec::new(),
+            platform: "claude".to_string(),
+            project_dir: None,
+            source_path: source_path.map(str::to_string),
+            created_at,
+            updated_at,
+            context_tokens: None,
+            last_model: None,
+        }
+    }
+
+    fn temp_jsonl(name: &str, contents: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("ccm-history-{unique}"));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(name);
+        fs::write(&path, contents).unwrap();
+        path
+    }
 
     #[test]
     fn internal_recovery_message_is_not_human_history() {
@@ -989,5 +1205,143 @@ mod tests {
 
         assert!(!is_internal_recovery_message(&line["message"]));
         assert!(is_human_user_message_line(&line));
+    }
+
+    #[test]
+    fn expand_keeps_task_tool_use_and_matching_result() {
+        let mut task_ids = HashSet::new();
+        let tool_use = expand_content_parts(
+            "assistant",
+            Some(&serde_json::json!([
+                {"type":"text","text":"starting"},
+                {"type":"tool_use","id":"toolu_task1","name":"Task","input":{"description":"explore"}},
+                {"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"ls"}}
+            ])),
+            "a",
+            1,
+            None,
+            &mut task_ids,
+        );
+        assert!(task_ids.contains("toolu_task1"));
+        assert_eq!(tool_use.iter().filter(|m| m.role == "tool_use").count(), 1);
+        assert!(tool_use.iter().any(|m| m.content.contains("Task")));
+        assert!(!tool_use.iter().any(|m| m.content.contains("Bash")));
+
+        let tool_result = expand_content_parts(
+            "user",
+            Some(&serde_json::json!([
+                {"type":"tool_result","tool_use_id":"toolu_task1","content":"done summary"},
+                {"type":"tool_result","tool_use_id":"toolu_bash","content":"file.txt"}
+            ])),
+            "u",
+            2,
+            None,
+            &mut task_ids,
+        );
+        assert_eq!(tool_result.len(), 1);
+        assert_eq!(tool_result[0].role, "tool_result");
+        assert!(tool_result[0].content.contains("done summary"));
+        assert!(message_is_task_tool_use(&tool_use.iter().find(|m| m.role == "tool_use").unwrap()));
+    }
+
+    #[test]
+    fn active_chain_excludes_abandoned_branch_and_sidechain() {
+        let lines = vec![
+            serde_json::json!({"uuid":"root", "parentUuid":null, "type":"user", "message":{"role":"user", "content":"question"}}),
+            serde_json::json!({"uuid":"old", "parentUuid":"root", "type":"assistant", "message":{"role":"assistant", "content":"old"}}),
+            serde_json::json!({"uuid":"new", "parentUuid":"root", "type":"assistant", "message":{"role":"assistant", "content":"new"}}),
+            serde_json::json!({"uuid":"agent", "parentUuid":"new", "type":"assistant", "isSidechain":true, "message":{"role":"assistant", "content":"sidechain"}}),
+        ];
+        let active = effective_message_uuids(&lines).unwrap();
+        assert_eq!(active.len(), 2);
+        assert!(active.contains("root"));
+        assert!(active.contains("new"));
+        assert!(!active.contains("old"));
+        assert!(!active.contains("agent"));
+    }
+
+    #[test]
+    fn mixed_legacy_and_linked_jsonl_keeps_legacy_entries() {
+        let lines = vec![
+            serde_json::json!({"type":"user", "message":{"role":"user", "content":"legacy"}}),
+            serde_json::json!({"uuid":"new", "parentUuid":null, "type":"assistant", "message":{"role":"assistant", "content":"new"}}),
+        ];
+        assert!(effective_message_uuids(&lines).is_none());
+    }
+
+    #[test]
+    fn legacy_jsonl_keeps_all_messages_and_stable_thinking_id() {
+        let contents = concat!(
+            r#"{"sessionId":"legacy","type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+            "\n",
+            r#"{"sessionId":"legacy","type":"thinking","timestamp":"2026-01-01T00:00:01Z","message":{"content":"hmm"}}"#,
+            "\n",
+            r#"{"sessionId":"legacy","type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":"world"}}"#,
+        );
+        let path = temp_jsonl("legacy.jsonl", contents);
+        let first = parse_claude_session(&path).unwrap();
+        let second = parse_claude_session(&path).unwrap();
+        assert_eq!(first.messages.len(), 3);
+        assert_eq!(first.messages[1].role, "thinking");
+        assert_eq!(first.messages[1].id, "thinking_line_1");
+        assert_eq!(first.messages[1].id, second.messages[1].id);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn hyphenated_encoded_directory_is_not_guessed() {
+        let path = PathBuf::from("/tmp/-Users-jane/my-project/session.jsonl");
+        assert_eq!(decode_project_dir_from_jsonl_path(&path), None);
+        assert_eq!(
+            decode_project_dir_from_jsonl_path(&PathBuf::from("/tmp/-/session.jsonl")),
+            Some("/".to_string())
+        );
+    }
+
+    #[test]
+    fn merge_keeps_same_id_from_different_sources() {
+        let merged = merge_conversations(
+            vec![conversation("same", Some("/a.jsonl"), 1, 2)],
+            vec![
+                conversation("same", Some("/a.jsonl"), 1, 1),
+                conversation("same", Some("/b.jsonl"), 2, 3),
+                conversation("state", None, 4, 4),
+            ],
+        );
+        assert_eq!(merged.len(), 3);
+        assert!(merged.iter().any(|item| item.source_path.as_deref() == Some("/a.jsonl")));
+        assert!(merged.iter().any(|item| item.source_path.as_deref() == Some("/b.jsonl")));
+        assert!(merged.iter().any(|item| item.id == "state"));
+    }
+
+    #[test]
+    fn conversations_sort_by_updated_then_created() {
+        let mut conversations = vec![
+            conversation("old", None, 100, 10),
+            conversation("new-created", None, 200, 20),
+            conversation("older-created", None, 150, 20),
+            conversation("latest", None, 1, 30),
+        ];
+        sort_conversations(&mut conversations);
+        let ids: Vec<&str> = conversations.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["latest", "new-created", "older-created", "old"]);
+    }
+
+    #[test]
+    fn linked_session_renders_only_current_branch() {
+        let contents = concat!(
+            r#"{"sessionId":"branch","uuid":"root","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"question"}}"#,
+            "\n",
+            r#"{"sessionId":"branch","uuid":"old","parentUuid":"root","type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":"old answer"}}"#,
+            "\n",
+            r#"{"sessionId":"branch","uuid":"new","parentUuid":"root","type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":"new answer"}}"#,
+        );
+        let path = temp_jsonl("branch.jsonl", contents);
+        let conversation = parse_claude_session(&path).unwrap();
+        let content: Vec<&str> = conversation.messages.iter().map(|message| message.content.as_str()).collect();
+        assert_eq!(content, vec!["question", "new answer"]);
+        assert_eq!(conversation.messages[0].id, "msg_root_0");
+        assert_eq!(conversation.messages[1].id, "msg_new_0");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

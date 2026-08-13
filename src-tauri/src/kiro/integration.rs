@@ -7,9 +7,9 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use crate::config::{
-    apply_save_config_to_settings, env_string, load_api_profiles_store, load_kiro_proxy_prefs,
+    apply_save_config_to_settings, env_string, load_kiro_proxy_prefs,
     purge_kiro_named_profiles, read_claude_settings_json, restore_api_profile_or_official,
-    save_api_profiles_store, save_kiro_proxy_prefs, set_env_string, write_claude_settings_json,
+    set_env_string, update_api_profiles_store, update_claude_settings, update_kiro_proxy_prefs,
     SaveClaudeCodeApiConfig,
 };
 
@@ -143,41 +143,43 @@ pub(crate) fn activate_kiro_runtime(
     api_key: &str,
     default_model: &str,
 ) -> Result<(), String> {
-    let mut store = load_api_profiles_store();
-    let _ = purge_kiro_named_profiles(&mut store);
-
-    let mut prefs = load_kiro_proxy_prefs();
-    // 仅首次进入「用户开启」时快照；已开启时（如重启自动拉起）保留原 previous
-    if !prefs.enabled {
-        prefs.previous_profile_id = store
+    let previous_profile_id = update_api_profiles_store(|store| {
+        purge_kiro_named_profiles(store);
+        let previous = store
             .active_profile_id
             .clone()
             .filter(|id| store.profiles.iter().any(|profile| &profile.id == id));
-    }
-    prefs.enabled = true;
-    // 优先沿用用户上次在 Kiro 页选中的模型
-    let model = {
-        let preferred = prefs.default_model.trim();
-        let incoming = default_model.trim();
-        if !preferred.is_empty() {
-            preferred.to_string()
-        } else if !incoming.is_empty() {
-            incoming.to_string()
-        } else {
-            KIRO_DEFAULT_MODEL.to_string()
-        }
-    };
-    if prefs.default_model.trim().is_empty() {
-        prefs.default_model = model.clone();
-    }
-    if prefs.display_models.is_empty() {
-        prefs.display_models = vec![model.clone()];
-    }
-    save_kiro_proxy_prefs(&prefs)?;
+        // 列表不展示 Kiro；运行期间也不把任何列表项标为「正在使用」
+        store.active_profile_id = None;
+        Ok(previous)
+    })?;
 
-    // 列表不展示 Kiro；运行期间也不把任何列表项标为「正在使用」
-    store.active_profile_id = None;
-    save_api_profiles_store(&store)?;
+    let (model, display_models) = update_kiro_proxy_prefs(|prefs| {
+        // 仅首次进入「用户开启」时快照；已开启时（如重启自动拉起）保留原 previous
+        if !prefs.enabled {
+            prefs.previous_profile_id = previous_profile_id;
+        }
+        prefs.enabled = true;
+        // 优先沿用用户上次在 Kiro 页选中的模型
+        let model = {
+            let preferred = prefs.default_model.trim();
+            let incoming = default_model.trim();
+            if !preferred.is_empty() {
+                preferred.to_string()
+            } else if !incoming.is_empty() {
+                incoming.to_string()
+            } else {
+                KIRO_DEFAULT_MODEL.to_string()
+            }
+        };
+        if prefs.default_model.trim().is_empty() {
+            prefs.default_model = model.clone();
+        }
+        if prefs.display_models.is_empty() {
+            prefs.display_models = vec![model.clone()];
+        }
+        Ok((model, prefs.display_models.clone()))
+    })?;
 
     let config = SaveClaudeCodeApiConfig {
         base_url: format!("http://127.0.0.1:{port}"),
@@ -186,7 +188,7 @@ pub(crate) fn activate_kiro_runtime(
         haiku_model: model.clone(),
         sonnet_model: model.clone(),
         opus_model: model,
-        display_models: prefs.display_models.clone(),
+        display_models,
         custom_models: Vec::new(),
     };
     apply_save_config_to_settings(&config)?;
@@ -195,10 +197,11 @@ pub(crate) fn activate_kiro_runtime(
 
 /// 停止 Kiro 后还原开启前的 API 配置（或官方默认），并关闭「重启自动启动」。
 pub(crate) fn deactivate_kiro_runtime() -> Result<(), String> {
-    let mut prefs = load_kiro_proxy_prefs();
-    let previous = prefs.previous_profile_id.take();
-    prefs.enabled = false;
-    save_kiro_proxy_prefs(&prefs)?;
+    let previous = update_kiro_proxy_prefs(|prefs| {
+        let previous = prefs.previous_profile_id.take();
+        prefs.enabled = false;
+        Ok(previous)
+    })?;
     restore_api_profile_or_official(previous)?;
     Ok(())
 }
@@ -273,9 +276,26 @@ pub(crate) fn start_kiro_proxy(
     *state.port.lock().map_err(|_| "lock failed".to_string())? = Some(actual_port);
     *state.inner.lock().map_err(|_| "lock failed".to_string())? = Some(handle);
 
-    // 静默套用 Kiro 到 Claude settings（不写入 API 配置列表）
-    if let Err(e) = activate_kiro_runtime(actual_port, &key, &default_model) {
-        eprintln!("[kiro] apply runtime config failed: {e}");
+    // 静默套用 Kiro 到 Claude settings（不写入 API 配置列表）。配置失败时代理不可留存。
+    if let Err(activate_error) = activate_kiro_runtime(actual_port, &key, &default_model) {
+        stop_credential_refresh_loop(state);
+        if let Some(mut handle) = state
+            .inner
+            .lock()
+            .map_err(|_| "lock failed".to_string())?
+            .take()
+        {
+            handle.stop();
+        }
+        *state.port.lock().map_err(|_| "lock failed".to_string())? = None;
+        *state.key.lock().map_err(|_| "lock failed".to_string())? = None;
+        let rollback_error = deactivate_kiro_runtime().err();
+        return Err(match rollback_error {
+            Some(error) => format!(
+                "Kiro 运行配置激活失败: {activate_error}; 回滚配置也失败: {error}"
+            ),
+            None => format!("Kiro 运行配置激活失败: {activate_error}"),
+        });
     }
 
     // 启动后从反代 /v1/models 拉取可用模型，写回 Claude settings
@@ -508,25 +528,25 @@ pub(crate) fn fetch_kiro_proxy_model_ids(port: u16, api_key: &str) -> Result<Vec
 /// 把反代返回的模型写回 Claude settings + Kiro 偏好（不维护 API 列表中的 Kiro 项）。
 pub(crate) fn sync_kiro_runtime_models(port: u16, api_key: &str) -> Result<Vec<String>, String> {
     let ids = fetch_kiro_proxy_model_ids(port, api_key)?;
-    let mut prefs = load_kiro_proxy_prefs();
     let settings = read_claude_settings_json();
     let env_model = settings
         .get("env")
         .and_then(|value| value.as_object())
         .map(|env| env_string(env, "ANTHROPIC_MODEL"))
         .unwrap_or_default();
-    let preferred = [prefs.default_model.as_str(), env_model.as_str()]
-        .into_iter()
-        .map(str::trim)
-        .find(|model| !model.is_empty() && ids.iter().any(|id| id == model))
-        .map(str::to_string)
-        .or_else(|| ids.first().cloned())
-        .unwrap_or_else(|| KIRO_DEFAULT_MODEL.to_string());
-
-    prefs.display_models = ids.clone();
-    prefs.default_model = preferred.clone();
-    // 同步只更新 API 展示列表，保留用户自定义模型
-    save_kiro_proxy_prefs(&prefs)?;
+    let (preferred, custom_models) = update_kiro_proxy_prefs(|prefs| {
+        let preferred = [prefs.default_model.as_str(), env_model.as_str()]
+            .into_iter()
+            .map(str::trim)
+            .find(|model| !model.is_empty() && ids.iter().any(|id| id == model))
+            .map(str::to_string)
+            .or_else(|| ids.first().cloned())
+            .unwrap_or_else(|| KIRO_DEFAULT_MODEL.to_string());
+        prefs.display_models = ids.clone();
+        prefs.default_model = preferred.clone();
+        // 同步只更新 API 展示列表，保留用户自定义模型
+        Ok((preferred, prefs.custom_models.clone()))
+    })?;
 
     let config = SaveClaudeCodeApiConfig {
         base_url: format!("http://127.0.0.1:{port}"),
@@ -536,7 +556,7 @@ pub(crate) fn sync_kiro_runtime_models(port: u16, api_key: &str) -> Result<Vec<S
         sonnet_model: preferred.clone(),
         opus_model: preferred,
         display_models: ids.clone(),
-        custom_models: prefs.custom_models.clone(),
+        custom_models,
     };
     apply_save_config_to_settings(&config)?;
     Ok(ids)
@@ -820,9 +840,8 @@ pub async fn kiro_stop(state: tauri::State<'_, KiroProxyState>) -> Result<KiroSt
         }
         *state_clone.port.lock().map_err(|_| "lock failed".to_string())? = None;
         *state_clone.key.lock().map_err(|_| "lock failed".to_string())? = None;
-        if let Err(e) = deactivate_kiro_runtime() {
-            eprintln!("[kiro] restore api config after stop failed: {e}");
-        }
+        deactivate_kiro_runtime()
+            .map_err(|e| format!("Kiro 已停止，但恢复 API 配置失败: {e}"))?;
         Ok(build_kiro_status_from(&state_clone))
     })
     .await
@@ -850,32 +869,33 @@ pub fn kiro_save_models_config(
     state: tauri::State<'_, KiroProxyState>,
     config: SaveKiroModelsConfig,
 ) -> Result<KiroModelsState, String> {
-    let mut prefs = load_kiro_proxy_prefs();
-    prefs.display_models = normalize_model_list(&config.display_models);
-    prefs.custom_models = normalize_model_list(&config.custom_models);
+    let (prefs, preferred) = update_kiro_proxy_prefs(|prefs| {
+        prefs.display_models = normalize_model_list(&config.display_models);
+        prefs.custom_models = normalize_model_list(&config.custom_models);
 
-    let preferred = config
-        .default_model
-        .as_deref()
-        .map(str::trim)
-        .filter(|model| !model.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            let current = prefs.default_model.trim();
-            if !current.is_empty()
-                && (prefs.display_models.iter().any(|id| id == current)
-                    || prefs.custom_models.iter().any(|id| id == current))
-            {
-                Some(current.to_string())
-            } else {
-                None
-            }
-        })
-        .or_else(|| prefs.display_models.first().cloned())
-        .or_else(|| prefs.custom_models.first().cloned())
-        .unwrap_or_default();
-    prefs.default_model = preferred.clone();
-    save_kiro_proxy_prefs(&prefs)?;
+        let preferred = config
+            .default_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let current = prefs.default_model.trim();
+                if !current.is_empty()
+                    && (prefs.display_models.iter().any(|id| id == current)
+                        || prefs.custom_models.iter().any(|id| id == current))
+                {
+                    Some(current.to_string())
+                } else {
+                    None
+                }
+            })
+            .or_else(|| prefs.display_models.first().cloned())
+            .or_else(|| prefs.custom_models.first().cloned())
+            .unwrap_or_default();
+        prefs.default_model = preferred.clone();
+        Ok((prefs.clone(), preferred))
+    })?;
 
     // 代理运行中时同步写回 Claude settings，供输入框快捷选择
     if let Ok((port, key)) = require_running_proxy(&state) {
@@ -906,17 +926,18 @@ pub fn kiro_set_default_model(
         return Err("模型名称不能为空".to_string());
     }
 
-    let mut prefs = load_kiro_proxy_prefs();
-    let known = prefs
-        .display_models
-        .iter()
-        .chain(prefs.custom_models.iter())
-        .any(|id| id == &trimmed);
-    if !known {
-        prefs.custom_models.push(trimmed.clone());
-    }
-    prefs.default_model = trimmed.clone();
-    save_kiro_proxy_prefs(&prefs)?;
+    let prefs = update_kiro_proxy_prefs(|prefs| {
+        let known = prefs
+            .display_models
+            .iter()
+            .chain(prefs.custom_models.iter())
+            .any(|id| id == &trimmed);
+        if !known {
+            prefs.custom_models.push(trimmed.clone());
+        }
+        prefs.default_model = trimmed.clone();
+        Ok(prefs.clone())
+    })?;
 
     if let Ok((port, key)) = require_running_proxy(&state) {
         let config = SaveClaudeCodeApiConfig {
@@ -932,14 +953,15 @@ pub fn kiro_set_default_model(
         apply_save_config_to_settings(&config)?;
     } else if prefs.enabled {
         // 已启用但代理暂未运行：仍更新 settings 中的模型字段
-        let mut settings = read_claude_settings_json();
-        if let Some(env) = settings
-            .get_mut("env")
-            .and_then(|value| value.as_object_mut())
-        {
-            set_env_string(env, "ANTHROPIC_MODEL", &prefs.default_model);
-        }
-        write_claude_settings_json(&settings)?;
+        update_claude_settings(|settings| {
+            if let Some(env) = settings
+                .get_mut("env")
+                .and_then(|value| value.as_object_mut())
+            {
+                set_env_string(env, "ANTHROPIC_MODEL", &prefs.default_model);
+            }
+            Ok(())
+        })?;
     }
 
     Ok(build_kiro_models_state(is_proxy_running(&state)))

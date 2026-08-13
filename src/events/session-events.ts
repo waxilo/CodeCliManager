@@ -2,7 +2,7 @@ import { appState } from '../state';
 import { shellApi } from '../app/shell/api';
 import { listen } from '@tauri-apps/api/event';
 import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPayload, QueuedPromptItem } from '../types';
-import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent, refreshStreamingUI } from '../features/chat/streaming';
+import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent, refreshStreamingUI, reconcileActiveToolsWithHistory } from '../features/chat/streaming';
 import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
 import { setAbortingUi, setSendButtonLoading, isSendButtonLoading } from '../features/chat/session-context';
@@ -11,7 +11,7 @@ import { updateConversationListSpinner } from '../features/sidebar';
 import { updateContextIndicator } from '../features/chat/context-indicator';
 import { abortSession } from '../features/chat/send';
 import { captureScrollState, getStreamingAssistantText, restoreScrollState } from '../features/chat/streaming';
-import { loadData } from '../features/conversations/load';
+import { refreshConversationFromBackend } from '../features/conversations/load';
 import { normalizeMessageForCompare } from '../features/files/index';
 import type { PermissionRequestPayload } from '../types';
 import { showCopyToastMsg } from '../ui';
@@ -86,10 +86,12 @@ export async function setupEventListeners() {
       title: payload.title,
       messages: (() => {
         const existing = appState.conversations.find((c) => c.id === payload.conversation_id);
+        reconcileActiveToolsWithHistory(payload.conversation_id, payload.messages);
         return mergeRemoteAndLocalMessages(payload.messages, existing?.messages);
       })(),
       platform: 'claude',
       project_dir: payload.project_dir,
+      source_path: payload.source_path ?? null,
       created_at: payload.updated_at,
       updated_at: payload.updated_at,
       context_tokens: payload.context_tokens ?? null,
@@ -155,6 +157,7 @@ export async function setupEventListeners() {
     }
 
     const existingConv = appState.conversations.find((c) => c.id === payload.conversation_id);
+    reconcileActiveToolsWithHistory(payload.conversation_id, payload.messages);
     const mergedMessages = mergeRemoteAndLocalMessages(
       payload.messages,
       existingConv?.messages,
@@ -166,6 +169,7 @@ export async function setupEventListeners() {
       messages: mergedMessages,
       platform: 'claude',
       project_dir: payload.project_dir,
+      source_path: payload.source_path ?? null,
       created_at: payload.updated_at,
       updated_at: payload.updated_at,
       context_tokens: payload.context_tokens ?? null,
@@ -326,6 +330,7 @@ export async function setupEventListeners() {
       appState.runningSessions.delete(endedSessionId);
       appState.abortingSessions.delete(endedSessionId);
       appState.sessionProcessModels.delete(endedSessionId);
+      appState.runIdsBySession.delete(endedSessionId);
     }
     appState.runningSessions.delete('pending');
     appState.abortingSessions.delete('pending');
@@ -345,29 +350,16 @@ export async function setupEventListeners() {
       }
     }
 
-    const preservedErrors = appState.conversations.flatMap((conversation) =>
-      conversation.messages
-        .filter((message) => message.role === 'error')
-        .map((message) => ({ conversationId: conversation.id, message })),
-    );
+    const refreshSessionId = endedSessionId || appState.activeConversationId;
+    const refreshPromise = refreshSessionId
+      ? refreshConversationFromBackend(refreshSessionId)
+      : Promise.resolve();
 
-    void loadData().then(() => {
-      preservedErrors.forEach(({ conversationId, message }) => {
-        const conversation = appState.conversations.find((item) => item.id === conversationId);
-        if (
-          conversation &&
-          !conversation.messages.some(
-            (item) => item.role === 'error' && item.content === message.content,
-          )
-        ) {
-          conversation.messages.push(message);
-        }
-      });
-
+    void refreshPromise.then(() => {
       updateConversationListSpinner();
+      if (!isCurrentSession) return;
       updateContextIndicator();
-
-      if (isCurrentSession && (appState.activeConversationId || appState.transientSessionError)) {
+      if (appState.activeConversationId || appState.transientSessionError) {
         shellApi.refreshChatContent();
       }
     });

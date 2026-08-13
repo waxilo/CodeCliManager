@@ -15,6 +15,7 @@ export interface ToolMessageData {
   toolInput: Record<string, unknown>;
   toolResult?: string;
   isError?: boolean;
+  toolUseId?: string;
   displayMode: 'one-line' | 'collapsible';
   colorScheme: ToolColorScheme;
 }

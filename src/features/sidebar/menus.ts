@@ -52,12 +52,14 @@ export function handleConversationListClick(e: Event) {
       return;
     }
 
+    const sourcePath = actionEl.dataset.sourcePath || null;
+
     if (action === 'more' && id) {
-      toggleConversationMenu(id, actionEl as HTMLElement);
+      toggleConversationMenu(id, sourcePath, actionEl as HTMLElement);
       return;
     }
     if (action === 'save-edit' && id) {
-      void saveEdit(id);
+      void saveEdit(id, sourcePath);
       return;
     }
     if (action === 'cancel-edit') {
@@ -70,8 +72,9 @@ export function handleConversationListClick(e: Event) {
 
   const item = target.closest('.conversation-item') as HTMLElement | null;
   const id = item?.dataset.id;
+  const sourcePath = item?.dataset.sourcePath || null;
   if (id) {
-    selectConversation(id);
+    selectConversation(id, sourcePath);
   }
 }
 
@@ -193,23 +196,32 @@ export function closeConversationMenu() {
   closeWorkspaceContextMenu();
 }
 
-export function toggleConversationMenu(conversationId: string, anchorEl: HTMLElement) {
+export function toggleConversationMenu(
+  conversationId: string,
+  sourcePath: string | null,
+  anchorEl: HTMLElement,
+) {
   const existing = document.querySelector<HTMLElement>('.conv-menu-overlay');
-  if (existing?.dataset.convId === conversationId) {
+  if (
+    existing?.dataset.convId === conversationId &&
+    (existing.dataset.sourcePath || null) === sourcePath
+  ) {
     return closeConversationMenu();
   }
   closeConversationMenu();
 
   const { right, bottom, top: anchorTop } = anchorEl.getBoundingClientRect();
+  const escapedSourcePath = escapeHtml(sourcePath || '');
 
   const overlay = document.createElement('div');
   overlay.className = 'conv-menu-overlay';
   overlay.dataset.convId = conversationId;
+  overlay.dataset.sourcePath = sourcePath || '';
   overlay.innerHTML = `
     <div class="conv-menu-dropdown">
-      <button type="button" class="conv-menu-item" data-action="edit" data-id="${conversationId}">重命名</button>
-      <button type="button" class="conv-menu-item" data-action="export" data-id="${conversationId}">导出为 Markdown</button>
-      <button type="button" class="conv-menu-item is-danger" data-action="delete" data-id="${conversationId}">删除</button>
+      <button type="button" class="conv-menu-item" data-action="edit" data-id="${conversationId}" data-source-path="${escapedSourcePath}">重命名</button>
+      <button type="button" class="conv-menu-item" data-action="export" data-id="${conversationId}" data-source-path="${escapedSourcePath}">导出为 Markdown</button>
+      <button type="button" class="conv-menu-item is-danger" data-action="delete" data-id="${conversationId}" data-source-path="${escapedSourcePath}">删除</button>
     </div>
   `;
 
@@ -227,10 +239,11 @@ export function toggleConversationMenu(conversationId: string, anchorEl: HTMLEle
     const btn = (ev.target as HTMLElement).closest<HTMLElement>('.conv-menu-item');
     if (!btn || !btn.dataset.action) return closeMenu();
     const { action, id } = btn.dataset;
+    const sourcePath = btn.dataset.sourcePath || null;
     closeMenu();
-    if (action === 'edit' && id) startEdit(id);
-    if (action === 'export' && id) void exportConversationToMarkdown(id);
-    if (action === 'delete' && id) void deleteConversation(id);
+    if (action === 'edit' && id) startEdit(id, sourcePath);
+    if (action === 'export' && id) void exportConversationToMarkdown(id, sourcePath);
+    if (action === 'delete' && id) void deleteConversation(id, sourcePath);
   });
 
   document.body.appendChild(overlay);

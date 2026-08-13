@@ -7,7 +7,9 @@ cd "$ROOT"
 
 TAURI_CONF="src-tauri/tauri.conf.json"
 PACKAGE_JSON="package.json"
+PACKAGE_LOCK="package-lock.json"
 CARGO_TOML="src-tauri/Cargo.toml"
+CARGO_LOCK="src-tauri/Cargo.lock"
 REMOTE="${REMOTE:-origin}"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 
@@ -27,11 +29,30 @@ read_version() {
 
 write_version() {
 	local ver="$1"
-	sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"${ver}\"/" "$TAURI_CONF" "$PACKAGE_JSON"
+
+	# 同步 npm manifest 与 lockfile 根包版本，不改动依赖解析结果。
+	node - "$ver" <<'NODE'
+const fs = require('fs');
+const version = process.argv[2];
+
+const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+packageJson.version = version;
+fs.writeFileSync('package.json', `${JSON.stringify(packageJson, null, 2)}\n`);
+
+const packageLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+packageLock.version = version;
+if (!packageLock.packages || !packageLock.packages['']) {
+  throw new Error('package-lock.json is missing its root package entry');
+}
+packageLock.packages[''].version = version;
+fs.writeFileSync('package-lock.json', `${JSON.stringify(packageLock, null, 2)}\n`);
+NODE
+
+	sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"${ver}\"/" "$TAURI_CONF"
 	sed -i '' "s/^version = \"[^\"]*\"/version = \"${ver}\"/" "$CARGO_TOML"
 	# 同步 Cargo.lock 中本 crate 的版本号，避免提交后 lock 漂移导致 rebase 失败
-	if [ -f "src-tauri/Cargo.lock" ]; then
-		sed -i '' "/^name = \"codecli-manager\"$/,/^version = / s/^version = \"[^\"]*\"/version = \"${ver}\"/" "src-tauri/Cargo.lock"
+	if [ -f "$CARGO_LOCK" ]; then
+		sed -i '' "/^name = \"codecli-manager\"$/,/^version = / s/^version = \"[^\"]*\"/version = \"${ver}\"/" "$CARGO_LOCK"
 	fi
 }
 
@@ -59,6 +80,7 @@ generate_release_notes() {
 	local diff
 	diff="$(git diff --cached \
 		-- ':(exclude)package.json' \
+		   ':(exclude)package-lock.json' \
 		   ':(exclude)src-tauri/tauri.conf.json' \
 		   ':(exclude)src-tauri/Cargo.toml' \
 		   ':(exclude)src-tauri/Cargo.lock' \
@@ -78,6 +100,20 @@ generate_release_notes() {
 	printf '%s' "$notes" | sed -e 's/[[:space:]]*$//'
 }
 
+# 允许用户预先暂存业务改动，但发布开始时不能有未暂存或未跟踪文件。
+if ! git diff --quiet; then
+	echo "拒绝发布：存在未暂存的改动。请先暂存或清理以下文件：" >&2
+	git diff --name-status >&2
+	exit 1
+fi
+
+UNTRACKED="$(git ls-files --others --exclude-standard)"
+if [ -n "$UNTRACKED" ]; then
+	echo "拒绝发布：存在未跟踪文件。请先暂存、忽略或清理：" >&2
+	printf '%s\n' "$UNTRACKED" >&2
+	exit 1
+fi
+
 # 先 fetch，用于判断远程 tag 是否已占用
 git fetch "$REMOTE"
 
@@ -92,14 +128,42 @@ done
 echo "版本: ${CURRENT} → ${NEW}"
 write_version "$NEW"
 
-DATETIME="$(date '+%Y-%m-%d %H:%M:%S')"
-SUBJECT="release: v${NEW} (${DATETIME})"
+echo "运行发布前检查..."
+npm run build
+if node -e "process.exit(require('./package.json').scripts?.test ? 0 : 1)"; then
+	npm test
+else
+	echo "package.json 未定义 test 脚本，跳过前端测试"
+fi
+cargo test --manifest-path "$CARGO_TOML"
 
-git add .
+VERSION_FILES=("$TAURI_CONF" "$PACKAGE_JSON" "$PACKAGE_LOCK" "$CARGO_TOML")
+if [ -f "$CARGO_LOCK" ]; then
+	VERSION_FILES+=("$CARGO_LOCK")
+fi
+# 只额外暂存版本相关文件，保留用户已暂存的业务改动。
+git add -- "${VERSION_FILES[@]}"
+
+# 检查阶段若产生额外文件，不得偷偷纳入 release commit。
+if ! git diff --quiet; then
+	echo "拒绝发布：发布前检查产生了非版本文件改动，请处理后重试：" >&2
+	git diff --name-status >&2
+	exit 1
+fi
+UNTRACKED="$(git ls-files --others --exclude-standard)"
+if [ -n "$UNTRACKED" ]; then
+	echo "拒绝发布：发布前检查产生了未跟踪文件，请处理后重试：" >&2
+	printf '%s\n' "$UNTRACKED" >&2
+	exit 1
+fi
+
 if git diff --cached --quiet; then
 	echo "无变更可提交"
 	exit 1
 fi
+
+DATETIME="$(date '+%Y-%m-%d %H:%M:%S')"
+SUBJECT="release: v${NEW} (${DATETIME})"
 
 # 生成变更说明（人工或 AI），写入提交信息正文
 NOTES="$(generate_release_notes)"
@@ -113,10 +177,10 @@ fi
 
 git commit -m "$COMMIT_MSG"
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
-	echo "警告: 提交后仍有未暂存变更，自动一并纳入本次 release"
-	git add -A
-	git commit --amend --no-edit
+if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+	echo "拒绝推送：release commit 后出现了新的工作树改动；脚本不会自动暂存或 amend。" >&2
+	git status --short >&2
+	exit 1
 fi
 
 # 提交后再 rebase，工作区已干净

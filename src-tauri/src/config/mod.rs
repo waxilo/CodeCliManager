@@ -1,8 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::config_io::{
+    atomic_write_json, lock_api_profiles, lock_global_config, lock_kiro_prefs, lock_settings,
+    read_json_or, read_json_or_default,
+};
 use crate::model_fetch;
 use crate::paths::{get_claude_settings_path, get_data_path};
 
@@ -38,25 +41,24 @@ pub(crate) struct SaveClaudeCodeApiConfig {
     pub(crate) custom_models: Vec<String>,
 }
 
-pub(crate) fn read_claude_settings_json() -> serde_json::Value {
-    let path = get_claude_settings_path();
-    if !path.exists() {
-        return serde_json::json!({ "env": {} });
-    }
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_else(|| serde_json::json!({ "env": {} }))
+fn read_settings_from(path: &Path) -> Result<serde_json::Value, String> {
+    read_json_or(path, serde_json::json!({ "env": {} }))
 }
 
-pub(crate) fn write_claude_settings_json(settings: &serde_json::Value) -> Result<(), String> {
+pub(crate) fn read_claude_settings_json() -> serde_json::Value {
+    read_settings_from(&get_claude_settings_path())
+        .unwrap_or_else(|_| serde_json::json!({ "env": {} }))
+}
+
+pub(crate) fn update_claude_settings<F>(update: F) -> Result<(), String>
+where
+    F: FnOnce(&mut serde_json::Value) -> Result<(), String>,
+{
+    let _guard = lock_settings()?;
     let path = get_claude_settings_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
-    }
-    let content =
-        serde_json::to_string_pretty(settings).map_err(|e| format!("Failed to encode config: {e}"))?;
-    fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    let mut settings = read_settings_from(&path)?;
+    update(&mut settings)?;
+    atomic_write_json(&path, &settings)
 }
 
 // ── MCP 服务器管理（用户级配置位于 ~/.claude.json 的 mcpServers 字段） ─────
@@ -67,25 +69,24 @@ pub(crate) fn get_claude_global_config_path() -> PathBuf {
     path
 }
 
-pub(crate) fn read_claude_global_config() -> serde_json::Value {
-    let path = get_claude_global_config_path();
-    if !path.exists() {
-        return serde_json::json!({});
-    }
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_else(|| serde_json::json!({}))
+fn read_global_config_from(path: &Path) -> Result<serde_json::Value, String> {
+    read_json_or(path, serde_json::json!({}))
 }
 
-pub(crate) fn write_claude_global_config(config: &serde_json::Value) -> Result<(), String> {
+pub(crate) fn read_claude_global_config() -> serde_json::Value {
+    read_global_config_from(&get_claude_global_config_path())
+        .unwrap_or_else(|_| serde_json::json!({}))
+}
+
+fn update_claude_global_config<F>(update: F) -> Result<(), String>
+where
+    F: FnOnce(&mut serde_json::Value) -> Result<(), String>,
+{
+    let _guard = lock_global_config()?;
     let path = get_claude_global_config_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
-    }
-    let content =
-        serde_json::to_string_pretty(config).map_err(|e| format!("Failed to encode config: {e}"))?;
-    fs::write(&path, content).map_err(|e| format!("Failed to write {}: {e}", path.display()))
+    let mut config = read_global_config_from(&path)?;
+    update(&mut config)?;
+    atomic_write_json(&path, &config)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -182,39 +183,38 @@ pub fn upsert_mcp_server(name: String, config: McpServerConfig) -> Result<McpSer
             config.url = None;
         }
     }
-    let mut global = read_claude_global_config();
-    if !global.is_object() {
-        global = serde_json::json!({});
-    }
-    let obj = global
-        .as_object_mut()
-        .ok_or_else(|| "配置文件格式异常".to_string())?;
-    let servers = obj
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::json!({}));
-    let map = servers
-        .as_object_mut()
-        .ok_or_else(|| "mcpServers 配置格式异常".to_string())?;
-    let value =
-        serde_json::to_value(config).map_err(|e| format!("配置序列化失败: {e}"))?;
-    map.insert(trimmed.to_string(), value);
-    write_claude_global_config(&global)?;
+    update_claude_global_config(|global| {
+        if !global.is_object() {
+            return Err("配置文件格式异常".to_string());
+        }
+        let obj = global
+            .as_object_mut()
+            .ok_or_else(|| "配置文件格式异常".to_string())?;
+        let servers = obj
+            .entry("mcpServers")
+            .or_insert_with(|| serde_json::json!({}));
+        let map = servers
+            .as_object_mut()
+            .ok_or_else(|| "mcpServers 配置格式异常".to_string())?;
+        let value = serde_json::to_value(config)
+            .map_err(|e| format!("配置序列化失败: {e}"))?;
+        map.insert(trimmed.to_string(), value);
+        Ok(())
+    })?;
     Ok(build_mcp_servers_state())
 }
 
 #[tauri::command]
 pub fn delete_mcp_server(name: String) -> Result<McpServersState, String> {
-    let mut global = read_claude_global_config();
-    if !global.is_object() {
-        return Ok(build_mcp_servers_state());
-    }
-    let obj = global
-        .as_object_mut()
-        .ok_or_else(|| "配置文件格式异常".to_string())?;
-    if let Some(map) = obj.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
-        map.remove(&name);
-    }
-    write_claude_global_config(&global)?;
+    update_claude_global_config(|global| {
+        let obj = global
+            .as_object_mut()
+            .ok_or_else(|| "配置文件格式异常".to_string())?;
+        if let Some(map) = obj.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+            map.remove(&name);
+        }
+        Ok(())
+    })?;
     Ok(build_mcp_servers_state())
 }
 
@@ -282,7 +282,7 @@ pub(crate) struct ApiProfile {
     pub(crate) updated_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub(crate) struct ApiProfilesStore {
     #[serde(default)]
     pub(crate) active_profile_id: Option<String>,
@@ -317,36 +317,30 @@ pub(crate) fn get_kiro_proxy_prefs_path() -> PathBuf {
 }
 
 pub(crate) fn load_kiro_proxy_prefs() -> KiroProxyPrefs {
-    let path = get_kiro_proxy_prefs_path();
-    if !path.exists() {
-        return KiroProxyPrefs::default();
-    }
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+    read_json_or_default(&get_kiro_proxy_prefs_path()).unwrap_or_default()
 }
 
-pub(crate) fn save_kiro_proxy_prefs(prefs: &KiroProxyPrefs) -> Result<(), String> {
-    let data_path = get_data_path();
-    if !data_path.exists() {
-        fs::create_dir_all(&data_path).map_err(|e| format!("Failed to create data dir: {e}"))?;
-    }
-    let content = serde_json::to_string_pretty(prefs)
-        .map_err(|e| format!("Failed to encode kiro proxy prefs: {e}"))?;
-    fs::write(get_kiro_proxy_prefs_path(), content)
-        .map_err(|e| format!("Failed to write kiro proxy prefs: {e}"))
+pub(crate) fn update_kiro_proxy_prefs<F, R>(update: F) -> Result<R, String>
+where
+    F: FnOnce(&mut KiroProxyPrefs) -> Result<R, String>,
+{
+    let _guard = lock_kiro_prefs()?;
+    let path = get_kiro_proxy_prefs_path();
+    let mut prefs: KiroProxyPrefs = read_json_or_default(&path)?;
+    let result = update(&mut prefs)?;
+    atomic_write_json(&path, &prefs)?;
+    Ok(result)
 }
 
 /// 用户改用其它 API 配置时放弃「重启后自动开 Kiro」。
 pub(crate) fn abandon_kiro_proxy_preference() {
-    let mut prefs = load_kiro_proxy_prefs();
-    if !prefs.enabled && prefs.previous_profile_id.is_none() {
-        return;
-    }
-    prefs.enabled = false;
-    prefs.previous_profile_id = None;
-    let _ = save_kiro_proxy_prefs(&prefs);
+    let _ = update_kiro_proxy_prefs(|prefs| {
+        if prefs.enabled || prefs.previous_profile_id.is_some() {
+            prefs.enabled = false;
+            prefs.previous_profile_id = None;
+        }
+        Ok(())
+    });
 }
 
 /// 从 store 中移除历史遗留的名为「Kiro」的列表项（不再作为 API 配置展示）。
@@ -400,25 +394,19 @@ pub(crate) fn get_api_profiles_path() -> PathBuf {
 }
 
 pub(crate) fn load_api_profiles_store() -> ApiProfilesStore {
-    let path = get_api_profiles_path();
-    if !path.exists() {
-        return ApiProfilesStore::default();
-    }
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| serde_json::from_str(&content).ok())
-        .unwrap_or_default()
+    read_json_or_default(&get_api_profiles_path()).unwrap_or_default()
 }
 
-pub(crate) fn save_api_profiles_store(store: &ApiProfilesStore) -> Result<(), String> {
-    let data_path = get_data_path();
-    if !data_path.exists() {
-        fs::create_dir_all(&data_path).map_err(|e| format!("Failed to create data dir: {e}"))?;
-    }
-    let content = serde_json::to_string_pretty(store)
-        .map_err(|e| format!("Failed to encode api profiles: {e}"))?;
-    fs::write(get_api_profiles_path(), content)
-        .map_err(|e| format!("Failed to write api profiles: {e}"))
+pub(crate) fn update_api_profiles_store<F, R>(update: F) -> Result<R, String>
+where
+    F: FnOnce(&mut ApiProfilesStore) -> Result<R, String>,
+{
+    let _guard = lock_api_profiles()?;
+    let path = get_api_profiles_path();
+    let mut store: ApiProfilesStore = read_json_or_default(&path)?;
+    let result = update(&mut store)?;
+    atomic_write_json(&path, &store)?;
+    Ok(result)
 }
 
 pub(crate) fn apply_model_override_env(cmd: &mut std::process::Command, model: &str) {
@@ -500,8 +488,10 @@ pub(crate) fn profile_to_save_config(profile: &ApiProfile) -> SaveClaudeCodeApiC
     }
 }
 
-pub(crate) fn apply_save_config_to_settings(config: &SaveClaudeCodeApiConfig) -> Result<(), String> {
-    let mut settings = read_claude_settings_json();
+fn apply_save_config_to_value(
+    settings: &mut serde_json::Value,
+    config: &SaveClaudeCodeApiConfig,
+) -> Result<(), String> {
     let env_value = settings
         .as_object_mut()
         .map(|obj| {
@@ -537,21 +527,29 @@ pub(crate) fn apply_save_config_to_settings(config: &SaveClaudeCodeApiConfig) ->
         &config.opus_model,
     );
 
-    if let Some(api_key) = config.api_key.as_ref().filter(|key| !key.trim().is_empty()) {
+    if let Some(api_key) = &config.api_key {
         let trimmed = api_key.trim();
-        env.insert(
-            "ANTHROPIC_AUTH_TOKEN".to_string(),
-            serde_json::Value::String(trimmed.to_string()),
-        );
-        if env.contains_key("ANTHROPIC_API_KEY") {
+        if trimmed.is_empty() {
+            env.remove("ANTHROPIC_AUTH_TOKEN");
+            env.remove("ANTHROPIC_API_KEY");
+        } else {
             env.insert(
-                "ANTHROPIC_API_KEY".to_string(),
+                "ANTHROPIC_AUTH_TOKEN".to_string(),
                 serde_json::Value::String(trimmed.to_string()),
             );
+            if env.contains_key("ANTHROPIC_API_KEY") {
+                env.insert(
+                    "ANTHROPIC_API_KEY".to_string(),
+                    serde_json::Value::String(trimmed.to_string()),
+                );
+            }
         }
     }
+    Ok(())
+}
 
-    write_claude_settings_json(&settings)
+pub(crate) fn apply_save_config_to_settings(config: &SaveClaudeCodeApiConfig) -> Result<(), String> {
+    update_claude_settings(|settings| apply_save_config_to_value(settings, config))
 }
 
 pub(crate) fn build_api_profiles_state(store: &ApiProfilesStore) -> ApiProfilesState {
@@ -574,14 +572,14 @@ pub(crate) fn build_api_profiles_state(store: &ApiProfilesStore) -> ApiProfilesS
     }
 }
 
-pub(crate) fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) {
+pub(crate) fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) -> bool {
     if !store.profiles.is_empty() {
-        return;
+        return false;
     }
 
     // Kiro 运行时配置不写入 API 列表，避免把本地代理地址当成「默认配置」
     if load_kiro_proxy_prefs().enabled {
-        return;
+        return false;
     }
 
     let settings = read_claude_settings_json();
@@ -592,11 +590,11 @@ pub(crate) fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) {
         .unwrap_or_default();
     let config = config_from_env(&env);
     if config.base_url.is_empty() && !config.has_api_key && config.default_model.is_empty() {
-        return;
+        return false;
     }
     let base = config.base_url.trim().to_lowercase();
     if base.starts_with("http://127.0.0.1:") || base.starts_with("http://localhost:") {
-        return;
+        return false;
     }
 
     let now = chrono::Utc::now().timestamp();
@@ -616,15 +614,19 @@ pub(crate) fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) {
     };
     store.active_profile_id = Some(profile.id.clone());
     store.profiles.push(profile);
-    let _ = save_api_profiles_store(store);
+    true
 }
 
 pub(crate) fn load_api_profiles_state() -> ApiProfilesState {
-    let mut store = load_api_profiles_store();
-    if purge_kiro_named_profiles(&mut store) {
-        let _ = save_api_profiles_store(&store);
-    }
-    ensure_default_profile_from_live(&mut store);
+    let store = update_api_profiles_store(|store| {
+        purge_kiro_named_profiles(store);
+        ensure_default_profile_from_live(store);
+        Ok(ApiProfilesStore {
+            active_profile_id: store.active_profile_id.clone(),
+            profiles: store.profiles.clone(),
+        })
+    })
+    .unwrap_or_else(|_| load_api_profiles_store());
     build_api_profiles_state(&store)
 }
 
@@ -635,20 +637,20 @@ pub fn get_api_profiles_state() -> ApiProfilesState {
 
 #[tauri::command]
 pub fn switch_api_profile(profile_id: String) -> Result<ApiProfilesState, String> {
-    let mut store = load_api_profiles_store();
-    let profile = store
-        .profiles
-        .iter()
-        .find(|profile| profile.id == profile_id && !is_kiro_named_profile(&profile.name))
-        .cloned()
-        .ok_or_else(|| "API profile not found".to_string())?;
-
     // 改用普通 API 配置后，不再在重启时自动拉起 Kiro
     abandon_kiro_proxy_preference();
 
-    apply_save_config_to_settings(&profile_to_save_config(&profile))?;
-    store.active_profile_id = Some(profile_id);
-    save_api_profiles_store(&store)?;
+    let store = update_api_profiles_store(|store| {
+        let profile = store
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id && !is_kiro_named_profile(&profile.name))
+            .cloned()
+            .ok_or_else(|| "API profile not found".to_string())?;
+        apply_save_config_to_settings(&profile_to_save_config(&profile))?;
+        store.active_profile_id = Some(profile_id);
+        Ok(store.clone())
+    })?;
     Ok(build_api_profiles_state(&store))
 }
 
@@ -675,20 +677,22 @@ pub(crate) fn apply_official_api_settings() -> Result<ApiProfilesState, String> 
         "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
     ];
 
-    let mut settings = read_claude_settings_json();
-    if let Some(env) = settings
-        .get_mut("env")
-        .and_then(|value| value.as_object_mut())
-    {
-        for key in KEYS {
-            env.remove(*key);
+    update_claude_settings(|settings| {
+        if let Some(env) = settings
+            .get_mut("env")
+            .and_then(|value| value.as_object_mut())
+        {
+            for key in KEYS {
+                env.remove(*key);
+            }
         }
-    }
-    write_claude_settings_json(&settings)?;
+        Ok(())
+    })?;
 
-    let mut store = load_api_profiles_store();
-    store.active_profile_id = None;
-    save_api_profiles_store(&store)?;
+    let store = update_api_profiles_store(|store| {
+        store.active_profile_id = None;
+        Ok(store.clone())
+    })?;
     Ok(build_api_profiles_state(&store))
 }
 
@@ -699,19 +703,24 @@ pub(crate) fn restore_api_profile_or_official(
     let Some(profile_id) = profile_id.filter(|id| !id.trim().is_empty()) else {
         return apply_official_api_settings();
     };
-    let mut store = load_api_profiles_store();
-    let Some(profile) = store
-        .profiles
-        .iter()
-        .find(|profile| profile.id == profile_id && !is_kiro_named_profile(&profile.name))
-        .cloned()
-    else {
-        return apply_official_api_settings();
-    };
-    apply_save_config_to_settings(&profile_to_save_config(&profile))?;
-    store.active_profile_id = Some(profile_id);
-    save_api_profiles_store(&store)?;
-    Ok(build_api_profiles_state(&store))
+    let store = update_api_profiles_store(|store| {
+        let Some(profile) = store
+            .profiles
+            .iter()
+            .find(|profile| profile.id == profile_id && !is_kiro_named_profile(&profile.name))
+            .cloned()
+        else {
+            return Err("API profile not found".to_string());
+        };
+        apply_save_config_to_settings(&profile_to_save_config(&profile))?;
+        store.active_profile_id = Some(profile_id);
+        Ok(store.clone())
+    });
+    match store {
+        Ok(store) => Ok(build_api_profiles_state(&store)),
+        Err(error) if error == "API profile not found" => apply_official_api_settings(),
+        Err(error) => Err(error),
+    }
 }
 
 #[tauri::command]
@@ -729,10 +738,10 @@ pub fn upsert_api_profile(
         return Err("Kiro 由「Kiro 代理」页管理，不能作为 API 配置保存".to_string());
     }
 
-    let mut store = load_api_profiles_store();
-    let now = chrono::Utc::now().timestamp();
+    let store = update_api_profiles_store(|store| {
+        let now = chrono::Utc::now().timestamp();
 
-    let resolved_id = if let Some(id) = profile_id.filter(|value| !value.trim().is_empty()) {
+        let resolved_id = if let Some(id) = profile_id.filter(|value| !value.trim().is_empty()) {
         let profile = store
             .profiles
             .iter_mut()
@@ -802,37 +811,37 @@ pub fn upsert_api_profile(
         id
     };
 
-    if apply {
-        abandon_kiro_proxy_preference();
-        let profile = store
-            .profiles
-            .iter()
-            .find(|profile| profile.id == resolved_id)
-            .cloned()
-            .ok_or_else(|| "API profile not found".to_string())?;
-        apply_save_config_to_settings(&profile_to_save_config(&profile))?;
-        store.active_profile_id = Some(resolved_id);
-    }
+        if apply {
+            abandon_kiro_proxy_preference();
+            let profile = store
+                .profiles
+                .iter()
+                .find(|profile| profile.id == resolved_id)
+                .cloned()
+                .ok_or_else(|| "API profile not found".to_string())?;
+            apply_save_config_to_settings(&profile_to_save_config(&profile))?;
+            store.active_profile_id = Some(resolved_id);
+        }
 
-    save_api_profiles_store(&store)?;
+        Ok(store.clone())
+    })?;
     Ok(build_api_profiles_state(&store))
 }
 
 #[tauri::command]
 pub fn delete_api_profile(profile_id: String) -> Result<ApiProfilesState, String> {
-    let mut store = load_api_profiles_store();
+    let store = update_api_profiles_store(|store| {
+        if store.active_profile_id.as_deref() == Some(profile_id.as_str()) {
+            return Err("Cannot delete the active API profile".to_string());
+        }
 
-    if store.active_profile_id.as_deref() == Some(profile_id.as_str()) {
-        return Err("Cannot delete the active API profile".to_string());
-    }
-
-    let before = store.profiles.len();
-    store.profiles.retain(|profile| profile.id != profile_id);
-    if store.profiles.len() == before {
-        return Err("API profile not found".to_string());
-    }
-
-    save_api_profiles_store(&store)?;
+        let before = store.profiles.len();
+        store.profiles.retain(|profile| profile.id != profile_id);
+        if store.profiles.len() == before {
+            return Err("API profile not found".to_string());
+        }
+        Ok(store.clone())
+    })?;
     Ok(build_api_profiles_state(&store))
 }
 
@@ -947,34 +956,42 @@ pub fn import_cc_switch_profiles() -> Result<CcSwitchImportResult, String> {
         return Err("CC Switch 中没有 Claude 配置可导入".to_string());
     }
 
-    let mut store = load_api_profiles_store();
-    ensure_default_profile_from_live(&mut store);
-
     let now = chrono::Utc::now().timestamp();
-    let mut imported_count = 0usize;
-    let mut skipped_count = 0usize;
-    let mut skipped_names = Vec::new();
+    let (store, imported_count, skipped_count, skipped_names) =
+        update_api_profiles_store(|store| {
+            ensure_default_profile_from_live(store);
+            let mut imported_count = 0usize;
+            let mut skipped_count = 0usize;
+            let mut skipped_names = Vec::new();
 
-    for provider in providers {
-        let Some(profile) = profile_from_cc_switch_row(&provider.name, &provider.settings_config, now)
-        else {
-            skipped_count += 1;
-            skipped_names.push(format!("{}（配置为空）", provider.name));
-            continue;
-        };
+            for provider in providers {
+                let Some(profile) =
+                    profile_from_cc_switch_row(&provider.name, &provider.settings_config, now)
+                else {
+                    skipped_count += 1;
+                    skipped_names.push(format!("{}（配置为空）", provider.name));
+                    continue;
+                };
 
-        if is_duplicate_api_profile(&store, &profile) {
-            skipped_count += 1;
-            skipped_names.push(profile.name);
-            continue;
-        }
+                if is_duplicate_api_profile(store, &profile) {
+                    skipped_count += 1;
+                    skipped_names.push(profile.name);
+                    continue;
+                }
 
-        store.profiles.push(profile);
-        imported_count += 1;
-    }
+                store.profiles.push(profile);
+                imported_count += 1;
+            }
+
+            Ok((
+                store.clone(),
+                imported_count,
+                skipped_count,
+                skipped_names,
+            ))
+        })?;
 
     // 全部已存在 / 无新增不算失败，照常返回结果，由前端给出友好提示
-    save_api_profiles_store(&store)?;
     Ok(CcSwitchImportResult {
         imported_count,
         skipped_count,
@@ -1017,38 +1034,41 @@ pub fn set_active_default_model(model: String) -> Result<ClaudeCodeApiConfig, St
     let trimmed = model.trim().to_string();
 
     // 1) 写入 Claude Code settings.json
-    let mut settings = read_claude_settings_json();
-    let env_value = settings
-        .as_object_mut()
-        .map(|obj| {
-            if !obj.contains_key("env") {
-                obj.insert("env".to_string(), serde_json::json!({}));
-            }
-            obj.get_mut("env").unwrap()
-        })
-        .ok_or_else(|| "Invalid settings.json structure".to_string())?;
-    let env = env_value
-        .as_object_mut()
-        .ok_or_else(|| "Invalid env section in settings.json".to_string())?;
-    set_env_string(env, "ANTHROPIC_MODEL", &trimmed);
-    write_claude_settings_json(&settings)?;
+    update_claude_settings(|settings| {
+        let env_value = settings
+            .as_object_mut()
+            .map(|obj| {
+                if !obj.contains_key("env") {
+                    obj.insert("env".to_string(), serde_json::json!({}));
+                }
+                obj.get_mut("env").unwrap()
+            })
+            .ok_or_else(|| "Invalid settings.json structure".to_string())?;
+        let env = env_value
+            .as_object_mut()
+            .ok_or_else(|| "Invalid env section in settings.json".to_string())?;
+        set_env_string(env, "ANTHROPIC_MODEL", &trimmed);
+        Ok(())
+    })?;
 
     // 2) 同步活跃 profile 的 default_model（如果有）
-    let mut store = load_api_profiles_store();
-    if let Some(active_id) = store.active_profile_id.clone() {
-        if let Some(profile) = store.profiles.iter_mut().find(|p| p.id == active_id) {
-            profile.default_model = trimmed.clone();
-            profile.updated_at = chrono::Utc::now().timestamp();
-            save_api_profiles_store(&store)?;
+    update_api_profiles_store(|store| {
+        if let Some(active_id) = store.active_profile_id.clone() {
+            if let Some(profile) = store.profiles.iter_mut().find(|p| p.id == active_id) {
+                profile.default_model = trimmed.clone();
+                profile.updated_at = chrono::Utc::now().timestamp();
+            }
         }
-    }
+        Ok(())
+    })?;
 
     // 3) Kiro 启用时同步偏好里的默认模型
-    let mut kiro_prefs = load_kiro_proxy_prefs();
-    if kiro_prefs.enabled {
-        kiro_prefs.default_model = trimmed;
-        let _ = save_kiro_proxy_prefs(&kiro_prefs);
-    }
+    let _ = update_kiro_proxy_prefs(|prefs| {
+        if prefs.enabled {
+            prefs.default_model = trimmed;
+        }
+        Ok(())
+    });
 
     Ok(get_claude_api_config())
 }

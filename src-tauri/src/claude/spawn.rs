@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{mpsc::{self, RecvTimeoutError}, Arc, Mutex};
@@ -24,6 +24,7 @@ pub(crate) fn spawn_claude_stream(
     conversation_id: Option<&String>,
     project_dir: Option<&String>,
     model: Option<&str>,
+    run_id: &str,
 ) -> std::io::Result<StreamOutcome> {
     // 本轮无输出超时；空闲常驻会话超时后优雅退出（下次发消息会 --resume 重建）
     let turn_idle_timeout = Duration::from_secs(600); // 10 分钟
@@ -66,6 +67,7 @@ pub(crate) fn spawn_claude_stream(
 
     let claude_bin = resolve_claude_executable();
     let mut cmd = Command::new(&claude_bin);
+    configure_process_group(&mut cmd);
     cmd.args(&args);
     apply_cli_runtime_env(&mut cmd);
     // env 覆盖仅用于第三方中转（强制各档模型一致）；官方订阅靠 --model，避免污染后台任务模型
@@ -102,7 +104,7 @@ pub(crate) fn spawn_claude_stream(
     let stdin = Arc::new(Mutex::new(stdin_raw));
 
     // 初始化控制握手（注册 SDK 控制通道）；用户消息等 initialize 成功后再发
-    let init_id = format!("init_{}", Instant::now().elapsed().as_nanos());
+    let init_id = new_unique_id("init_");
     let init_msg = serde_json::json!({
         "type": "control_request",
         "request_id": init_id,
@@ -127,17 +129,30 @@ pub(crate) fn spawn_claude_stream(
     let registry_key = conversation_id
         .filter(|c| !c.is_empty())
         .cloned()
-        .unwrap_or_else(|| format!("pending-{}", Instant::now().elapsed().as_nanos()));
+        .unwrap_or_else(|| pending_key_for_run(run_id));
+    register_run_key(run_id, &registry_key);
     register_active_process(&registry_key, Arc::clone(&child_arc));
     register_active_stdin(&registry_key, Arc::clone(&stdin));
     set_active_session_model(
         &registry_key,
         &normalize_process_model(model),
     );
+    // execute_prompt 返回 runId 后可能立刻收到取消；进程注册完成时兑现该取消。
+    if is_session_aborted(&registry_key) {
+        if let Ok(mut child) = child_arc.lock() {
+            force_kill_process_tree(&mut child);
+        }
+        unregister_active_process(&registry_key);
+        clear_session_aborted(&registry_key);
+        drop(stdin);
+        return Ok(StreamOutcome::Cancelled(conversation_id.cloned()));
+    }
 
     let mut captured_session_id = conversation_id.filter(|c| !c.is_empty()).cloned();
     let mut captured_registry_key = registry_key.clone();
     let mut block_types: HashMap<usize, String> = HashMap::new();
+    let mut tool_use_blocks: HashMap<usize, ToolUseBlockState> = HashMap::new();
+    let mut known_task_ids: HashSet<String> = HashSet::new();
     let mut protocol_guard = ProtocolLeakGuard::default();
     let mut recovery_attempts = 0u8;
     let mut stream_error: Option<String> = None;
@@ -340,6 +355,8 @@ pub(crate) fn spawn_claude_stream(
                     &app,
                     &mut captured_session_id,
                     &mut block_types,
+                    &mut tool_use_blocks,
+                    &mut known_task_ids,
                     &mut protocol_guard,
                     &mut stream_error,
                 );
@@ -384,6 +401,8 @@ pub(crate) fn spawn_claude_stream(
                     turns_completed += 1;
                     turn_active = false;
                     block_types.clear();
+                    tool_use_blocks.clear();
+                    known_task_ids.clear();
 
                     // 切模型 / 优雅退出过程中的 result 是过期事件：
                     // 若再发 turn-complete / messages-updated，前端会冲掉刚插入的新提问。
@@ -588,6 +607,8 @@ pub(crate) fn spawn_claude_stream(
             &app,
             &mut captured_session_id,
             &mut block_types,
+            &mut tool_use_blocks,
+            &mut known_task_ids,
             &mut protocol_guard,
             &mut stream_error,
         );
@@ -628,7 +649,7 @@ pub(crate) fn spawn_claude_stream(
         if is_stream_aborted(&captured_registry_key, &captured_session_id) {
             clear_stream_aborted(&captured_registry_key, &captured_session_id);
             eprintln!("[claude] 用户主动终止，忽略 stream error: {}", error);
-            return Ok(StreamOutcome::Success(captured_session_id));
+            return Ok(StreamOutcome::Cancelled(captured_session_id));
         }
         return Ok(StreamOutcome::Failed {
             session_id: captured_session_id,
@@ -653,7 +674,11 @@ pub(crate) fn spawn_claude_stream(
                 was_aborted, was_model_restart, was_graceful, status
             );
             // 注意：不要在这里 take_model_restart，留给外层 execute_prompt 跳过 session-ended
-            return Ok(StreamOutcome::Success(captured_session_id));
+            return Ok(if was_aborted {
+                StreamOutcome::Cancelled(captured_session_id)
+            } else {
+                StreamOutcome::Success(captured_session_id)
+            });
         }
 
         let error_msg = if !stderr_content.trim().is_empty() {

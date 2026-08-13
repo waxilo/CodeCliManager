@@ -13,8 +13,16 @@ export function readFileBase64(filePath: string): Promise<string> {
   return invoke<string>('read_file_base64', { filePath });
 }
 
-export function writeFileBytes(filePath: string, data: number[]): Promise<void> {
-  return invoke('write_file_bytes', { filePath, data });
+export function exportMarkdown(suggestedFileName: string, content: string): Promise<boolean> {
+  return invoke<boolean>('export_markdown', { suggestedFileName, content });
+}
+
+export function writeClipboardImage(
+  projectDir: string,
+  fileName: string,
+  data: number[],
+): Promise<string> {
+  return invoke<string>('write_clipboard_image', { projectDir, fileName, data });
 }
 
 export function importExternalPath(args: {

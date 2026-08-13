@@ -57,6 +57,24 @@ export function mergeRemoteAndLocalMessages(remote: Message[], local: Message[] 
       m.id.startsWith('pending-') ||
       m.id.startsWith('error-'));
 
+  const extractPendingToolId = (id: string): string | null => {
+    if (!id.startsWith('pending-tool-')) return null;
+    return id.slice('pending-tool-'.length) || null;
+  };
+
+  const remoteHasToolUseId = (toolUseId: string) =>
+    remote.some((m) => {
+      if (m.role !== 'tool_use' && m.role !== 'tool' && m.role !== 'tool_result') return false;
+      try {
+        const parsed = JSON.parse(m.content) as Record<string, unknown>;
+        const id = String(parsed.id || parsed.tool_use_id || parsed.toolUseId || '');
+        return id === toolUseId;
+      } catch {
+        return m.content.includes(toolUseId);
+      }
+    }) ||
+    remote.some((m) => m.toolData?.toolUseId === toolUseId);
+
   const assistantTextSimilar = (a: string, b: string) => {
     const left = (a || '').trim();
     const right = (b || '').trim();
@@ -126,6 +144,16 @@ export function mergeRemoteAndLocalMessages(remote: Message[], local: Message[] 
         continue;
       }
 
+      // pending-tool-*：远程尚未出现同 id 的 Task 时保留，避免 turn-complete 闪断
+      if (msg.role === 'tool') {
+        const toolId = extractPendingToolId(String(msg.id));
+        if (toolId && remoteHasToolUseId(toolId)) {
+          continue;
+        }
+        filteredTrailing.push(msg);
+        continue;
+      }
+
       filteredTrailing.push(msg);
     }
 
@@ -185,42 +213,31 @@ export function mergeRemoteAndLocalMessages(remote: Message[], local: Message[] 
   return dedupeAdjacentDuplicateMessages(merged);
 }
 
-/** 去掉相邻重复的用户气泡 / 近似重复的助手气泡 */
+/** 只替换明确对应的临时气泡；真实的重复消息必须保留。 */
 export function dedupeAdjacentDuplicateMessages(messages: Message[]): Message[] {
   if (messages.length < 2) return messages;
   const result: Message[] = [];
   for (const msg of messages) {
     const prev = result[result.length - 1];
     if (prev && prev.role === 'user' && msg.role === 'user') {
+      const prevTemporary = String(prev.id).startsWith('user-') || String(prev.id).startsWith('pending-user-');
+      const msgTemporary = String(msg.id).startsWith('user-') || String(msg.id).startsWith('pending-user-');
       if (
+        prevTemporary !== msgTemporary &&
         normalizeMessageForCompare(prev.content) === normalizeMessageForCompare(msg.content)
       ) {
-        // 同文案相邻用户气泡：保留较新的（通常带乐观 id 的会被远程正式条替换）
-        const preferMsg =
-          !String(msg.id).startsWith('user-') || String(prev.id).startsWith('user-');
-        if (preferMsg) result[result.length - 1] = msg;
+        result[result.length - 1] = prevTemporary ? msg : prev;
         continue;
       }
     }
-    if (
-      prev &&
-      prev.role === 'assistant' &&
-      msg.role === 'assistant' &&
-      !prev.thinking &&
-      !msg.thinking
-    ) {
-      const a = (prev.content || '').trim();
-      const b = (msg.content || '').trim();
+    if (prev && prev.role === 'assistant' && msg.role === 'assistant') {
+      const prevTemporary = String(prev.id).startsWith('stream-assistant-');
+      const msgTemporary = String(msg.id).startsWith('stream-assistant-');
       if (
-        a &&
-        b &&
-        (a === b || a.includes(b) || b.includes(a) || a.startsWith(b.slice(0, 80)) || b.startsWith(a.slice(0, 80)))
+        prevTemporary !== msgTemporary &&
+        (prev.content || '').trim() === (msg.content || '').trim()
       ) {
-        const preferMsg =
-          b.length > a.length ||
-          (String(prev.id).startsWith('stream-assistant-') &&
-            !String(msg.id).startsWith('stream-assistant-'));
-        if (preferMsg) result[result.length - 1] = msg;
+        result[result.length - 1] = prevTemporary ? msg : prev;
         continue;
       }
     }
@@ -229,9 +246,34 @@ export function dedupeAdjacentDuplicateMessages(messages: Message[]): Message[] 
   return result;
 }
 
+export function conversationInstanceKey(id: string, sourcePath?: string | null): string {
+  return `${id}\u0000${sourcePath || ''}`;
+}
+
+export function isConversationInstance(
+  conversation: Conversation,
+  id: string,
+  sourcePath?: string | null,
+): boolean {
+  return conversationInstanceKey(conversation.id, conversation.source_path) === conversationInstanceKey(id, sourcePath);
+}
+
+export function getActiveConversation(): Conversation | undefined {
+  if (!appState.activeConversationId) return undefined;
+  return appState.conversations.find((conversation) =>
+    isConversationInstance(
+      conversation,
+      appState.activeConversationId,
+      appState.activeConversationSourcePath,
+    ),
+  );
+}
+
 export function updateOrAddConversation(conv: Conversation) {
   const normalized = normalizeConversation(conv as Conversation & { projectDir?: string | null });
-  const idx = appState.conversations.findIndex(c => c.id === normalized.id);
+  const idx = appState.conversations.findIndex((candidate) =>
+    isConversationInstance(candidate, normalized.id, normalized.source_path),
+  );
   if (idx >= 0) {
     const existing = appState.conversations[idx];
     appState.conversations[idx] = {
@@ -245,6 +287,8 @@ export function updateOrAddConversation(conv: Conversation) {
     // 标记为新增，下一次渲染时播放淡入动画
     appState.newConversationIds.add(normalized.id);
   }
-  appState.conversations.sort((a, b) => b.created_at - a.created_at);
+  appState.conversations.sort(
+    (a, b) => (b.updated_at || b.created_at) - (a.updated_at || a.created_at),
+  );
 }
 

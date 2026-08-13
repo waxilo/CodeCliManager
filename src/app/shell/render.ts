@@ -44,6 +44,7 @@ import { openMcpView, closeMcpView, mountMcpView, renderMcpViewHtml } from '../.
 import { openKiroView, closeKiroView } from '../../features/kiro';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { loadData } from '../../features/conversations';
+import { getActiveConversation } from '../../features/conversations/normalize';
 import { newChat } from '../../features/chat/send';
 import { handleSendButtonClick } from '../../features/chat/retry';
 import { handleKeydown, setupMessageListPostRender } from '../../features/chat/refresh';
@@ -171,7 +172,7 @@ function performRender() {
         ${appState.activeConversationId || appState.pendingUserMessage ? `
         <div class="main-topbar">
           <div class="main-topbar-main">
-            ${renderChatHeaderHtml(appState.conversations.find((c) => c.id === appState.activeConversationId))}
+            ${renderChatHeaderHtml(getActiveConversation())}
           </div>
         </div>
         ` : ''}
@@ -378,7 +379,11 @@ export function attachEventListeners() {
         editInput.select();
         editInput.addEventListener('keydown', (e) => {
           if (appState.editingConversationId) {
-            handleEditKeydown(e, appState.editingConversationId);
+            handleEditKeydown(
+              e,
+              appState.editingConversationId,
+              appState.editingConversationSourcePath,
+            );
           }
         });
       }

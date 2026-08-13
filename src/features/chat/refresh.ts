@@ -10,7 +10,7 @@ import { initAnswerScroller, captureScrollState, restoreScrollState } from './st
 import { renderChatHeaderHtml } from './render-chat';
 import { canSendMessage } from './session-context';
 import { getActiveSuggestionIndex, getFileSuggestionsContainer } from '../files/index';
-import type { Conversation } from '../../types';
+import { getActiveConversation } from '../conversations/normalize';
 export function setupMessageListPostRender(container: HTMLElement): void {
   // 对话流内 AskUserQuestion 可点选卡片
   bindInteractiveAskCards(container);
@@ -92,9 +92,7 @@ export function setupMessageListPostRender(container: HTMLElement): void {
 export function refreshChatContent() {
   if (!appState.activeConversationId && !appState.pendingUserMessage && !appState.transientSessionError) return;
   
-  const conversation = appState.activeConversationId
-    ? appState.conversations.find((c: Conversation) => c.id === appState.activeConversationId)
-    : undefined;
+  const conversation = getActiveConversation();
   
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   const topbarMain = document.querySelector<HTMLDivElement>('.main-topbar-main');

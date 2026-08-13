@@ -12,6 +12,7 @@ export interface SessionEventPayload {
   messages: Message[];
   project_dir?: string | null;
   projectDir?: string | null;
+  source_path?: string | null;
   updated_at: number;
   updatedAt?: number;
   context_tokens?: number | null;
@@ -65,6 +66,19 @@ export interface PendingAskQuestionState {
   finish?: (result: QuestionDialogResult) => void;
 }
 
+/** 流式/进行中的可见工具（当前仅 Task） */
+export type ActiveToolStatus = 'running' | 'done' | 'failed';
+
+export interface ActiveToolState {
+  toolUseId: string;
+  toolName: string;
+  input: Record<string, unknown>;
+  status: ActiveToolStatus;
+  toolResult?: string;
+  isError?: boolean;
+  startedAt: number;
+}
+
 export interface StreamBlock {
   type: 'thinking' | 'text';
   content: string;
@@ -90,6 +104,7 @@ export interface QueuedPromptItem {
 export interface ExecutePromptResult {
   status: 'sent' | 'queued';
   item?: QueuedPromptItem | null;
+  runId?: string | null;
 }
 
 /** 待发送指令（发给 CLI 的一轮用户输入） */

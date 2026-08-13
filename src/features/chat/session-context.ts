@@ -1,12 +1,12 @@
 import { appState } from '../../state';
+import { getActiveConversation } from '../conversations/normalize';
 export function isNewChatSession(): boolean {
   return !appState.activeConversationId;
 }
 
 export function getEffectiveProjectDir(): string {
   if (appState.activeConversationId) {
-    const conv = appState.conversations.find((c) => c.id === appState.activeConversationId);
-    const dir = conv?.project_dir?.trim();
+    const dir = getActiveConversation()?.project_dir?.trim();
     return dir || '';
   }
   return appState.pendingProjectDir?.trim() || '';
@@ -19,8 +19,12 @@ export function hasRequiredProjectDir(): boolean {
 export function canSendMessage(content?: string): boolean {
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   const text = (content ?? input?.value ?? '').trim();
-  // 有导入文件引用时也允许发送（即使没有文字）
-  if (!text && appState.importedFileRefs.length === 0) {
+  // 纯文字、粘贴图片或导入引用任一存在即可发送。
+  if (
+    !text &&
+    appState.pasteAttachments.length === 0 &&
+    appState.importedFileRefs.length === 0
+  ) {
     return false;
   }
   if (isNewChatSession() && !hasRequiredProjectDir()) {

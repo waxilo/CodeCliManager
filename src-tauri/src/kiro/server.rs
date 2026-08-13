@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
@@ -34,6 +34,34 @@ use crate::kiro::transform::{
     anthropic_message_response_with_tools, build_kiro_request, parse_tool_use_blocks_from_text,
 };
 use crate::protocol_guard::{normalize_stop_reason, sanitize_protocol_text, ProtocolTextGuard};
+
+const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CONCURRENT_REQUESTS: usize = 16;
+
+#[derive(Debug)]
+enum BodyReadError {
+    TooLarge,
+    Invalid(String),
+}
+
+struct RequestPermit {
+    active: Arc<AtomicUsize>,
+}
+
+impl Drop for RequestPermit {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire_request(active: &Arc<AtomicUsize>, limit: usize) -> Option<RequestPermit> {
+    active
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            (current < limit).then_some(current + 1)
+        })
+        .ok()
+        .map(|_| RequestPermit { active: Arc::clone(active) })
+}
 
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
@@ -94,6 +122,7 @@ pub fn start_proxy(mut config: ProxyConfig) -> Result<ProxyHandle, String> {
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = stop.clone();
     let thread_config = config.clone();
+    let active_requests = Arc::new(AtomicUsize::new(0));
 
     let handle = thread::spawn(move || {
         loop {
@@ -102,9 +131,23 @@ pub fn start_proxy(mut config: ProxyConfig) -> Result<ProxyHandle, String> {
             }
             match server.recv_timeout(Duration::from_millis(200)) {
                 Ok(Some(request)) => {
+                    let Some(permit) =
+                        try_acquire_request(&active_requests, MAX_CONCURRENT_REQUESTS)
+                    else {
+                        error_response(
+                            request,
+                            429,
+                            "Too many concurrent requests.",
+                            "rate_limit_error",
+                        );
+                        continue;
+                    };
                     let auth = auth.clone();
                     let config = thread_config.clone();
-                    thread::spawn(move || handle_request(request, &config, &auth));
+                    thread::spawn(move || {
+                        let _permit = permit;
+                        handle_request(request, &config, &auth);
+                    });
                 }
                 Ok(None) => {}
                 Err(_) => break,
@@ -163,13 +206,40 @@ fn check_proxy_auth(request: &Request, config: &ProxyConfig) -> bool {
     has_x_api_key || has_bearer
 }
 
-fn read_json_body(request: &mut Request) -> Result<Value, String> {
+fn read_json_body(request: &mut Request) -> Result<Value, BodyReadError> {
+    if request.body_length().is_some_and(|length| length > MAX_REQUEST_BODY_BYTES) {
+        return Err(BodyReadError::TooLarge);
+    }
     let mut body = Vec::new();
-    request.as_reader().read_to_end(&mut body).map_err(|e| e.to_string())?;
+    request
+        .as_reader()
+        .take((MAX_REQUEST_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut body)
+        .map_err(|e| BodyReadError::Invalid(e.to_string()))?;
+    if body.len() > MAX_REQUEST_BODY_BYTES {
+        return Err(BodyReadError::TooLarge);
+    }
     if body.is_empty() {
         return Ok(json!({}));
     }
-    serde_json::from_slice(&body).map_err(|e| e.to_string())
+    serde_json::from_slice(&body).map_err(|e| BodyReadError::Invalid(e.to_string()))
+}
+
+fn respond_body_error(request: Request, error: BodyReadError) {
+    match error {
+        BodyReadError::TooLarge => error_response(
+            request,
+            413,
+            "Request body exceeds the configured limit.",
+            "request_too_large",
+        ),
+        BodyReadError::Invalid(message) => error_response(
+            request,
+            400,
+            &format!("Invalid JSON body: {message}"),
+            "invalid_request_error",
+        ),
+    }
 }
 
 fn json_response(request: Request, status: u16, body: &Value) {
@@ -1166,7 +1236,7 @@ fn handle_count_tokens(mut request: Request, config: &ProxyConfig) {
     }
     let body = match read_json_body(&mut request) {
         Ok(body) => body,
-        Err(e) => return error_response(request, 400, &format!("Invalid JSON body: {e}"), "invalid_request_error"),
+        Err(error) => return respond_body_error(request, error),
     };
     let text = json!({
         "system": body.get("system").unwrap_or(&Value::Null),
@@ -1183,7 +1253,7 @@ fn handle_messages(mut request: Request, config: &ProxyConfig, auth: &Arc<Auth>)
     }
     let body = match read_json_body(&mut request) {
         Ok(body) => body,
-        Err(e) => return error_response(request, 400, &format!("Invalid JSON body: {e}"), "invalid_request_error"),
+        Err(error) => return respond_body_error(request, error),
     };
 
     let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
@@ -1248,6 +1318,30 @@ fn handle_messages(mut request: Request, config: &ProxyConfig, auth: &Arc<Auth>)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrency_permit_enforces_limit_and_releases() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let first = try_acquire_request(&active, 1).expect("first permit");
+        assert!(try_acquire_request(&active, 1).is_none());
+        drop(first);
+        assert!(try_acquire_request(&active, 1).is_some());
+    }
+
+    #[test]
+    fn oversized_body_is_rejected_with_413() {
+        let mut handle = start_proxy(test_config(39872)).expect("proxy starts");
+        let client = reqwest::blocking::Client::new();
+        let body = vec![b'x'; MAX_REQUEST_BODY_BYTES + 1];
+        let response = client
+            .post(format!("http://127.0.0.1:{}/v1/messages", handle.port))
+            .header("x-api-key", "test-key")
+            .body(body)
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), 413);
+        handle.stop();
+    }
 
     #[test]
     fn classifies_plain_text_immediately() {

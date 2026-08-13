@@ -39,6 +39,43 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 手动发布构建输入 tag；tag push 构建触发本次运行的当前 ref。
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Validate release tag and versions
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('fs');
+          const tag = process.env.RELEASE_TAG;
+          if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
+            throw new Error(`Invalid release tag: ${tag}`);
+          }
+
+          const expected = tag.slice(1);
+          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const packageLock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          const tauriConfig = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          const cargoToml = fs.readFileSync('src-tauri/Cargo.toml', 'utf8');
+          const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          const versions = {
+            'package.json': packageJson.version,
+            'package-lock.json': packageLock.version,
+            'package-lock.json root package': packageLock.packages?.['']?.version,
+            'src-tauri/tauri.conf.json': tauriConfig.version,
+            'src-tauri/Cargo.toml': cargoVersion,
+          };
+          const mismatches = Object.entries(versions).filter(([, version]) => version !== expected);
+          if (mismatches.length) {
+            throw new Error(`Tag ${tag} expects ${expected}; mismatches: ${mismatches.map(([file, version]) => `${file}=${version}`).join(', ')}`);
+          }
+          console.log(`Validated ${tag} against package, Tauri, Cargo, and lockfile versions.`);
+          NODE
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -58,6 +95,21 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Detect frontend tests
+        id: frontend-tests
+        shell: bash
+        run: node -e "console.log('exists=' + Boolean(require('./package.json').scripts?.test))" >> "$GITHUB_OUTPUT"
+
+      - name: Test frontend
+        if: steps.frontend-tests.outputs.exists == 'true'
+        run: npm test
+
+      - name: Test Rust
+        run: cargo test --manifest-path src-tauri/Cargo.toml
 
       - name: Build Tauri app
         env:
@@ -81,6 +133,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
 
       - name: Resolve release tag

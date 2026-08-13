@@ -1,6 +1,6 @@
 use serde::Serialize;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::process::Child;
+use std::process::{Child, Command};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc,
@@ -13,10 +13,13 @@ use tauri::{AppHandle, Emitter};
 use crate::claude::{conversation_to_payload, emit_session_error};
 use crate::history::{
     find_claude_session_file, invalidate_session_cache, load_claude_conversation,
+    message_is_task_tool_use,
     rewrite_session_model,
 };
 
 pub(crate) static ACTIVE_PROCESSES: Mutex<Option<HashMap<String, Arc<Mutex<Child>>>>> = Mutex::new(None);
+/// 稳定 run ID → 当前进程注册键（pending 键捕获 session_id 后会重映射）。
+static ACTIVE_RUN_KEYS: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 /// 会话 stdin：权限响应 / 后续控制消息写入用（stream-json 双向模式）
 pub(crate) static ACTIVE_STDIN: Mutex<Option<HashMap<String, Arc<Mutex<std::process::ChildStdin>>>>> =
@@ -65,6 +68,89 @@ pub(crate) struct PermissionRequestPayload {
     pub(crate) input: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) description: Option<String>,
+}
+
+pub(crate) fn new_unique_id(prefix: &str) -> String {
+    format!("{prefix}{}", uuid::Uuid::new_v4())
+}
+
+pub(crate) fn new_run_id() -> String {
+    new_unique_id("run-")
+}
+
+pub(crate) fn pending_key_for_run(run_id: &str) -> String {
+    format!("pending-{run_id}")
+}
+
+pub(crate) fn register_run_key(run_id: &str, key: &str) {
+    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    runs.get_or_insert_with(HashMap::new)
+        .insert(run_id.to_string(), key.to_string());
+}
+
+pub(crate) fn unregister_run_id(run_id: &str) {
+    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    if let Some(map) = runs.as_mut() {
+        map.remove(run_id);
+    }
+}
+
+pub(crate) fn resolve_run_key(run_id: &str) -> Option<String> {
+    let runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    runs.as_ref().and_then(|map| map.get(run_id).cloned())
+}
+
+fn rekey_run_key(old_key: &str, new_key: &str) {
+    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    if let Some(map) = runs.as_mut() {
+        for key in map.values_mut() {
+            if key == old_key {
+                *key = new_key.to_string();
+            }
+        }
+    }
+}
+
+fn unregister_runs_for_key(key: &str) {
+    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    if let Some(map) = runs.as_mut() {
+        map.retain(|_, mapped_key| mapped_key != key);
+    }
+}
+
+pub(crate) fn pending_process_keys() -> Vec<String> {
+    let mut keys = HashSet::new();
+    {
+        let runs = ACTIVE_RUN_KEYS.lock().unwrap();
+        if let Some(map) = runs.as_ref() {
+            keys.extend(
+                map.values()
+                    .filter(|key| key.starts_with("pending-"))
+                    .cloned(),
+            );
+        }
+    }
+    {
+        let processes = ACTIVE_PROCESSES.lock().unwrap();
+        if let Some(map) = processes.as_ref() {
+            keys.extend(
+                map.keys()
+                    .filter(|key| key.starts_with("pending-"))
+                    .cloned(),
+            );
+        }
+    }
+    keys.into_iter().collect()
+}
+
+pub(crate) fn configure_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = command;
 }
 
 pub(crate) fn ensure_process_registry() {
@@ -180,6 +266,7 @@ pub(crate) fn register_active_stdin(key: &str, stdin: Arc<Mutex<std::process::Ch
 
 pub(crate) fn unregister_active_process(key: &str) {
     clear_queued_prompts(key);
+    unregister_runs_for_key(key);
     let mut reg = ACTIVE_PROCESSES.lock().unwrap();
     if let Some(map) = reg.as_mut() {
         map.remove(key);
@@ -207,6 +294,7 @@ pub(crate) fn rekey_active_session(old_key: &str, new_key: &str, child: Arc<Mute
         }
     }
     clear_active_session_model(old_key);
+    rekey_run_key(old_key, new_key);
 
     register_active_process(new_key, child);
     if let Some(stdin) = stdin {
@@ -331,13 +419,35 @@ pub(crate) fn emit_queued_prompts(app: &AppHandle, session_key: &str) {
     let _ = app.emit("queued-prompts-updated", &payload);
 }
 
-pub(crate) fn dispatch_next_queued_prompt(app: &AppHandle, session_key: &str) -> bool {
+fn restore_queued_prompt_front(session_key: &str, prompt: QueuedPrompt) -> usize {
+    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    let map = queues.get_or_insert_with(HashMap::new);
+    let queue = map.entry(session_key.to_string()).or_default();
+    queue.push_front(prompt);
+    queue.len()
+}
+
+fn dispatch_queued_prompt_with<F>(session_key: &str, send: F) -> Result<Option<QueuedPrompt>, String>
+where
+    F: FnOnce(&QueuedPrompt) -> Result<(), String>,
+{
     let Some(queued) = take_queued_prompt(session_key) else {
-        return false;
+        return Ok(None);
     };
-    emit_queued_prompts(app, session_key);
-    match try_send_followup_prompt_with_model(session_key, &queued.prompt, queued.model.as_deref()) {
-        Ok(()) => {
+    if let Err(error) = send(&queued) {
+        restore_queued_prompt_front(session_key, queued);
+        return Err(error);
+    }
+    Ok(Some(queued))
+}
+
+pub(crate) fn dispatch_next_queued_prompt(app: &AppHandle, session_key: &str) -> bool {
+    let result = dispatch_queued_prompt_with(session_key, |queued| {
+        try_send_followup_prompt_with_model(session_key, &queued.prompt, queued.model.as_deref())
+    });
+    match result {
+        Ok(Some(queued)) => {
+            emit_queued_prompts(app, session_key);
             let payload = serde_json::json!({
                 "conversationId": session_key,
                 "item": queued,
@@ -345,11 +455,11 @@ pub(crate) fn dispatch_next_queued_prompt(app: &AppHandle, session_key: &str) ->
             let _ = app.emit("queued-prompt-dispatched", &payload);
             true
         }
+        Ok(None) => false,
         Err(error) => {
-            let pending = clear_queued_prompts(session_key);
             emit_queued_prompts(app, session_key);
             emit_session_error(app, Some(session_key), &format!("排队追问发送失败：{error}"));
-            eprintln!("[queue] dispatch failed for {session_key}, cleared {pending} prompts");
+            eprintln!("[queue] dispatch failed for {session_key}, restored item to front");
             false
         }
     }
@@ -461,7 +571,7 @@ pub(crate) fn try_send_interrupt(session_key: &str) -> bool {
     let Some(stdin) = get_active_stdin(session_key) else {
         return false;
     };
-    let request_id = format!("interrupt_{}", Instant::now().elapsed().as_nanos());
+    let request_id = new_unique_id("interrupt_");
     let msg = serde_json::json!({
         "type": "control_request",
         "request_id": request_id,
@@ -598,7 +708,10 @@ fn finish_turn_complete(app: &AppHandle, session_id: &str, generation: u64) {
                 .last()
                 .map(|m| m.role == "assistant")
                 .unwrap_or(false);
-            if last_is_assistant || attempt == 9 {
+            // Task 结束后末条常为 tool_use / tool_result，不能只认 assistant
+            let has_task_tool = conv.messages.iter().any(message_is_task_tool_use);
+            let snapshot_ready = last_is_assistant || has_task_tool;
+            if snapshot_ready || attempt == 9 {
                 if !is_latest_turn_complete_generation(session_id, generation)
                     || is_turn_active(session_id)
                 {
@@ -612,15 +725,16 @@ fn finish_turn_complete(app: &AppHandle, session_id: &str, generation: u64) {
                 let payload = conversation_to_payload(&conv);
                 let _ = app.emit("messages-updated", &payload);
                 emitted_messages = true;
-                if last_is_assistant {
+                if snapshot_ready {
                     eprintln!(
-                        "[claude] turn-complete 消息已刷新 (attempt={}, msgs={})",
+                        "[claude] turn-complete 消息已刷新 (attempt={}, msgs={}, task={})",
                         attempt + 1,
-                        conv.messages.len()
+                        conv.messages.len(),
+                        has_task_tool
                     );
                 } else {
                     eprintln!(
-                        "[claude] turn-complete 重试后仍无 assistant 落盘 (attempt={})",
+                        "[claude] turn-complete 重试后仍无 assistant/Task 落盘 (attempt={})",
                         attempt + 1
                     );
                 }
@@ -801,24 +915,37 @@ pub(crate) fn force_kill_process_tree(child: &mut Child) {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
+        let _ = child.wait();
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(unix)]
     {
-        #[cfg(unix)]
-        {
-            let pid = child.id();
-            let _ = std::process::Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .status();
-            for _ in 0..20 {
-                if let Ok(Some(_)) = child.try_wait() {
-                    return;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
+        signal_process_group(child.id(), "TERM");
+        let mut leader_reaped = false;
+        for _ in 0..20 {
+            if !leader_reaped {
+                leader_reaped = child.try_wait().ok().flatten().is_some();
             }
+            thread::sleep(Duration::from_millis(100));
         }
-        let _ = child.kill();
+        // 组长可能先退出而后代仍存活；宽限期后始终清理整个组。
+        signal_process_group(child.id(), "KILL");
+        if !leader_reaped {
+            let _ = child.wait();
+        }
     }
+    #[cfg(not(any(unix, target_os = "windows")))]
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(unix)]
+fn signal_process_group(pid: u32, signal: &str) {
+    let group = format!("-{pid}");
+    let _ = Command::new("kill")
+        .args([format!("-{signal}"), "--".to_string(), group])
+        .status();
 }
 
 #[cfg(test)]
@@ -837,7 +964,7 @@ mod tests {
 
     #[test]
     fn queued_prompts_are_fifo_and_clearable() {
-        let key = format!("queue-test-{}", std::process::id());
+        let key = new_unique_id("queue-test-");
         clear_queued_prompts(&key);
         assert_eq!(enqueue_prompt(&key, prompt("first")), 1);
         assert_eq!(enqueue_prompt(&key, prompt("second")), 2);
@@ -846,6 +973,51 @@ mod tests {
         assert!(remove_queued_prompt(&key, "id-second"));
         assert_eq!(queued_prompt_count(&key), 0);
         assert_eq!(clear_queued_prompts(&key), 0);
+    }
+
+    #[test]
+    fn generated_ids_are_unique() {
+        let ids = (0..1_000)
+            .map(|_| new_unique_id("test-"))
+            .collect::<HashSet<_>>();
+        assert_eq!(ids.len(), 1_000);
+    }
+
+    #[test]
+    fn failed_dispatch_restores_item_to_front_and_preserves_tail() {
+        let key = new_unique_id("queue-restore-");
+        enqueue_prompt(&key, prompt("first"));
+        enqueue_prompt(&key, prompt("second"));
+        enqueue_prompt(&key, prompt("third"));
+
+        let result = dispatch_queued_prompt_with(&key, |_| Err("closed".to_string()));
+        assert!(matches!(result, Err(error) if error == "closed"));
+        let prompts = queued_prompts_snapshot(&key)
+            .into_iter()
+            .map(|item| item.prompt)
+            .collect::<Vec<_>>();
+        assert_eq!(prompts, ["first", "second", "third"]);
+        clear_queued_prompts(&key);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn configured_child_uses_own_process_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30"]);
+        configure_process_group(&mut command);
+        let mut child = command.spawn().expect("spawn process-group test child");
+        let output = Command::new("ps")
+            .args(["-o", "pgid=", "-p", &child.id().to_string()])
+            .output()
+            .expect("query child process group");
+        let pgid = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse::<u32>()
+            .expect("parse pgid");
+        assert_eq!(pgid, child.id());
+        force_kill_process_tree(&mut child);
+        assert!(child.try_wait().expect("wait child").is_some());
     }
 }
 pub(crate) fn force_kill_registered_process(key: &str) -> bool {

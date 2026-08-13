@@ -6,8 +6,8 @@ import { escapeHtml } from '../../utils';
 import { showCopyToastMsg } from '../../ui';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getActiveChatModel } from './model-picker';
-import { getEffectiveProjectDir, hasRequiredProjectDir, isNewChatSession, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading, syncMessageInputPlaceholder } from './session-context';
-import { resolveFileReferences, clearPasteAttachments, clearImportedFileRefs, invalidateFileCache } from '../files';
+import { getEffectiveProjectDir, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading, syncMessageInputPlaceholder } from './session-context';
+import { resolveFileReferences, disposePasteAttachments, invalidateFileCache, restoreComposerDraftSnapshot, stashComposerDraft, takeComposerDraftSnapshot } from '../files';
 import { closePermissionDialogs } from '../permissions';
 import { groupConversationsByWorkspace } from '../sidebar';
 import { clearStreamingState, commitStreamingAssistantToConversation } from './streaming';
@@ -15,7 +15,7 @@ import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshModelInfo } from './render-chat';
 import { hideSendingState } from './retry';
 import { refreshStreamingUI } from './streaming';
-import { isImageFile, stripFileRefTags, stripFileRefsFromDisplay, unwrapFileRef } from '../files/index';
+import { isImageFile, stripFileRefTags, unwrapFileRef } from '../files/index';
 import { dismissMcpViewState } from '../mcp/mount';
 import { normalizeModelKey } from '../permissions/permission-mode';
 import { dismissSettingsViewState } from '../settings/mount';
@@ -181,7 +181,9 @@ export async function pickNewWorkspaceDirectory(): Promise<void> {
   dismissSettingsViewState();
   dismissMcpViewState();
   dismissKiroViewState();
+  stashComposerDraft();
   appState.activeConversationId = '';
+  appState.activeConversationSourcePath = null;
   invalidateFileCache();
   appState.pendingUserMessage = null;
   appState.pendingUserMessageConvId = null;
@@ -229,114 +231,95 @@ export function renderNewChatDropdownContent(workspaces: WorkspaceGroup[]): stri
 export async function sendMessage() {
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   const sendBtn = document.querySelector<HTMLButtonElement>('#send-btn');
-
   if (!input) return;
 
-  let hasPastedImages = appState.pasteAttachments.length > 0;
-  let hasImportedFiles = appState.importedFileRefs.length > 0;
+  const conversationId = appState.activeConversationId || null;
+  const projectDir = getEffectiveProjectDir();
+  const draftKey = conversationId || `new:${projectDir}`;
+  const hasPastedImages = appState.pasteAttachments.length > 0;
+  const hasImportedFiles = appState.importedFileRefs.length > 0;
   if (!input.value.trim() && !hasPastedImages && !hasImportedFiles) return;
   if (sendBtn?.disabled) return;
+  if (!conversationId && !projectDir) return;
 
-  if (isNewChatSession() && !hasRequiredProjectDir()) {
-    return;
-  }
-
-  // 必须在清空输入框、附件和创建 pending 消息之前完成 Kiro 预检。
-  if (!(await prepareKiroBeforeSend(input, sendBtn))) {
-    return;
-  }
-
-  // 检查期间用户仍可编辑草稿；以检查完成时的输入与附件为准。
-  hasPastedImages = appState.pasteAttachments.length > 0;
-  hasImportedFiles = appState.importedFileRefs.length > 0;
-  if (!input.value.trim() && !hasPastedImages && !hasImportedFiles) {
-    return;
-  }
-
-  let content = input.value.trim();
-  input.value = '';
-  updateSendButtonState();
-
-  // 捕获导入的文件引用（在 clearImportedFileRefs 之前），用于构造发送给 CLI 的 prompt
-  const capturedImportedRefs = appState.importedFileRefs.map((e) => e.ref);
-  clearImportedFileRefs();
-
-  // 粘贴图片附件：拼到 prompt 前（给 CLI 用的），content 保持原始文字用于展示
-  const pasteRefs: { path: string; name: string; objectUrl: string }[] = [];
-  let promptWithPaste = content;
-  if (hasPastedImages) {
-    for (const att of appState.pasteAttachments) {
-      pasteRefs.push({ ...att });
-    }
-    const pasteRefStr = pasteRefs.map((a) => `@${a.path}`).join(' ');
-    promptWithPaste = pasteRefStr + (content ? ' ' + content : '');
-    clearPasteAttachments();
-  }
-
-  // 将导入的文件引用也拼到 prompt 前面（已经是 @File[path] 格式，直接拼接）
-  if (capturedImportedRefs.length > 0) {
-    const importedRefStr = capturedImportedRefs.join(' ');
-    promptWithPaste = importedRefStr + (promptWithPaste ? ' ' + promptWithPaste : '');
-  }
-
-  // 所有引用（粘贴图片 + 导入文件）合并
-  const allRefs: FileRef[] = [
-    ...pasteRefs.map((a) => ({ path: a.path, isImage: true })),
-    ...capturedImportedRefs.map((r) => {
-      const path = unwrapFileRef(r).replace(/\/$/, '');
-      return { path, isImage: isImageFile(path) };
-    }),
-  ];
-
-  // 从 prompt 中提取 @File[] 标签，剩余文本交给 resolveFileReferences 处理 @path 引用
-  const fileRefTagStr = capturedImportedRefs.length > 0 ? capturedImportedRefs.join(' ') + ' ' : '';
-  // 先剥离 @File[] 标签与粘贴图片的 @绝对路径，避免 resolveFileReferences 将其当作 @引用重复处理
-  // （粘贴图片是「始终不解析、原样交给 CLI」的附件，由下方单独拼回 prompt）
-  let promptForResolve = stripFileRefTags(promptWithPaste);
-  for (const att of pasteRefs) {
-    const escaped = att.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    promptForResolve = promptForResolve.replace(new RegExp(`@${escaped}\\s*`, 'g'), '');
-  }
-  promptForResolve = promptForResolve.trim();
-
-  const { prompt: resolvedFromAtPaths, displayPrompt, refs: fileRefs } = await resolveFileReferences(promptForResolve);
-
-  // 合并 @file 引用到 allRefs
-  for (const ref of fileRefs) {
-    if (!allRefs.some((r) => r.path === ref.path)) {
-      allRefs.push(ref);
-    }
-  }
-
-  // 最终发送给 CLI 的 prompt：粘贴图片 @绝对路径 + @File[] 标签 + resolveFileReferences 处理后的内容
-  const pasteRefStr = pasteRefs.map((a) => `@${a.path}`).join(' ');
-  const resolvedContent = [pasteRefStr, fileRefTagStr, resolvedFromAtPaths].filter(Boolean).join(' ');
-
-  // 展示用内容：剥离 @path 引用，保留 @File[] 标签用于消息渲染
-  const displayContent = stripFileRefsFromDisplay(displayPrompt).trim();
-
-  // 存储的消息内容：粘贴图片转为 @File[] 标签 + 导入文件 @File[] 标签 + 干净文字
-  // @File[] 标签可被 parseFileRefs 解析为文件芯片，并随消息内容持久化，
-  // 避免后端回传时 refs 字段丢失（Rust Message 无 refs 字段）导致图片不再展示
-  const pasteRefTagStr = pasteRefs.map((a) => `@File[${a.path}]`).join(' ');
-  const messageContent = ((pasteRefTagStr ? pasteRefTagStr + ' ' : '') + fileRefTagStr + (displayContent || '')).trim();
+  // 点击发送即固定源会话、目录、输入、附件与模型。后续预检/解析不再读取活动会话。
+  const snapshot = takeComposerDraftSnapshot(draftKey);
   const model = getActiveChatModel() || undefined;
-  const prepared: PreparedCommand = {
-    prompt: resolvedContent,
-    messageContent,
-    refs: allRefs.length > 0 ? allRefs : undefined,
-    model,
-  };
+  let shouldRestore = true;
 
-  // 忙碌中也直接发送：常驻会话走 stdin 追问（由 Claude 侧排队/处理）
-  await executePreparedCommand(appState.activeConversationId || null, prepared);
+  try {
+    if (!(await prepareKiroBeforeSend(input, sendBtn))) return;
+
+    const content = snapshot.text.trim();
+    const pasteRefs = snapshot.pasteAttachments.map((attachment) => ({ ...attachment }));
+    const capturedImportedRefs = snapshot.importedFileRefs.map((entry) => entry.ref);
+    let promptWithPaste = content;
+
+    if (pasteRefs.length > 0) {
+      const pasteRefStr = pasteRefs.map((attachment) => `@${attachment.path}`).join(' ');
+      promptWithPaste = pasteRefStr + (content ? ' ' + content : '');
+    }
+    if (capturedImportedRefs.length > 0) {
+      const importedRefStr = capturedImportedRefs.join(' ');
+      promptWithPaste = importedRefStr + (promptWithPaste ? ' ' + promptWithPaste : '');
+    }
+
+    const allRefs: FileRef[] = [
+      ...pasteRefs.map((attachment) => ({ path: attachment.path, isImage: true })),
+      ...capturedImportedRefs.map((ref) => {
+        const path = unwrapFileRef(ref).replace(/\/$/, '');
+        return { path, isImage: isImageFile(path) };
+      }),
+    ];
+
+    const fileRefTagStr = capturedImportedRefs.length > 0 ? capturedImportedRefs.join(' ') + ' ' : '';
+    let promptForResolve = stripFileRefTags(promptWithPaste);
+    for (const attachment of pasteRefs) {
+      const escaped = attachment.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      promptForResolve = promptForResolve.replace(new RegExp(`@${escaped}\\s*`, 'g'), '');
+    }
+    promptForResolve = promptForResolve.trim();
+
+    const { prompt: resolvedFromAtPaths, displayPrompt, refs: fileRefs } =
+      await resolveFileReferences(promptForResolve, projectDir);
+    for (const ref of fileRefs) {
+      if (!allRefs.some((existing) => existing.path === ref.path)) allRefs.push(ref);
+    }
+
+    const pasteRefStr = pasteRefs.map((attachment) => `@${attachment.path}`).join(' ');
+    const resolvedContent = [pasteRefStr, fileRefTagStr, resolvedFromAtPaths].filter(Boolean).join(' ');
+    const displayContent = displayPrompt.trim();
+    const pasteRefTagStr = pasteRefs.map((attachment) => `@File[${attachment.path}]`).join(' ');
+    const messageContent = (
+      (pasteRefTagStr ? pasteRefTagStr + ' ' : '') +
+      fileRefTagStr +
+      (displayContent || '')
+    ).trim();
+
+    const prepared: PreparedCommand = {
+      prompt: resolvedContent,
+      messageContent,
+      refs: allRefs.length > 0 ? allRefs : undefined,
+      model,
+    };
+    const sent = await executePreparedCommand(conversationId, prepared, projectDir);
+    if (!sent) return;
+    shouldRestore = false;
+    disposePasteAttachments(snapshot.pasteAttachments);
+  } catch (error) {
+    console.error('Failed to prepare message:', error);
+    alert('Failed to send message: ' + String(error));
+  } finally {
+    if (shouldRestore) restoreComposerDraftSnapshot(draftKey, snapshot);
+  }
 }
 
 /** 立即执行一条已准备好的指令（新建会话时 conversationId 可为 null） */
 export async function executePreparedCommand(
   conversationId: string | null,
   command: PreparedCommand,
-): Promise<void> {
+  projectDir = '',
+): Promise<boolean> {
   const alreadyBusy = !!(
     conversationId && appState.runningSessions.has(conversationId)
   );
@@ -352,14 +335,15 @@ export async function executePreparedCommand(
     if (command.model) {
       args.model = command.model;
     }
-    if (!conversationId) {
-      const projectDir = getEffectiveProjectDir();
-      if (projectDir) {
-        args.projectDir = projectDir;
-      }
+    if (!conversationId && projectDir) {
+      args.projectDir = projectDir;
     }
 
     const result = await api.executePrompt(args);
+    const runKey = conversationId || `new:${projectDir}`;
+    if (result.runId) {
+      appState.runIdsBySession.set(runKey, result.runId);
+    }
     if (result.status === 'queued') {
       if (conversationId && result.item) {
         const items = appState.queuedPromptsBySession.get(conversationId) || [];
@@ -369,7 +353,7 @@ export async function executePreparedCommand(
         shellApi.updateSendButtonState();
       }
       showCopyToastMsg('已加入追问队列');
-      return;
+      return true;
     }
 
     // 后端确认已实际发送后，才把用户消息加入正式会话气泡。
@@ -418,6 +402,7 @@ export async function executePreparedCommand(
       setSendButtonLoading(true);
     }
     updateConversationListSpinner();
+    return true;
   } catch (e) {
     console.error('Failed to send message:', e);
     alert('Failed to send message: ' + String(e));
@@ -428,6 +413,7 @@ export async function executePreparedCommand(
       hideSendingState();
     }
     updateConversationListSpinner();
+    return false;
   }
 }
 
@@ -435,17 +421,23 @@ export async function abortSession() {
   if (!isSendButtonLoading() || appState.isAbortingActiveSession) return;
 
   try {
-    const args: Record<string, string> = {};
+    const args: { conversationId?: string; runId?: string } = {};
+    const activeConversationId = appState.activeConversationId;
+    const newRunKey = `new:${getEffectiveProjectDir()}`;
 
-    // 仅终止当前正在查看的会话（按 session ID）
-    if (appState.activeConversationId && appState.runningSessions.has(appState.activeConversationId)) {
-      args.conversationId = appState.activeConversationId;
+    if (activeConversationId && appState.runningSessions.has(activeConversationId)) {
+      args.conversationId = activeConversationId;
+      const runId = appState.runIdsBySession.get(activeConversationId);
+      if (runId) args.runId = runId;
+    } else if (!activeConversationId && appState.runningSessions.has('pending')) {
+      const runId = appState.runIdsBySession.get(newRunKey);
+      if (!runId) return;
+      args.runId = runId;
     } else {
-      // 当前查看的会话没有在运行，无需终止
       return;
     }
 
-    const abortSessionId = appState.activeConversationId;
+    const abortSessionId = activeConversationId || 'pending';
     appState.abortingSessions.add(abortSessionId);
     setAbortingUi(true);
     closePermissionDialogs(abortSessionId);
@@ -456,6 +448,8 @@ export async function abortSession() {
     // 点击停止后立即从运行集合中移除转圈，并清掉本地队列快照；后端也会同步空队列事件。
     appState.queuedPromptsBySession.delete(abortSessionId);
     appState.runningSessions.delete(abortSessionId);
+    if (activeConversationId) appState.runIdsBySession.delete(activeConversationId);
+    else appState.runIdsBySession.delete(newRunKey);
     updateConversationListSpinner();
 
     // 安全回退：如果 session-ended 在 5 秒内未到达，强制清理 UI（interrupt 友好停止可能稍慢）

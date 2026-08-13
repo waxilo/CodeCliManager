@@ -11,6 +11,7 @@ import type {
   AppUpdateInfo,
   QueuedPromptItem,
   SettingsSection,
+  ActiveToolState,
 } from '../types';
 import { createRequestGuard } from '../utils';
 import type { ScrollController } from '../ui';
@@ -45,6 +46,18 @@ export interface ImportedFileRef {
   isDir: boolean;
 }
 
+export interface ComposerDraft {
+  text: string;
+  pasteAttachments: PasteAttachment[];
+  importedFileRefs: ImportedFileRef[];
+}
+
+export interface StreamRefreshState {
+  rafId: number | null;
+  pending: boolean;
+  lastTime: number;
+}
+
 export interface ActiveInteractionPanel {
   conversationId: string;
   element: HTMLElement;
@@ -59,7 +72,9 @@ export const appState = {
   conversations: [] as Conversation[],
   currentPlatform: '',
   activeConversationId: '',
+  activeConversationSourcePath: null as string | null,
   editingConversationId: null as string | null,
+  editingConversationSourcePath: null as string | null,
   pendingUserMessage: null as string | null,
   pendingUserMessageConvId: null as string | null,
   transientSessionError: null as string | null,
@@ -121,19 +136,21 @@ export const appState = {
   modelRestartingSessions: new Set<string>(),
   isAbortingActiveSession: false,
   sessionProcessModels: new Map<string, string>(),
+  runIdsBySession: new Map<string, string>(),
   queuedPromptsBySession: new Map<string, QueuedPromptItem[]>(),
   pendingAskQuestions: new Map<string, PendingAskQuestionState>(),
+  /** sessionId → toolUseId → 进行中的 Task 等可见工具 */
+  activeToolsBySession: new Map<string, Map<string, ActiveToolState>>(),
   activeQuestionEnterHandler: null as (() => boolean) | null,
   activeAskQuestionCleanup: null as (() => void) | null,
   questionOtherInputActive: false,
-  streamRefreshRafId: null as number | null,
-  streamRefreshPending: false,
-  streamRefreshLastTime: 0,
+  streamRefreshBySession: new Map<string, StreamRefreshState>(),
   answerScroller: null as ScrollController | null,
   thinkingScrollers: new Map<string, ScrollController>(),
   activeInteractionPanel: null as ActiveInteractionPanel | null,
   _cachedFileList: null as string[] | null,
   _cachedProjectDir: '',
+  composerDrafts: new Map<string, ComposerDraft>(),
   pasteAttachments: [] as PasteAttachment[],
   importedFileRefs: [] as ImportedFileRef[],
   _lastDropTime: 0,

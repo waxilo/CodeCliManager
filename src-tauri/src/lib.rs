@@ -3,6 +3,7 @@ use tauri::Manager;
 mod claude;
 mod commands;
 mod config;
+mod config_io;
 mod fs;
 mod history;
 mod kiro;
@@ -75,7 +76,8 @@ pub fn run() {
             list_project_files,
             get_git_branch,
             read_file_content,
-            write_file_bytes,
+            export_markdown,
+            write_clipboard_image,
             read_file_base64,
             import_external_path,
             open_terminal,

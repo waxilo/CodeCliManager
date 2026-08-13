@@ -18,6 +18,8 @@ export type {
   AskUserQuestionInput,
   QuestionDialogResult,
   PendingAskQuestionState,
+  ActiveToolState,
+  ActiveToolStatus,
   StreamBlock,
   StreamingState,
   QueuedPromptItem,

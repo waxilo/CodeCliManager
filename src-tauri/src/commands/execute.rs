@@ -7,13 +7,16 @@ pub struct ExecutePromptResult {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     item: Option<QueuedPrompt>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
 }
 
 impl ExecutePromptResult {
-    fn sent() -> Self {
+    fn sent(run_id: Option<String>) -> Self {
         Self {
             status: "sent",
             item: None,
+            run_id,
         }
     }
 
@@ -21,6 +24,7 @@ impl ExecutePromptResult {
         Self {
             status: "queued",
             item: Some(item),
+            run_id: None,
         }
     }
 }
@@ -108,7 +112,7 @@ pub async fn execute_prompt(
                 match try_send_followup_prompt(cid, &prompt) {
                     Ok(()) => {
                         eprintln!("[execute_prompt] followup via stdin for {}", cid);
-                        return Ok(ExecutePromptResult::sent());
+                        return Ok(ExecutePromptResult::sent(None));
                     }
                     Err(e) => {
                         eprintln!(
@@ -122,6 +126,12 @@ pub async fn execute_prompt(
         }
     }
 
+    let run_id = new_run_id();
+    let initial_run_key = active_cid
+        .clone()
+        .unwrap_or_else(|| pending_key_for_run(&run_id));
+    register_run_key(&run_id, &initial_run_key);
+    let run_id_for_task = run_id.clone();
     tauri::async_runtime::spawn(async move {
         let before_conversations = load_claude_history();
         let before_ids: std::collections::HashSet<String> =
@@ -142,6 +152,7 @@ pub async fn execute_prompt(
         let prompt_clone = prompt.clone();
         let cid_clone = active_cid.clone();
         let model_clone = active_model.clone();
+        let stream_run_id = run_id_for_task.clone();
 
         // resume 已有会话时，先修改 JSONL 文件中历史 assistant 消息的 model 字段，
         // 使 CLI 恢复会话时看到的对话历史与当前选择的模型一致，
@@ -173,6 +184,7 @@ pub async fn execute_prompt(
                 cid_clone.as_ref(),
                 project_dir.as_ref(),
                 model_clone.as_deref(),
+                &stream_run_id,
             )
         })
         .await;
@@ -231,6 +243,15 @@ pub async fn execute_prompt(
                     }
                     let _ = app.emit("session-ended", active_cid.clone());
                 }
+                StreamOutcome::Cancelled(session_id) => {
+                    if let Some(ref sid) = session_id {
+                        clear_turn_active(sid);
+                    }
+                    if let Some(ref cid) = active_cid {
+                        clear_turn_active(cid);
+                    }
+                    let _ = app.emit("session-ended", session_id.or(active_cid.clone()));
+                }
                 StreamOutcome::Failed { session_id, error } => {
                     eprintln!(
                         "[execute_prompt] claude 执行失败 (session={:?}): {}",
@@ -256,6 +277,7 @@ pub async fn execute_prompt(
                 }
             },
             Ok(Err(e)) => {
+                unregister_run_id(&run_id_for_task);
                 let restart = active_cid
                     .as_ref()
                     .is_some_and(|cid| take_model_restart(cid));
@@ -271,6 +293,7 @@ pub async fn execute_prompt(
                 let _ = app.emit("session-ended", active_cid.clone());
             }
             Err(e) => {
+                unregister_run_id(&run_id_for_task);
                 let restart = active_cid
                     .as_ref()
                     .is_some_and(|cid| take_model_restart(cid));
@@ -288,7 +311,7 @@ pub async fn execute_prompt(
         }
     });
 
-    Ok(ExecutePromptResult::sent())
+    Ok(ExecutePromptResult::sent(Some(run_id)))
 }
 
 #[tauri::command]
@@ -319,44 +342,54 @@ pub async fn abort_session(
     app: AppHandle,
     conversation_id: Option<String>,
     force: Option<bool>,
+    run_id: Option<String>,
 ) -> Result<bool, String> {
     let force_kill = force.unwrap_or(false);
+    let requested_run_id = run_id.filter(|id| !id.trim().is_empty());
+    let run_key = requested_run_id
+        .as_deref()
+        .and_then(resolve_run_key);
+    if requested_run_id.is_some() && run_key.is_none() {
+        return Err("找不到指定的运行请求，拒绝取消其他会话".to_string());
+    }
+    if let (Some(cid), Some(key)) = (conversation_id.as_deref(), run_key.as_deref()) {
+        if cid != key && !key.starts_with("pending-") {
+            return Err("runId 与 conversationId 不匹配，拒绝取消".to_string());
+        }
+    }
     let mut aborted = false;
 
-    if let Some(ref cid) = conversation_id {
-        let cleared = clear_queued_prompts(cid);
+    let target_key = run_key.as_ref().or(conversation_id.as_ref());
+    if let Some(key) = target_key {
+        let cleared = clear_queued_prompts(key);
         if cleared > 0 {
-            emit_queued_prompts(&app, cid);
-            eprintln!("[abort] cleared {} queued prompts for {}", cleared, cid);
+            emit_queued_prompts(&app, key);
+            eprintln!("[abort] cleared {} queued prompts for {}", cleared, key);
         }
     }
 
-    if let Some(ref cid) = conversation_id {
+    // runId 精确指向 pending 或已重映射的正式 session，并始终优先于 conversationId。
+    if let Some(ref key) = run_key {
+        let _ = app.emit("session-aborting", Some(key.clone()));
+        // 即使进程尚未注册，也先标记；spawn 注册后会兑现取消。
+        mark_session_aborted(key);
+        aborted = soft_abort_session(key, force_kill) || key.starts_with("pending-");
+    } else if let Some(ref cid) = conversation_id {
         let _ = app.emit("session-aborting", Some(cid.clone()));
-        if soft_abort_session(cid, force_kill) {
-            aborted = true;
-        }
+        aborted = soft_abort_session(cid, force_kill);
     }
 
-    // 新会话尚未拿到正式 session_id 时，终止 pending-* 进程
-    if !aborted {
-        let pending_keys: Vec<String> = {
-            let reg = ACTIVE_PROCESSES.lock().unwrap();
-            reg.as_ref()
-                .map(|map| {
-                    map.keys()
-                        .filter(|k| k.starts_with("pending-"))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default()
-        };
-        for key in pending_keys {
-            let _ = app.emit("session-aborting", Some(key.clone()));
-            if soft_abort_session(&key, force_kill) {
-                aborted = true;
-                break;
+    // 旧前端未传 runId：仅当唯一 pending 时安全兼容；并发时拒绝而非任意误杀。
+    if !aborted && requested_run_id.is_none() && conversation_id.is_none() {
+        let pending_keys = pending_process_keys();
+        match pending_keys.as_slice() {
+            [key] => {
+                let _ = app.emit("session-aborting", Some(key.clone()));
+                mark_session_aborted(key);
+                aborted = soft_abort_session(key, force_kill) || key.starts_with("pending-");
             }
+            [] => {}
+            _ => return Err("存在多个待启动会话，请提供 runId 以精确取消".to_string()),
         }
     }
 
@@ -530,6 +563,7 @@ pub async fn retry_message(
                 title: "Untitled".to_string(),
                 messages: Vec::new(),
                 project_dir: None,
+                source_path: Some(path.to_string_lossy().to_string()),
                 updated_at: chrono::Utc::now().timestamp(),
                 context_tokens: None,
                 last_model: None,
@@ -576,6 +610,7 @@ pub async fn retry_message(
                 let model_owned = regenerate_model.clone();
                 let project_dir_owned = regenerate_project_dir.clone();
 
+                let retry_run_id = new_run_id();
                 let stream_result = tauri::async_runtime::spawn_blocking(move || {
                     spawn_claude_stream(
                         app_handle,
@@ -583,6 +618,7 @@ pub async fn retry_message(
                         Some(&cid_for_stream),
                         project_dir_owned.as_ref(),
                         model_owned.as_deref(),
+                        &retry_run_id,
                     )
                 }).await;
 
@@ -595,6 +631,9 @@ pub async fn retry_message(
                                 let _ = app_clone.emit("messages-updated", &payload);
                             }
                             let _ = app_clone.emit("session-ended", Some(cid.clone()));
+                        }
+                        StreamOutcome::Cancelled(session_id) => {
+                            let _ = app_clone.emit("session-ended", session_id.or(Some(cid.clone())));
                         }
                         StreamOutcome::Failed { session_id, error } => {
                             eprintln!(

@@ -3,7 +3,6 @@ import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
 import { toMillis } from '../../utils';
 import { showCopyToastMsg } from '../../ui';
-import { save } from '@tauri-apps/plugin-dialog';
 import type { Conversation } from '../../types';
 import { normalizeConversation } from './normalize';
 export function sanitizeFileName(name: string): string {
@@ -41,30 +40,31 @@ export function buildConversationMarkdown(c: Conversation): string {
 }
 
 /** 导出单个会话为 Markdown 文件 */
-export async function exportConversationToMarkdown(id: string): Promise<void> {
-  const conversation = appState.conversations.find((c) => c.id === id);
+import { isConversationInstance } from './normalize';
+export async function exportConversationToMarkdown(
+  id: string,
+  sourcePath: string | null = null,
+): Promise<void> {
+  const conversation = appState.conversations.find((candidate) =>
+    isConversationInstance(candidate, id, sourcePath),
+  );
   if (!conversation) return;
 
   // 列表中的会话可能没有完整消息，导出前先从后端取一次
   let full = conversation;
   try {
-    const raw = await api.getConversation(id);
+    const raw = await api.getConversation(id, conversation.source_path ?? null);
     if (raw) full = normalizeConversation(raw);
   } catch (e) {
     console.warn('Failed to load full conversation for export:', e);
   }
 
   try {
-    const target = await save({
-      title: '导出会话',
-      defaultPath: `${sanitizeFileName(full.title)}.md`,
-      filters: [{ name: 'Markdown', extensions: ['md'] }],
-    });
-    if (!target) return;
-
-    const bytes = Array.from(new TextEncoder().encode(buildConversationMarkdown(full)));
-    await api.writeFileBytes(target, bytes );
-    showCopyToastMsg('已导出会话');
+    const saved = await api.exportMarkdown(
+      `${sanitizeFileName(full.title)}.md`,
+      buildConversationMarkdown(full),
+    );
+    if (saved) showCopyToastMsg('已导出会话');
   } catch (e) {
     console.error('Failed to export conversation:', e);
     alert('导出会话失败: ' + String(e));
@@ -72,21 +72,29 @@ export async function exportConversationToMarkdown(id: string): Promise<void> {
 }
 
 // 编辑会话功能
-export function startEdit(id: string) {
+export function startEdit(id: string, sourcePath: string | null = null) {
   appState.editingConversationId = id;
+  appState.editingConversationSourcePath = sourcePath;
   shellApi.render();
 }
 
 export function cancelEdit() {
   appState.editingConversationId = null;
+  appState.editingConversationSourcePath = null;
   shellApi.render();
 }
 
-export async function saveEdit(id: string) {
-  const input = document.querySelector(`#edit-input-${id}`) as HTMLInputElement;
+export async function saveEdit(id: string, sourcePath: string | null = null) {
+  const input = [...document.querySelectorAll<HTMLInputElement>('.edit-input')].find(
+    (candidate) =>
+      candidate.id === `edit-input-${id}` &&
+      (candidate.dataset.sourcePath || null) === sourcePath,
+  );
   if (!input) return;
 
-  const conversation = appState.conversations.find((c) => c.id === id);
+  const conversation = appState.conversations.find((candidate) =>
+    isConversationInstance(candidate, id, sourcePath),
+  );
   const newTitle = input.value.trim();
   if (!newTitle) {
     cancelEdit();
@@ -105,6 +113,7 @@ export async function saveEdit(id: string) {
     }
 
     appState.editingConversationId = null;
+    appState.editingConversationSourcePath = null;
     shellApi.render();
   } catch (e) {
     console.error('Failed to update title:', e);
@@ -112,10 +121,10 @@ export async function saveEdit(id: string) {
   }
 }
 
-export function handleEditKeydown(e: KeyboardEvent, id: string) {
+export function handleEditKeydown(e: KeyboardEvent, id: string, sourcePath: string | null = null) {
   if (e.key === 'Enter') {
     e.preventDefault();
-    void saveEdit(id);
+    void saveEdit(id, sourcePath);
   } else if (e.key === 'Escape') {
     e.preventDefault();
     cancelEdit();

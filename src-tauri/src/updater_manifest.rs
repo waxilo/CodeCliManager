@@ -2,9 +2,9 @@
 //!
 //! 流程：
 //! 1. 应用启动后在 `127.0.0.1:47865` 提供 `/latest.json`
-//! 2. 收到请求时依次尝试 GitHub 镜像拉取官方 `latest.json`
-//! 3. 把清单里的 `platforms.*.url` 改写成「镜像前缀 + 原 GitHub URL」
-//! 4. tauri-plugin-updater 优先请求本机清单，下载也会走镜像
+//! 2. 仅直连可信 GitHub 地址拉取并解析官方 `latest.json`
+//! 3. 镜像只用于改写清单里的 `platforms.*.url`，绝不提供版本元数据
+//! 4. tauri-plugin-updater 请求本机清单，资产下载使用镜像 URL
 
 use std::sync::OnceLock;
 use std::thread;
@@ -18,6 +18,10 @@ const LISTEN_ADDR: &str = "127.0.0.1:47865";
 
 const UPSTREAM_LATEST_JSON: &str =
     "https://github.com/waxilo/CodeCliManager/releases/latest/download/latest.json";
+
+fn manifest_candidates() -> [&'static str; 1] {
+    [UPSTREAM_LATEST_JSON]
+}
 
 /// 按优先级排列的镜像前缀（完整 URL = 前缀 + 原始 GitHub URL）。
 const MIRROR_PREFIXES: &[&str] = &[
@@ -111,40 +115,21 @@ fn cors_header() -> Header {
 }
 
 fn fetch_and_rewrite_manifest(client: &Client) -> Result<String, String> {
-    let mut last_err = String::from("no mirror tried");
-    let mut candidates: Vec<String> = MIRROR_PREFIXES
-        .iter()
-        .map(|prefix| format!("{prefix}{UPSTREAM_LATEST_JSON}"))
-        .collect();
-    candidates.push(UPSTREAM_LATEST_JSON.to_string());
-
-    for (index, url) in candidates.iter().enumerate() {
-        match client.get(url).send() {
-            Ok(response) => {
-                let status = response.status();
-                if !status.is_success() {
-                    last_err = format!("{url} -> HTTP {status}");
-                    continue;
-                }
-                let text = response.text().map_err(|e| e.to_string())?;
-                let mut value: Value =
-                    serde_json::from_str(&text).map_err(|e| format!("invalid latest.json: {e}"))?;
-                let mirror_prefix = if index < MIRROR_PREFIXES.len() {
-                    MIRROR_PREFIXES[index]
-                } else {
-                    // 直连 GitHub 成功时也尽量改写成第一个镜像，避免后续下载再超时
-                    MIRROR_PREFIXES[0]
-                };
-                rewrite_platform_urls(&mut value, mirror_prefix);
-                return serde_json::to_string(&value).map_err(|e| e.to_string());
-            }
-            Err(e) => {
-                last_err = format!("{url} -> {e}");
-            }
-        }
+    let response = client
+        .get(manifest_candidates()[0])
+        .send()
+        .map_err(|e| format!("可信 GitHub 更新清单请求失败: {e}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("可信 GitHub 更新清单返回 HTTP {status}"));
     }
-
-    Err(format!("所有更新源均失败: {last_err}"))
+    let text = response
+        .text()
+        .map_err(|e| format!("读取可信 GitHub 更新清单失败: {e}"))?;
+    let mut value: Value =
+        serde_json::from_str(&text).map_err(|e| format!("可信 latest.json 无效: {e}"))?;
+    rewrite_platform_urls(&mut value, MIRROR_PREFIXES[0]);
+    serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 
 fn rewrite_platform_urls(manifest: &mut Value, mirror_prefix: &str) {
@@ -184,6 +169,14 @@ fn rewrite_github_url(url: &str, mirror_prefix: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn manifest_candidates_only_include_trusted_direct_source() {
+        assert_eq!(manifest_candidates(), [UPSTREAM_LATEST_JSON]);
+        assert!(manifest_candidates()
+            .iter()
+            .all(|candidate| !MIRROR_PREFIXES.iter().any(|prefix| candidate.starts_with(prefix))));
+    }
 
     #[test]
     fn rewrites_github_platform_urls() {

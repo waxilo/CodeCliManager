@@ -15,40 +15,41 @@ pub fn get_current_platform() -> String {
 }
 
 #[tauri::command]
-pub fn delete_conversation(conversation_id: String, source_path: Option<String>) -> Result<bool, String> {
-    let mut delete_error: Option<String> = None;
-
-    let resolved_path = if let Some(path) = source_path.filter(|p| !p.trim().is_empty()) {
-        match validate_claude_source_path(Path::new(&path)) {
-            Ok(path) => Some(path),
-            Err(err) => {
-                delete_error = Some(err);
-                find_claude_session_file(&conversation_id)
-            }
-        }
-    } else {
-        find_claude_session_file(&conversation_id)
+pub fn delete_conversation(
+    conversation_id: String,
+    source_path: Option<String>,
+) -> Result<bool, String> {
+    let explicit_source = source_path.filter(|path| !path.trim().is_empty());
+    let resolved_path = match explicit_source {
+        Some(path) => Some(validate_claude_source_path(Path::new(&path))?),
+        None => find_claude_session_file(&conversation_id),
     };
 
-    if let Some(path) = resolved_path {
-        if let Err(err) = delete_claude_session_file(&path, &conversation_id) {
-            delete_error = Some(err);
-        }
+    if let Some(path) = resolved_path.as_deref() {
+        delete_claude_session_file(path, &conversation_id)?;
+        invalidate_session_cache(path);
+        mark_session_deleted(&conversation_id, Some(path));
     }
-
-    mark_session_deleted(&conversation_id);
 
     let mut state = load_persisted_state();
     let before = state.conversations.len();
-    state.conversations.retain(|c| c.id != conversation_id);
-    if state.conversations.len() != before {
+    state.conversations.retain(|conversation| {
+        if conversation.id != conversation_id {
+            return true;
+        }
+        match resolved_path.as_deref() {
+            Some(path) => conversation.source_path.as_deref() != Some(path.to_string_lossy().as_ref()),
+            None => false,
+        }
+    });
+    let removed_persisted = state.conversations.len() != before;
+    if removed_persisted {
         save_app_state(&state);
     }
 
-    if let Some(err) = delete_error {
-        eprintln!("[delete] session hidden but file delete failed: {err}");
+    if resolved_path.is_none() && !removed_persisted {
+        return Ok(false);
     }
-
     Ok(true)
 }
 
@@ -61,73 +62,115 @@ pub fn delete_workspace_conversations(project_dir: String) -> Result<u32, String
 
     // 使用和前端 get_conversations() 相同的数据源（优先读 Claude JSONL 历史）
     let app_state = load_app_state();
-    let ids_to_delete: Vec<String> = app_state
+    let conversations_to_delete: Vec<Conversation> = app_state
         .conversations
         .iter()
-        .filter(|c| {
-            c.project_dir
+        .filter(|conversation| {
+            conversation
+                .project_dir
                 .as_deref()
-                .is_some_and(|d| d.trim() == project_dir_trimmed)
+                .is_some_and(|directory| directory.trim() == project_dir_trimmed)
         })
-        .map(|c| c.id.clone())
+        .cloned()
         .collect();
 
-    if ids_to_delete.is_empty() {
+    if conversations_to_delete.is_empty() {
         return Ok(0);
     }
 
-    let count = ids_to_delete.len() as u32;
-    let mut errors: Vec<String> = Vec::new();
+    let mut deleted_keys: HashSet<(String, Option<String>)> = HashSet::new();
+    let mut errors = Vec::new();
 
-    for conv_id in &ids_to_delete {
-        let resolved_path = find_claude_session_file(conv_id);
-        if let Some(ref path) = resolved_path {
-            if let Err(err) = delete_claude_session_file(path, conv_id) {
-                errors.push(err);
+    for conversation in &conversations_to_delete {
+        let resolved_path = match conversation.source_path.as_deref() {
+            Some(path) => validate_claude_source_path(Path::new(path)).map(Some),
+            None => Ok(find_claude_session_file(&conversation.id)),
+        };
+        match resolved_path {
+            Ok(Some(path)) => match delete_claude_session_file(&path, &conversation.id) {
+                Ok(()) => {
+                    invalidate_session_cache(&path);
+                    mark_session_deleted(&conversation.id, Some(&path));
+                    deleted_keys.insert((
+                        conversation.id.clone(),
+                        Some(path.to_string_lossy().to_string()),
+                    ));
+                }
+                Err(err) => errors.push(err),
+            },
+            Ok(None) => {
+                // A state-only conversation has no backing file; removing it from state is success.
+                deleted_keys.insert((conversation.id.clone(), None));
             }
+            Err(err) => errors.push(err),
         }
-        mark_session_deleted(conv_id);
     }
 
-    // 清理 state.json（如果其中也包含被删会话）
     let mut persisted = load_persisted_state();
-    let id_set: HashSet<String> = ids_to_delete.iter().cloned().collect();
     let before = persisted.conversations.len();
-    persisted.conversations.retain(|c| !id_set.contains(&c.id));
+    persisted.conversations.retain(|conversation| {
+        !deleted_keys.contains(&(conversation.id.clone(), conversation.source_path.clone()))
+    });
     if persisted.conversations.len() != before {
         save_app_state(&persisted);
     }
 
     if !errors.is_empty() {
-        eprintln!(
-            "[delete_workspace] some session files could not be deleted: {:?}",
-            errors
-        );
+        return Err(format!(
+            "Deleted {} conversation(s); {} failed: {}",
+            deleted_keys.len(),
+            errors.len(),
+            errors.join("; ")
+        ));
     }
 
-    Ok(count)
+    Ok(deleted_keys.len() as u32)
 }
 
 #[tauri::command]
-pub fn get_conversation(conversation_id: String) -> Option<Conversation> {
-    // 只定位并解析目标会话文件，不再全量扫描解析整个历史目录
-    if let Some(path) = find_claude_session_file(&conversation_id) {
-        if let Some(mut conv) = parse_claude_session_cached(&path) {
+pub fn get_conversation(
+    conversation_id: String,
+    source_path: Option<String>,
+) -> Option<Conversation> {
+    let explicit_source = source_path.filter(|path| !path.trim().is_empty());
+    let path = match explicit_source.as_deref() {
+        Some(path) => validate_claude_source_path(Path::new(path)).ok(),
+        None => find_claude_session_file(&conversation_id),
+    };
+    if let Some(path) = path {
+        if !session_id_matches_path(&conversation_id, &path) {
+            return None;
+        }
+        if let Some(mut conversation) = parse_claude_session_cached(&path) {
             let overlay = load_overlay();
-            if overlay.deleted_session_ids.iter().any(|id| id == &conv.id) {
+            if is_session_deleted(
+                &overlay,
+                &conversation.id,
+                conversation.source_path.as_deref(),
+            ) {
                 return None;
             }
-            if let Some(title) = overlay.title_overrides.get(&conv.id) {
-                conv.title = title.clone();
+            if let Some(title) = title_override(
+                &overlay,
+                &conversation.id,
+                conversation.source_path.as_deref(),
+            ) {
+                conversation.title = title.clone();
             }
-            return Some(conv);
+            return Some(conversation);
         }
     }
-    // 回退：非 claude 历史的持久化会话
     load_persisted_state()
         .conversations
         .into_iter()
-        .find(|c| c.id == conversation_id)
+        .find(|conversation| {
+            conversation.id == conversation_id
+                && source_path_matches(conversation.source_path.as_deref(), explicit_source.as_deref())
+        })
+}
+
+fn source_path_matches(stored: Option<&str>, requested: Option<&str>) -> bool {
+    requested.map_or(true, |path| stored == Some(path))
 }
 
 #[tauri::command]
@@ -141,26 +184,19 @@ pub fn update_conversation_title(
         return Err("Title cannot be empty".to_string());
     }
 
-    let resolved_path = if let Some(path) = source_path.filter(|p| !p.trim().is_empty()) {
-        match validate_claude_source_path(Path::new(&path)) {
-            Ok(path) => Some(path),
-            Err(_) => find_claude_session_file(&conversation_id),
-        }
-    } else {
-        find_claude_session_file(&conversation_id)
+    let resolved_path = match source_path.filter(|path| !path.trim().is_empty()) {
+        Some(path) => Some(validate_claude_source_path(Path::new(&path))?),
+        None => find_claude_session_file(&conversation_id),
     };
 
-    let session_path = resolved_path.or_else(|| find_claude_session_file(&conversation_id));
-
-    if let Some(path) = &session_path {
-        if let Err(err) = write_claude_custom_title(path, &conversation_id, &trimmed) {
-            eprintln!("[title] failed to write custom-title to {}: {err}", path.display());
-        }
+    if let Some(path) = &resolved_path {
+        write_claude_custom_title(path, &conversation_id, &trimmed)?;
+        invalidate_session_cache(path);
     }
 
-    set_title_override(&conversation_id, &trimmed);
+    set_title_override(&conversation_id, resolved_path.as_deref(), &trimmed);
 
-    if let Some(path) = session_path.clone() {
+    if let Some(path) = resolved_path.clone() {
         if let Some(mut conv) = parse_claude_session(&path) {
             conv.title = trimmed.clone();
             return Ok(conv);
@@ -168,10 +204,16 @@ pub fn update_conversation_title(
     }
 
     let mut state = load_persisted_state();
-    if let Some(c) = state.conversations.iter_mut().find(|c| c.id == conversation_id) {
-        c.title = trimmed.clone();
-        c.updated_at = chrono::Utc::now().timestamp();
-        let result = c.clone();
+    let requested_path = resolved_path
+        .as_deref()
+        .map(|path| path.to_string_lossy().to_string());
+    if let Some(conversation) = state.conversations.iter_mut().find(|conversation| {
+        conversation.id == conversation_id
+            && source_path_matches(conversation.source_path.as_deref(), requested_path.as_deref())
+    }) {
+        conversation.title = trimmed.clone();
+        conversation.updated_at = chrono::Utc::now().timestamp();
+        let result = conversation.clone();
         save_app_state(&state);
         return Ok(result);
     }
@@ -182,7 +224,7 @@ pub fn update_conversation_title(
         messages: Vec::new(),
         platform: "claude".to_string(),
         project_dir: None,
-        source_path: session_path.map(|p| p.to_string_lossy().to_string()),
+        source_path: resolved_path.map(|p| p.to_string_lossy().to_string()),
         created_at: chrono::Utc::now().timestamp(),
         updated_at: chrono::Utc::now().timestamp(),
         context_tokens: None,

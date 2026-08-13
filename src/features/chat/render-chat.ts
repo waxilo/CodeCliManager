@@ -2,12 +2,24 @@ import { appState } from '../../state';
 import type { Message, Conversation } from '../../types';
 import { escapeHtml } from '../../utils';
 import * as api from '../../api';
-import { renderMessageListHtml } from './render-messages';
+import { renderMessageListHtml, TOOL_CONFIG_MAP, getDefaultToolConfig, extractToolUseId, processToolMessages } from './render-messages';
 import { getEffectiveProjectDir } from './session-context';
 import { renderCopyIconHtml } from './input-composer';
 import { getActiveChatModelForRender } from './model-picker';
-import { dedupeAdjacentDuplicateMessages } from '../conversations/normalize';
+import { dedupeAdjacentDuplicateMessages, getActiveConversation } from '../conversations/normalize';
 import { normalizeMessageForCompare } from '../files/index';
+
+function messagesHaveToolUseId(messages: Message[], toolUseId: string): boolean {
+  if (!toolUseId) return false;
+  const processed = processToolMessages(messages);
+  return processed.some((m) => {
+    if (m.toolData?.toolUseId === toolUseId) return true;
+    if (m.role === 'tool_use' || m.role === 'tool') {
+      return extractToolUseId(m.content) === toolUseId;
+    }
+    return false;
+  });
+}
 export function renderChatHeaderHtml(conversation: Conversation | undefined): string {
   const hasMessages = (conversation?.messages.length ?? 0) > 0;
   const title = hasMessages ? (conversation?.title || '新会话') : '新会话';
@@ -106,6 +118,40 @@ export function buildDisplayMessages(conversation: Conversation | undefined): Me
     });
   }
 
+  // 进行中的 Task（Subagent）：历史尚未落盘时注入卡片（含刚完成、等历史合并）
+  const toolsKey = appState.activeConversationId || 'pending';
+  const activeTools =
+    appState.activeToolsBySession.get(toolsKey) ||
+    (appState.activeConversationId
+      ? appState.activeToolsBySession.get('pending')
+      : undefined);
+  if (activeTools) {
+    for (const [toolUseId, tool] of activeTools) {
+      if (messagesHaveToolUseId(messages, toolUseId)) continue;
+      const config = TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig();
+      const isRunning = tool.status === 'running';
+      messages.push({
+        id: `pending-tool-${toolUseId}`,
+        role: 'tool',
+        content: JSON.stringify(tool.input || {}),
+        timestamp: Math.floor(tool.startedAt / 1000) || Math.floor(Date.now() / 1000),
+        toolData: {
+          toolName: tool.toolName,
+          toolInput: tool.input || {},
+          toolUseId,
+          toolResult: isRunning ? undefined : tool.toolResult ?? '',
+          isError: tool.isError,
+          displayMode: config.displayMode,
+          colorScheme: {
+            border: config.borderColor,
+            icon: config.iconColor,
+            primary: config.borderColor,
+          },
+        },
+      });
+    }
+  }
+
   return dedupeAdjacentDuplicateMessages(messages);
 }
 
@@ -127,9 +173,7 @@ export function renderConversationMessagesInnerHtml(messages: Message[]): string
 }
 
 export function renderChatContent(): string {
-  const conversation = appState.activeConversationId
-    ? appState.conversations.find((c) => c.id === appState.activeConversationId)
-    : undefined;
+  const conversation = getActiveConversation();
 
   const messages = buildDisplayMessages(conversation);
 

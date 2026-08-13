@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::{AppHandle, Emitter};
 
 use crate::history::{Conversation, Message};
@@ -11,6 +11,7 @@ pub(crate) struct SessionEventPayload {
     pub(crate) title: String,
     pub(crate) messages: Vec<Message>,
     pub(crate) project_dir: Option<String>,
+    pub(crate) source_path: Option<String>,
     pub(crate) updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) context_tokens: Option<i64>,
@@ -73,6 +74,7 @@ pub(crate) struct SessionErrorPayload {
 
 pub(crate) enum StreamOutcome {
     Success(Option<String>),
+    Cancelled(Option<String>),
     Failed {
         session_id: Option<String>,
         error: String,
@@ -85,6 +87,7 @@ pub(crate) fn conversation_to_payload(conv: &Conversation) -> SessionEventPayloa
         title: conv.title.clone(),
         messages: conv.messages.clone(),
         project_dir: conv.project_dir.clone(),
+        source_path: conv.source_path.clone(),
         updated_at: conv.updated_at,
         context_tokens: conv.context_tokens,
         last_model: conv.last_model.clone(),
@@ -98,6 +101,76 @@ pub(crate) fn emit_message_chunk(app: &AppHandle, conversation_id: &str, kind: &
         content: content.to_string(),
     };
     let _ = app.emit("message-chunk", &payload);
+}
+
+/// 流式 tool_use 块累积（仅 Task 会 emit 到前端）
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolUseBlockState {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) input_json: String,
+}
+
+fn tool_result_content_to_string(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|item| {
+                if let Some(text) = item.get("text").and_then(|t| t.as_str()) {
+                    Some(text.to_string())
+                } else if let Some(s) = item.as_str() {
+                    Some(s.to_string())
+                } else {
+                    Some(item.to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    }
+}
+
+fn emit_task_tool_result_if_any(
+    app: &AppHandle,
+    sid: &str,
+    value: &serde_json::Value,
+    known_task_ids: &HashSet<String>,
+) {
+    let message = match value.get("message") {
+        Some(m) => m,
+        None => return,
+    };
+    let content = match message.get("content").and_then(|c| c.as_array()) {
+        Some(arr) => arr,
+        None => return,
+    };
+    for item in content {
+        if item.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+            continue;
+        }
+        let tool_use_id = item
+            .get("tool_use_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if tool_use_id.is_empty() || !known_task_ids.contains(tool_use_id) {
+            continue;
+        }
+        let is_error = item
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let result_text = item
+            .get("content")
+            .map(tool_result_content_to_string)
+            .unwrap_or_default();
+        let payload = serde_json::json!({
+            "tool_use_id": tool_use_id,
+            "content": result_text,
+            "is_error": is_error,
+        });
+        emit_message_chunk(app, sid, "tool_result", &payload.to_string());
+    }
 }
 
 pub(crate) fn emit_session_error(app: &AppHandle, conversation_id: Option<&str>, error: &str) {
@@ -267,6 +340,8 @@ pub(crate) fn process_claude_stream_line(
     app: &AppHandle,
     captured_session_id: &mut Option<String>,
     block_types: &mut HashMap<usize, String>,
+    tool_use_blocks: &mut HashMap<usize, ToolUseBlockState>,
+    known_task_ids: &mut HashSet<String>,
     protocol_guard: &mut ProtocolLeakGuard,
     stream_error: &mut Option<String>,
 ) {
@@ -333,6 +408,11 @@ pub(crate) fn process_claude_stream_line(
                 _ => {}
             }
         }
+        "user" => {
+            if let Some(sid) = resolve_stream_session_id(captured_session_id, &value) {
+                emit_task_tool_result_if_any(app, &sid, &value, known_task_ids);
+            }
+        }
         "stream_event" => {
             let sid = match resolve_stream_session_id(captured_session_id, &value) {
                 Some(s) => s,
@@ -347,21 +427,48 @@ pub(crate) fn process_claude_stream_line(
 
             match event_type {
                 "content_block_start" => {
-                    if let Some(block_type) = event
-                        .get("content_block")
-                        .and_then(|b| b.get("type"))
-                        .and_then(|t| t.as_str())
-                    {
+                    if let Some(block) = event.get("content_block") {
+                        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
                         let index = event.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                         block_types.insert(index, block_type.to_string());
-                        let kind = if block_type == "thinking" {
-                            "thinking_start"
+                        if block_type == "thinking" {
+                            emit_message_chunk(app, &sid, "thinking_start", "");
                         } else if block_type == "text" {
-                            "text_start"
-                        } else {
-                            return;
-                        };
-                        emit_message_chunk(app, &sid, kind, "");
+                            emit_message_chunk(app, &sid, "text_start", "");
+                        } else if block_type == "tool_use" {
+                            let id = block
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let name = block
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            tool_use_blocks.insert(
+                                index,
+                                ToolUseBlockState {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    input_json: String::new(),
+                                },
+                            );
+                            if name == "Task" && !id.is_empty() {
+                                known_task_ids.insert(id.clone());
+                                let payload = serde_json::json!({
+                                    "id": id,
+                                    "name": name,
+                                    "index": index,
+                                });
+                                emit_message_chunk(
+                                    app,
+                                    &sid,
+                                    "tool_use_start",
+                                    &payload.to_string(),
+                                );
+                            }
+                        }
                     }
                 }
                 "content_block_delta" => {
@@ -381,7 +488,8 @@ pub(crate) fn process_claude_stream_line(
                             if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                                 if !text.is_empty() {
                                     if is_api_error_text(text) {
-                                        let sid = resolve_stream_session_id(captured_session_id, &value);
+                                        let sid =
+                                            resolve_stream_session_id(captured_session_id, &value);
                                         record_stream_error(
                                             stream_error,
                                             app,
@@ -397,24 +505,64 @@ pub(crate) fn process_claude_stream_line(
                                 }
                             }
                         }
+                        Some("input_json_delta") => {
+                            let index =
+                                event.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                            if let Some(partial) =
+                                delta.get("partial_json").and_then(|v| v.as_str())
+                            {
+                                if let Some(block) = tool_use_blocks.get_mut(&index) {
+                                    if block.name == "Task" {
+                                        block.input_json.push_str(partial);
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     }
                 }
                 "content_block_stop" => {
                     let index = event.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                    let kind = match block_types.get(&index).map(|s| s.as_str()) {
-                        Some("thinking") => "thinking_end",
+                    match block_types.get(&index).map(|s| s.as_str()) {
+                        Some("thinking") => {
+                            emit_message_chunk(app, &sid, "thinking_end", "");
+                            block_types.remove(&index);
+                        }
                         Some("text") => {
                             let trailing = protocol_guard.finish_text_block();
                             if !trailing.is_empty() {
                                 emit_message_chunk(app, &sid, "text_delta", &trailing);
                             }
-                            "text_end"
+                            emit_message_chunk(app, &sid, "text_end", "");
+                            block_types.remove(&index);
                         }
-                        _ => return,
-                    };
-                    emit_message_chunk(app, &sid, kind, "");
-                    block_types.remove(&index);
+                        Some("tool_use") => {
+                            if let Some(block) = tool_use_blocks.remove(&index) {
+                                if block.name == "Task" {
+                                    let input: serde_json::Value =
+                                        serde_json::from_str(&block.input_json)
+                                            .unwrap_or_else(|_| serde_json::json!({}));
+                                    let payload = serde_json::json!({
+                                        "id": block.id,
+                                        "name": block.name,
+                                        "input": input,
+                                        "index": index,
+                                    });
+                                    emit_message_chunk(
+                                        app,
+                                        &sid,
+                                        "tool_use_end",
+                                        &payload.to_string(),
+                                    );
+                                }
+                            }
+                            block_types.remove(&index);
+                        }
+                        _ => {
+                            block_types.remove(&index);
+                            tool_use_blocks.remove(&index);
+                        }
+                    }
                 }
                 "message_stop" => {
                     emit_message_chunk(app, &sid, "stream_end", "");

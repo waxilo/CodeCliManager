@@ -18,7 +18,7 @@ export interface ToolConfig {
   iconColor: string;
 }
 
-const TOOL_CONFIG_MAP: Record<string, ToolConfig> = {
+export const TOOL_CONFIG_MAP: Record<string, ToolConfig> = {
   Bash: { displayMode: 'one-line', icon: '>_', label: 'Bash', getValue: (i) => String(i.command || ''), getSecondary: (i) => i.description ? String(i.description) : undefined, style: 'terminal', borderColor: '#3fb950', iconColor: '#3fb950' },
   Read: { displayMode: 'one-line', icon: '📄', label: 'Read', getValue: (i) => String(i.file_path || ''), style: 'file-open', borderColor: '#8b949e', iconColor: '#8b949e' },
   Edit: { displayMode: 'collapsible', icon: '✏️', label: 'Edit', getValue: (i) => String(i.file_path || ''), borderColor: '#d29922', iconColor: '#d29922' },
@@ -55,6 +55,13 @@ export function extractToolName(content: string): string {
   return json ? String(json.tool_name || json.tool || json.name || '') : '';
 }
 
+/** 提取 tool_use id */
+export function extractToolUseId(content: string): string {
+  const json = tryParseJson(content);
+  if (!json) return '';
+  return String(json.id || json.tool_use_id || json.toolUseId || '');
+}
+
 /** 提取工具输入 */
 export function extractToolInput(content: string): Record<string, unknown> {
   const json = tryParseJson(content);
@@ -62,21 +69,42 @@ export function extractToolInput(content: string): Record<string, unknown> {
   return (json.tool_input || json.input || json.arguments || {}) as Record<string, unknown>;
 }
 
+function stringifyToolResultContent(raw: unknown): string {
+  if (raw == null) return '';
+  if (typeof raw === 'string') return raw;
+  if (Array.isArray(raw)) {
+    return raw
+      .map((item) => {
+        if (typeof item === 'string') return item;
+        if (item && typeof item === 'object' && 'text' in item) {
+          return String((item as { text?: unknown }).text ?? '');
+        }
+        return JSON.stringify(item);
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (typeof raw === 'object') return JSON.stringify(raw, null, 2);
+  return String(raw);
+}
+
 /** 提取工具结果文本 */
 export function extractToolResult(content: string): {
   text: string;
   isError: boolean;
   toolUseResult?: Record<string, unknown>;
+  toolUseId?: string;
 } {
   const json = tryParseJson(content);
   if (!json) return { text: content, isError: false };
-  const text = String(json.content ?? json.output ?? json.result ?? '');
+  const text = stringifyToolResultContent(json.content ?? json.output ?? json.result ?? '');
   const isError = Boolean(json.is_error || json.isError);
   const toolUseResult =
     json.toolUseResult && typeof json.toolUseResult === 'object'
       ? (json.toolUseResult as Record<string, unknown>)
       : undefined;
-  return { text, isError, toolUseResult };
+  const toolUseId = String(json.tool_use_id || json.toolUseId || '');
+  return { text, isError, toolUseResult, toolUseId: toolUseId || undefined };
 }
 
 /**
@@ -225,17 +253,11 @@ export function mergeAdjacentSameRole(messages: Message[]): Message[] {
     const prev = result[result.length - 1];
     const curr = messages[i];
 
-    // 相邻同角色 assistant（无 thinking 字段的纯文本消息）→ 合并；内容近似时去重而非拼接
+    // 相邻同角色 assistant（无 thinking 字段的纯文本消息）→ 合并并完整保留内容
     if (
       prev.role === 'assistant' && curr.role === 'assistant'
       && !prev.thinking && !curr.thinking
     ) {
-      const a = (prev.content || '').trim();
-      const b = (curr.content || '').trim();
-      if (a && b && (a === b || a.includes(b) || b.includes(a))) {
-        if (b.length > a.length) prev.content = curr.content;
-        continue;
-      }
       prev.content = prev.content + '\n\n' + curr.content;
       continue;
     }
@@ -255,6 +277,7 @@ export function mergeAdjacentSameRole(messages: Message[]): Message[] {
 /** 将 tool_use 和 tool_result 配对处理，生成内嵌工具消息 */
 export function processToolMessages(messages: Message[]): Message[] {
   const result: Message[] = [];
+  const consumedResult = new Set<number>();
   let i = 0;
 
   while (i < messages.length) {
@@ -263,18 +286,28 @@ export function processToolMessages(messages: Message[]): Message[] {
     if (msg.role === 'tool_use') {
       const toolName = extractToolName(msg.content);
       const toolInput = extractToolInput(msg.content);
+      const toolUseId = extractToolUseId(msg.content);
       const config = TOOL_CONFIG_MAP[toolName] || getDefaultToolConfig();
 
-      // 查找对应的 tool_result
+      // 按 tool_use_id 向前查找配对结果（支持同轮多 Task）
       let toolResult: string | undefined;
       let isError = false;
       let toolUseResult: Record<string, unknown> | undefined;
-      if (i + 1 < messages.length && messages[i + 1].role === 'tool_result') {
-        const resData = extractToolResult(messages[i + 1].content);
+      for (let j = i + 1; j < messages.length; j++) {
+        if (consumedResult.has(j)) continue;
+        if (messages[j].role !== 'tool_result') continue;
+        const resData = extractToolResult(messages[j].content);
+        const matches =
+          !toolUseId ||
+          !resData.toolUseId ||
+          resData.toolUseId === toolUseId ||
+          (j === i + 1 && !resData.toolUseId);
+        if (!matches) continue;
         toolResult = resData.text;
         isError = resData.isError;
         toolUseResult = resData.toolUseResult;
-        i++; // 跳过 tool_result
+        consumedResult.add(j);
+        break;
       }
 
       // AskUserQuestion：把 answers 并入 toolInput，供专用卡片渲染
@@ -287,7 +320,6 @@ export function processToolMessages(messages: Message[]): Message[] {
         };
       }
 
-      // 创建内嵌工具消息
       const toolMsg: Message = {
         id: msg.id,
         role: 'tool',
@@ -298,6 +330,7 @@ export function processToolMessages(messages: Message[]): Message[] {
           toolInput: mergedInput,
           toolResult,
           isError,
+          toolUseId: toolUseId || undefined,
           displayMode: config.displayMode,
           colorScheme: {
             border: config.borderColor,
@@ -312,7 +345,7 @@ export function processToolMessages(messages: Message[]): Message[] {
     }
 
     if (msg.role === 'tool_result') {
-      // 孤立的 tool_result（没有前置 tool_use），跳过
+      // 已配对或孤立的 tool_result，跳过
       i++;
       continue;
     }

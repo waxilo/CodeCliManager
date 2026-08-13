@@ -1,6 +1,7 @@
 dist/
 node_modules/
 .DS_Store
+.clipboard-uploads/
 src-tauri/target/
 # 图标生成的中间产物，可由 prepare_icon.py 重新生成
 src-tauri/icons-src/app-icon-1024.png

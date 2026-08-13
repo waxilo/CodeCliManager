@@ -36,7 +36,8 @@ export {
   listProjectFiles,
   readFileContent,
   readFileBase64,
-  writeFileBytes,
+  exportMarkdown,
+  writeClipboardImage,
   importExternalPath,
 } from './files';
 

@@ -4,6 +4,9 @@ import { renderSettingsProfileList } from './profile-list';
 import { setProviderBalanceVisible } from './provider-balance';
 import { OFFICIAL_PROFILE_ID } from './profile-list';
 import { getSettingsProfileListEl } from '../settings/view';
+
+const refreshGenerationByOverlay = new WeakMap<HTMLElement, number>();
+
 export function setSettingsFormEditable(overlay: HTMLElement, editable: boolean) {
   for (const name of ['profileName', 'baseUrl', 'apiKey']) {
     const el = overlay.querySelector(`input[name="${name}"]`) as HTMLInputElement | null;
@@ -135,19 +138,23 @@ export async function refreshSettingsModal(
   selectedProfileId: string | null,
   onConfigLoaded?: (config: ClaudeCodeApiConfig) => void,
 ) {
+  const generation = (refreshGenerationByOverlay.get(overlay) || 0) + 1;
+  refreshGenerationByOverlay.set(overlay, generation);
+  const isLatest = () => refreshGenerationByOverlay.get(overlay) === generation && overlay.isConnected;
   const state = await api.getApiProfilesState();
 
   // 官方默认处于使用中（无指定 profile 且无激活 profile）：展示只读官方视图，
   // 不要回退到第一个 API 配置，否则会把别的配置的模型/详情显示成「官方默认」
   const officialActive = !selectedProfileId && !state.activeProfileId;
   if (officialActive) {
-    const listEl = getSettingsProfileListEl();
-    if (listEl) {
-      listEl.innerHTML = renderSettingsProfileList(state.profiles, OFFICIAL_PROFILE_ID);
+    if (isLatest()) {
+      const listEl = getSettingsProfileListEl();
+      if (listEl) {
+        listEl.innerHTML = renderSettingsProfileList(state.profiles, OFFICIAL_PROFILE_ID);
+      }
+      fillOfficialView(overlay);
+      onConfigLoaded?.(state.current);
     }
-    fillOfficialView(overlay);
-    // 复用 onConfigLoaded 清空遗留的模型缓存（官方无 Base URL，不会触发拉取）
-    onConfigLoaded?.(state.current);
     return { state, selectedProfileId: OFFICIAL_PROFILE_ID };
   }
 
@@ -157,11 +164,6 @@ export async function refreshSettingsModal(
     state.profiles.find((profile) => profile.isActive)?.id ||
     state.profiles[0]?.id ||
     null;
-
-  const listEl = getSettingsProfileListEl();
-  if (listEl) {
-    listEl.innerHTML = renderSettingsProfileList(state.profiles, resolvedSelectedId);
-  }
 
   let config = state.current;
   let profileName = '';
@@ -174,8 +176,14 @@ export async function refreshSettingsModal(
     }
   }
 
-  fillSettingsForm(overlay, config, profileName, resolvedSelectedId);
-  onConfigLoaded?.(config);
+  if (isLatest()) {
+    const listEl = getSettingsProfileListEl();
+    if (listEl) {
+      listEl.innerHTML = renderSettingsProfileList(state.profiles, resolvedSelectedId);
+    }
+    fillSettingsForm(overlay, config, profileName, resolvedSelectedId);
+    onConfigLoaded?.(config);
+  }
   return { state, selectedProfileId: resolvedSelectedId };
 }
 

@@ -1,6 +1,7 @@
 import { appState } from '../../state';
 import { escapeHtml, toMillis, formatRelativeTime, formatCompactTime } from '../../utils';
 import type { Conversation } from '../../types';
+import { isConversationInstance } from '../conversations/normalize';
 import { groupConversationsByWorkspace, getWorkspaceHue, getWorkspaceInitials, formatModelLabel, saveExpandedWorkspaces } from './workspace-grouping';
 
 /** 未分类分组的固定 key */
@@ -19,10 +20,19 @@ export interface SidebarWorkspaceView {
 }
 
 export function renderConversationItemHtml(c: Conversation): string {
-  const isActive = c.id === appState.activeConversationId;
-  const isEditing = appState.editingConversationId === c.id;
+  const isActive = isConversationInstance(
+    c,
+    appState.activeConversationId,
+    appState.activeConversationSourcePath,
+  );
+  const isEditing = isConversationInstance(
+    c,
+    appState.editingConversationId || '',
+    appState.editingConversationSourcePath,
+  );
   const isRunning = appState.runningSessions.has(c.id);
   const isNew = appState.newConversationIds.has(c.id);
+  const sourcePath = escapeHtml(c.source_path || '');
 
   const classNames = [
     'conversation-item',
@@ -36,17 +46,18 @@ export function renderConversationItemHtml(c: Conversation): string {
   const stateIcon = isRunning ? CONVERSATION_RUNNING_DOT_HTML : CONVERSATION_CHAT_ICON_SVG;
 
   return `
-    <div class="${classNames}" data-id="${c.id}" title="${escapeHtml(c.title)}">
+    <div class="${classNames}" data-id="${c.id}" data-source-path="${sourcePath}" title="${escapeHtml(c.title)}">
       <span class="conversation-rail" aria-hidden="true"></span>
       ${isEditing ? `
         <div class="conversation-edit-row">
           <input type="text"
                  class="edit-input"
                  id="edit-input-${c.id}"
+                 data-source-path="${sourcePath}"
                  value="${escapeHtml(c.title)}"
           />
           <div class="edit-action-buttons">
-            <button type="button" class="edit-action-btn save" data-action="save-edit" data-id="${c.id}" title="保存">✓</button>
+            <button type="button" class="edit-action-btn save" data-action="save-edit" data-id="${c.id}" data-source-path="${sourcePath}" title="保存">✓</button>
             <button type="button" class="edit-action-btn cancel" data-action="cancel-edit" title="取消">✕</button>
           </div>
         </div>
@@ -55,7 +66,7 @@ export function renderConversationItemHtml(c: Conversation): string {
           ${stateIcon}
           <span class="conversation-title">${escapeHtml(c.title)}</span>
           ${time ? `<span class="conversation-time">${escapeHtml(time)}</span>` : ''}
-          <button type="button" class="conv-more-btn" data-action="more" data-id="${c.id}" title="更多操作" aria-label="更多操作">
+          <button type="button" class="conv-more-btn" data-action="more" data-id="${c.id}" data-source-path="${sourcePath}" title="更多操作" aria-label="更多操作">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
           </button>
         </span>
@@ -100,7 +111,13 @@ export function buildSidebarWorkspaceViews(): SidebarWorkspaceView[] {
   conversations: matched,
       latestActivity,
       modelLabel: formatModelLabel(matched.find((c) => c.last_model)?.last_model ?? newest?.last_model),
-      hasActive: matched.some((c) => c.id === appState.activeConversationId),
+      hasActive: matched.some((conversation) =>
+        isConversationInstance(
+          conversation,
+          appState.activeConversationId,
+          appState.activeConversationSourcePath,
+        ),
+      ),
       runningCount: matched.filter((c) => appState.runningSessions.has(c.id)).length,
       isUncategorized,
     };

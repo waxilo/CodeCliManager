@@ -1,14 +1,150 @@
 import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
-import type { Message, SessionErrorPayload, MessageChunkPayload, StreamBlock, StreamingState } from '../../types';
+import type {
+  Message,
+  SessionErrorPayload,
+  MessageChunkPayload,
+  StreamBlock,
+  StreamingState,
+  ActiveToolState,
+} from '../../types';
 import { renderMarkdownCached as renderMarkdown, initCodeCopyButtons } from '../../markdown';
 import { getThinkingScroller } from './thinking-scroller';
 import { updateSendButtonState, setSendButtonLoading } from './session-context';
 import { updateOrAddConversation } from '../conversations';
 import { updateConversationListSpinner } from '../sidebar';
-import { renderThinkingDetails } from './render-messages';
+import { renderThinkingDetails, extractToolUseId, processToolMessages } from './render-messages';
 import { clearPendingRequestState, hideSendingState, removePendingAssistantIndicator, updatePendingStatus } from './retry';
 import { ScrollController } from '../../ui';
+
+const TOOL_CHUNK_KINDS = new Set([
+  'tool_use_start',
+  'tool_use_end',
+  'tool_result',
+]);
+
+function getActiveToolsMap(sessionId: string): Map<string, ActiveToolState> {
+  let map = appState.activeToolsBySession.get(sessionId);
+  if (!map) {
+    map = new Map();
+    appState.activeToolsBySession.set(sessionId, map);
+  }
+  return map;
+}
+
+function sessionHasActiveTools(sessionId: string): boolean {
+  const map = appState.activeToolsBySession.get(sessionId);
+  return Boolean(map && map.size > 0);
+}
+
+function parseChunkJson(content: string): Record<string, unknown> | null {
+  if (!content?.trim()) return null;
+  try {
+    const parsed = JSON.parse(content) as unknown;
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function refreshActiveToolUI(sessionId: string) {
+  if (appState.activeConversationId === sessionId) {
+    shellApi.refreshChatContent();
+  }
+}
+
+/** 历史落盘后清掉已完成的 active Task，避免与历史卡片重复 */
+export function reconcileActiveToolsWithHistory(sessionId: string, messages: Message[]) {
+  const tools = appState.activeToolsBySession.get(sessionId);
+  if (!tools || tools.size === 0) return;
+
+  const processed = processToolMessages(messages);
+  for (const [toolUseId, state] of [...tools.entries()]) {
+    const found = processed.find(
+      (m) =>
+        m.role === 'tool' &&
+        (m.toolData?.toolUseId === toolUseId || extractToolUseId(m.content) === toolUseId),
+    );
+    if (!found) continue;
+    if (found.toolData?.toolResult !== undefined) {
+      tools.delete(toolUseId);
+    } else if (state.status === 'running') {
+      // 历史已有 tool_use 但尚无 result：保留 running，避免闪断
+      state.input = found.toolData?.toolInput || state.input;
+    }
+  }
+  if (tools.size === 0) {
+    appState.activeToolsBySession.delete(sessionId);
+  }
+  appState.activeToolsBySession.delete('pending');
+}
+
+function handleToolChunk(sid: string, kind: string, content: string): boolean {
+  const data = parseChunkJson(content);
+  if (kind === 'tool_use_start') {
+    const id = String(data?.id || '');
+    const name = String(data?.name || 'Task');
+    if (!id || name !== 'Task') return false;
+    const tools = getActiveToolsMap(sid);
+    const existing = tools.get(id);
+    tools.set(id, {
+      toolUseId: id,
+      toolName: name,
+      input: existing?.input || {},
+      status: 'running',
+      startedAt: existing?.startedAt || Date.now(),
+    });
+    // pending → 真实 session
+    const pendingTools = appState.activeToolsBySession.get('pending');
+    if (pendingTools && sid !== 'pending') {
+      for (const [pid, pstate] of pendingTools) {
+        if (!tools.has(pid)) tools.set(pid, pstate);
+      }
+      appState.activeToolsBySession.delete('pending');
+    }
+    refreshActiveToolUI(sid);
+    return true;
+  }
+
+  if (kind === 'tool_use_end') {
+    const id = String(data?.id || '');
+    const name = String(data?.name || 'Task');
+    if (!id || name !== 'Task') return false;
+    const tools = getActiveToolsMap(sid);
+    const input =
+      data?.input && typeof data.input === 'object'
+        ? (data.input as Record<string, unknown>)
+        : {};
+    const existing = tools.get(id);
+    tools.set(id, {
+      toolUseId: id,
+      toolName: name,
+      input: Object.keys(input).length ? input : existing?.input || {},
+      status: 'running',
+      startedAt: existing?.startedAt || Date.now(),
+    });
+    refreshActiveToolUI(sid);
+    return true;
+  }
+
+  if (kind === 'tool_result') {
+    const toolUseId = String(data?.tool_use_id || data?.toolUseId || '');
+    if (!toolUseId) return false;
+    const tools = appState.activeToolsBySession.get(sid) || appState.activeToolsBySession.get('pending');
+    const state = tools?.get(toolUseId);
+    if (!state) return false;
+    const isError = Boolean(data?.is_error || data?.isError);
+    state.status = isError ? 'failed' : 'done';
+    state.isError = isError;
+    state.toolResult = String(data?.content ?? '');
+    // 保留到 messages-updated 再 reconcile 删除，避免完成态卡片闪断
+    refreshActiveToolUI(sid);
+    return true;
+  }
+
+  return false;
+}
+
 export function getStreamingState(sessionId: string): StreamingState {
   if (!appState.streamingBySession.has(sessionId)) {
     appState.streamingBySession.set(sessionId, { blocks: [], thinkingDone: false, currentBlockIdx: -1 });
@@ -19,13 +155,12 @@ export function getStreamingState(sessionId: string): StreamingState {
 export function clearStreamingState(sessionId: string) {
   appState.streamingBySession.delete(sessionId);
   appState.pendingTextDelta.delete(sessionId);
-  removeStreamingElements();
-  // 取消待处理的 RAF 刷新
-  if (appState.streamRefreshRafId !== null) {
-    cancelAnimationFrame(appState.streamRefreshRafId);
-    appState.streamRefreshRafId = null;
-    appState.streamRefreshPending = false;
+  removeStreamingElements(sessionId);
+  const refresh = appState.streamRefreshBySession.get(sessionId);
+  if (refresh?.rafId !== null && refresh?.rafId !== undefined) {
+    cancelAnimationFrame(refresh.rafId);
   }
+  appState.streamRefreshBySession.delete(sessionId);
 }
 
 /** 从流式块提取已生成的助手文本 */
@@ -126,23 +261,47 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
   // 新进程已开始输出：切模型重启保护结束
   appState.modelRestartingSessions.delete(sid);
 
-  // 本轮已结束：忽略迟到的流式块，避免与已落盘助手气泡叠成「重复且无操作栏」
+  const isToolChunk = TOOL_CHUNK_KINDS.has(kind);
+  // 本轮已结束：忽略迟到的流式块；Task 工具 chunk 在 activeTools 仍在或 start 时仍接受
   if (
     kind !== 'session_created' &&
     !appState.runningSessions.has(sid) &&
-    !appState.runningSessions.has('pending')
+    !appState.runningSessions.has('pending') &&
+    !(isToolChunk && (sessionHasActiveTools(sid) || kind === 'tool_use_start'))
   ) {
     return;
   }
 
   if (kind === 'session_created') {
     // pending -> 真实 session ID 转换
+    const projectDir = content?.trim() || '';
+    const pendingRunKey = `new:${projectDir}`;
+    let runId = appState.runIdsBySession.get(pendingRunKey);
+    let matchedKey = pendingRunKey;
+    if (!runId) {
+      const pendingRuns = [...appState.runIdsBySession.entries()].filter(([key]) => key.startsWith('new:'));
+      if (pendingRuns.length === 1) {
+        [matchedKey, runId] = pendingRuns[0];
+      }
+    }
+    if (runId) {
+      appState.runIdsBySession.delete(matchedKey);
+      appState.runIdsBySession.set(sid, runId);
+    }
     appState.runningSessions.delete('pending');
     appState.runningSessions.add(sid);
     const pendingModel = appState.sessionProcessModels.get('pending');
     if (pendingModel !== undefined) {
       appState.sessionProcessModels.set(sid, pendingModel);
       appState.sessionProcessModels.delete('pending');
+    }
+    const pendingTools = appState.activeToolsBySession.get('pending');
+    if (pendingTools && pendingTools.size > 0) {
+      const tools = getActiveToolsMap(sid);
+      for (const [id, state] of pendingTools) {
+        if (!tools.has(id)) tools.set(id, state);
+      }
+      appState.activeToolsBySession.delete('pending');
     }
     // 仅在尚未激活会话时设置 appState.activeConversationId，避免打断用户已切换的视图
     if (!appState.activeConversationId) {
@@ -174,6 +333,11 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
     if (sid === appState.activeConversationId || (!appState.activeConversationId && appState.pendingUserMessage && !appState.pendingUserMessageConvId)) {
       setSendButtonLoading(true);
     }
+    return;
+  }
+
+  if (isToolChunk) {
+    handleToolChunk(sid, kind, content);
     return;
   }
 
@@ -272,23 +436,31 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
 }
 
 export function scheduleStreamingRefresh(sessionId: string) {
-  if (appState.streamRefreshPending) return;
-  appState.streamRefreshPending = true;
+  let refresh = appState.streamRefreshBySession.get(sessionId);
+  if (!refresh) {
+    refresh = { rafId: null, pending: false, lastTime: 0 };
+    appState.streamRefreshBySession.set(sessionId, refresh);
+  }
+  if (refresh.pending) return;
+  refresh.pending = true;
 
   const doRefresh = (timestamp: number) => {
-    if (timestamp - appState.streamRefreshLastTime < 100) {
-      // 距上次刷新不足 100ms，等待下一帧
-      appState.streamRefreshRafId = requestAnimationFrame(doRefresh);
+    const current = appState.streamRefreshBySession.get(sessionId);
+    if (!current) return;
+    if (timestamp - current.lastTime < 100) {
+      current.rafId = requestAnimationFrame(doRefresh);
       return;
     }
-    appState.streamRefreshLastTime = timestamp;
-    appState.streamRefreshRafId = null;
-    appState.streamRefreshPending = false;
+    current.lastTime = timestamp;
+    current.rafId = null;
+    current.pending = false;
     flushPendingTextDelta(sessionId);
-    refreshStreamingUI(sessionId);
+    if (appState.activeConversationId === sessionId) {
+      refreshStreamingUI(sessionId);
+    }
   };
 
-  appState.streamRefreshRafId = requestAnimationFrame(doRefresh);
+  refresh.rafId = requestAnimationFrame(doRefresh);
 }
 
 export function handleSessionError(payload: SessionErrorPayload) {
@@ -296,9 +468,10 @@ export function handleSessionError(payload: SessionErrorPayload) {
   const errorText = payload.error.trim();
   if (!errorText) return;
 
-  clearPendingRequestState();
+  const isCurrentSession = !sid || sid === appState.activeConversationId;
+  if (isCurrentSession) clearPendingRequestState();
   clearStreamingState(sid || 'pending');
-  hideSendingState();
+  if (isCurrentSession) hideSendingState();
 
   const errorMessage: Message = {
     id: `error-${Date.now()}`,
@@ -330,15 +503,19 @@ export function handleSessionError(payload: SessionErrorPayload) {
       conversation.messages.push(errorMessage);
       conversation.updated_at = errorMessage.timestamp;
     }
-    appState.activeConversationId = sid;
-    appState.pendingUserMessage = null;
-    appState.pendingUserMessageConvId = null;
+    if (isCurrentSession) {
+      appState.pendingUserMessage = null;
+      appState.pendingUserMessageConvId = null;
+    }
   } else {
     appState.transientSessionError = errorText;
   }
 
-  ensureChatViewVisible();
-  shellApi.refreshChatContent();
+  updateConversationListSpinner();
+  if (isCurrentSession) {
+    ensureChatViewVisible();
+    shellApi.refreshChatContent();
+  }
 }
 
 export function ensureChatViewVisible() {
@@ -353,7 +530,9 @@ export function ensureChatViewVisible() {
   shellApi.refreshChatContent();
 }
 
-export function removeStreamingElements() {
+export function removeStreamingElements(sessionId?: string) {
+  // DOM 只代表当前可见会话；后台会话清理不能碰当前会话的流式节点。
+  if (sessionId && sessionId !== appState.activeConversationId) return;
   document.querySelectorAll('[id^="streaming-"]').forEach((el) => el.remove());
 }
 

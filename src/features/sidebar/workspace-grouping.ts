@@ -123,6 +123,7 @@ export function newChatInWorkspace(workspacePath: string): void {
   dismissMcpViewState();
   dismissKiroViewState();
   appState.activeConversationId = '';
+  appState.activeConversationSourcePath = null;
   invalidateFileCache();
   appState.pendingUserMessage = null;
   appState.pendingUserMessageConvId = null;

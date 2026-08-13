@@ -22,6 +22,7 @@ export function retryMessage(args: {
 
 export function abortSession(args?: {
   conversationId?: string;
+  runId?: string;
   force?: boolean;
 }): Promise<boolean> {
   return invoke<boolean>('abort_session', args ?? {});

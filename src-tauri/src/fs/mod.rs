@@ -1,8 +1,12 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Serialize;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io::Write;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+
+const MAX_PROJECT_FILE_ENTRIES: usize = 20_000;
+const MAX_CLIPBOARD_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 
 // 确保目录存在：先验证，不存在则尝试创建
 pub(crate) fn resolve_or_create_dir(cwd: &str) -> Option<String> {
@@ -23,8 +27,21 @@ pub(crate) fn resolve_or_create_dir(cwd: &str) -> Option<String> {
 }
 
 pub(crate) fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    if out.len() >= MAX_PROJECT_FILE_ENTRIES {
+        return;
+    }
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
+            if out.len() >= MAX_PROJECT_FILE_ENTRIES {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            // 不跟随目录 symlink，避免逃逸项目根目录及递归环。
+            if file_type.is_symlink() {
+                continue;
+            }
             let path = entry.path();
             let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
             // 跳过隐藏文件和常见忽略目录
@@ -39,11 +56,11 @@ pub(crate) fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
             }
             if let Ok(rel) = path.strip_prefix(root) {
                 let mut rel_str = rel.to_string_lossy().to_string();
-                if path.is_dir() {
+                if file_type.is_dir() {
                     rel_str.push('/');
                 }
                 out.push(rel_str);
-                if path.is_dir() {
+                if file_type.is_dir() {
                     collect_files(root, &path, out);
                 }
             }
@@ -121,14 +138,119 @@ pub fn read_file_content(file_path: String) -> Result<String, String> {
     fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))
 }
 
-/// 写入二进制文件（用于保存粘贴的图片）
 #[tauri::command]
-pub fn write_file_bytes(file_path: String, data: Vec<u8>) -> Result<(), String> {
-    let path = Path::new(&file_path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {}", e))?;
+pub async fn export_markdown(
+    app: tauri::AppHandle,
+    suggested_file_name: String,
+    content: String,
+) -> Result<bool, String> {
+    let suggested = Path::new(suggested_file_name.trim());
+    if suggested.components().count() != 1
+        || !matches!(suggested.components().next(), Some(Component::Normal(_)))
+        || suggested.extension().and_then(|ext| ext.to_str()) != Some("md")
+    {
+        return Err("导出文件名无效".to_string());
     }
-    fs::write(path, &data).map_err(|e| format!("写入文件失败: {}", e))
+    if content.len() > 50 * 1024 * 1024 {
+        return Err("导出内容过大".to_string());
+    }
+    let file_name = suggested_file_name.trim().to_string();
+    let selected = tauri::async_runtime::spawn_blocking(move || {
+        use tauri_plugin_dialog::DialogExt;
+        app.dialog()
+            .file()
+            .set_file_name(file_name)
+            .add_filter("Markdown", &["md"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|e| format!("打开保存对话框失败: {e}"))?;
+    let Some(selected) = selected else {
+        return Ok(false);
+    };
+    let path = selected
+        .into_path()
+        .map_err(|e| format!("保存路径无效: {e}"))?;
+    fs::write(&path, content).map_err(|e| format!("导出 {} 失败: {e}", path.display()))?;
+    Ok(true)
+}
+
+fn validate_clipboard_file_name(file_name: &str) -> Result<&str, String> {
+    let trimmed = file_name.trim();
+    if trimmed.is_empty() || trimmed != file_name {
+        return Err("文件名无效".to_string());
+    }
+    let path = Path::new(trimmed);
+    if path.components().count() != 1
+        || !matches!(path.components().next(), Some(Component::Normal(_)))
+    {
+        return Err("文件名必须是单一安全路径组件".to_string());
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let valid_extension = [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|extension| lower.ends_with(extension));
+    let valid_chars = trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
+    if !valid_extension || !valid_chars || trimmed.starts_with('.') {
+        return Err("仅允许安全的图片文件名".to_string());
+    }
+    Ok(trimmed)
+}
+
+/// 将粘贴图片严格写入项目根目录的 `.clipboard-uploads`。
+#[tauri::command]
+pub fn write_clipboard_image(
+    project_dir: String,
+    file_name: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    if data.is_empty() || data.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(format!(
+            "图片大小必须在 1 到 {} 字节之间",
+            MAX_CLIPBOARD_IMAGE_BYTES
+        ));
+    }
+    let safe_name = validate_clipboard_file_name(&file_name)?;
+    let root = Path::new(project_dir.trim())
+        .canonicalize()
+        .map_err(|e| format!("无法解析项目目录: {e}"))?;
+    if !root.is_dir() {
+        return Err("项目目录不存在".to_string());
+    }
+
+    let uploads = root.join(".clipboard-uploads");
+    match fs::symlink_metadata(&uploads) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(".clipboard-uploads 必须是项目内的真实目录".to_string());
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&uploads).map_err(|e| format!("创建上传目录失败: {e}"))?;
+        }
+        Err(error) => return Err(format!("检查上传目录失败: {error}")),
+    }
+    let canonical_uploads = uploads
+        .canonicalize()
+        .map_err(|e| format!("无法解析上传目录: {e}"))?;
+    if canonical_uploads.parent() != Some(root.as_path()) {
+        return Err("上传目录不在项目根目录内".to_string());
+    }
+
+    let destination = canonical_uploads.join(safe_name);
+    // 粘贴文件名由前端生成且应唯一；create_new 同时拒绝已存在文件和 symlink，
+    // 避免“检查后替换”竞态把写入重定向到项目外。
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .map_err(|e| format!("安全创建图片失败（文件名可能已存在）: {e}"))?;
+    file.write_all(&data)
+        .and_then(|_| file.flush())
+        .map_err(|e| format!("写入图片失败: {e}"))?;
+    Ok(destination.to_string_lossy().into_owned())
 }
 
 /// 读取文件为 base64 字符串（用于图片预览）
@@ -170,4 +292,33 @@ pub fn import_external_path(source: String, _project_dir: String) -> Result<Impo
         source, absolute, is_dir
     );
     Ok(ImportResult { absolute_path: absolute, is_dir })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_clipboard_file_name;
+
+    #[test]
+    fn accepts_safe_clipboard_image_names() {
+        assert_eq!(
+            validate_clipboard_file_name("pasted-123_0.png").unwrap(),
+            "pasted-123_0.png"
+        );
+        assert!(validate_clipboard_file_name("photo.JPEG").is_ok());
+    }
+
+    #[test]
+    fn rejects_unsafe_clipboard_image_names() {
+        for name in [
+            "../escape.png",
+            "folder/image.png",
+            "folder\\image.png",
+            ".hidden.png",
+            "image.svg",
+            "image.png;cmd",
+            " image.png",
+        ] {
+            assert!(validate_clipboard_file_name(name).is_err(), "accepted {name}");
+        }
+    }
 }
