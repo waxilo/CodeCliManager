@@ -1,6 +1,7 @@
 import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
 import { getIsSidebarCollapsed, setSidebarCollapsed } from '../../ui';
+import { stashComposerDraft, restoreComposerDraft } from '../files/index';
 import { closeProfileContextMenu } from './profile-list';
 import { loadChatModelOptions } from '../chat/model-picker';
 import { refreshModelInfo } from '../chat/render-chat';
@@ -22,6 +23,8 @@ export function openApiConfigView() {
   if (getIsSidebarCollapsed()) {
     setSidebarCollapsed(false);
   }
+  // 全量重绘会重建输入框，先保存草稿，返回聊天视图时再恢复
+  stashComposerDraft();
   appState.isApiConfigViewActive = true;
   shellApi.render();
 }
@@ -46,6 +49,7 @@ export function closeApiConfigView() {
   }
   dismissApiConfigViewState();
   shellApi.render();
+  restoreComposerDraft();
   void loadChatModelOptions();
   if (!appState.activeConversationId) {
     void refreshModelInfo();

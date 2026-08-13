@@ -126,10 +126,19 @@ export async function initAppUpdate(): Promise<void> {
   void checkAppUpdate(false);
 }
 
-export async function checkAppUpdate(_force = false): Promise<void> {
+export async function checkAppUpdate(force = false): Promise<void> {
   // 自动检查和手动重查必须串行，避免 updater 句柄与 UI 状态竞态。
   if (appState.appUpdateCheckPromise) {
-    return appState.appUpdateCheckPromise;
+    // 非 force：复用进行中的检查，避免并发。
+    if (!force) return appState.appUpdateCheckPromise;
+    // force：等当前检查结束后重新发起一次，确保「检查更新」按钮真正重查。
+    try {
+      await appState.appUpdateCheckPromise;
+    } catch {
+      // 旧检查的错误已写入 appUpdateInfo，这里忽略即可
+    }
+    // 等待期间可能已有并发 force 发起了新检查，此时直接复用，避免重复启动
+    if (appState.appUpdateCheckPromise) return appState.appUpdateCheckPromise;
   }
 
   appState.appUpdateCheckStatus = 'checking';
@@ -347,7 +356,7 @@ export async function installAppUpdate(): Promise<void> {
       showCopyToastMsg('下载完成，正在关闭常驻会话…');
     }
     const stopped = await stopAllSessions('update');
-    console.log(`[updater] 安装前已优雅关闭 ${stopped} 个常驻会话`);
+    console.debug(`[updater] 安装前已优雅关闭 ${stopped} 个常驻会话`);
     if (isWindows) {
       showCopyToastMsg('常驻会话已关闭，开始安装…（若弹出 UAC 请允许）');
     }

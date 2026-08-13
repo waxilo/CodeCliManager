@@ -1,6 +1,7 @@
 import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
 import { getIsSidebarCollapsed, setSidebarCollapsed, showCopyToastMsg } from '../../ui';
+import { stashComposerDraft, restoreComposerDraft } from '../files/index';
 import { setPermissionMode } from '../permissions/permission-mode';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
 
@@ -18,6 +19,8 @@ export function openSettingsView() {
   if (getIsSidebarCollapsed()) {
     setSidebarCollapsed(false);
   }
+  // 全量重绘会重建输入框，先保存草稿，返回聊天视图时再恢复
+  stashComposerDraft();
   appState.isSettingsViewActive = true;
   shellApi.render();
 }
@@ -39,6 +42,7 @@ export function closeSettingsView() {
   }
   dismissSettingsViewState();
   shellApi.render();
+  restoreComposerDraft();
   startMainBalanceBarAutoRefresh();
 }
 

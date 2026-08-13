@@ -188,8 +188,8 @@ export function renderEmptyState(): string {
   return `
     <div class="empty-chat">
       <div class="empty-icon">💬</div>
-      <h2>Start a New Conversation</h2>
-      <p>Select a platform from the dropdown and start chatting with your AI CLI</p>
+      <h2>开始新对话</h2>
+      <p>从下拉选择 API 配置，开始与你的 AI CLI 对话</p>
       <div class="empty-chat-model-info" id="empty-chat-model-info"></div>
     </div>
   `;

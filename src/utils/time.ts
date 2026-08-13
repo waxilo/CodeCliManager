@@ -40,6 +40,6 @@ export function formatCompactTime(ts: number | null | undefined): string {
 }
 
 export function formatTime(timestamp: number): string {
-  const date = new Date(timestamp * 1000);
+  const date = new Date(toMillis(timestamp));
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }

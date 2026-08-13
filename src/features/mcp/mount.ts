@@ -1,6 +1,7 @@
 import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
 import { loadMcpServers, openMcpEditorDialog } from './editor-dialog';
+import { stashComposerDraft, restoreComposerDraft } from '../files/index';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
 
 export function openMcpView() {
@@ -15,6 +16,8 @@ export function openMcpView() {
   if (appState.isKiroViewActive) {
     shellApi.dismissKiroViewState();
   }
+  // 全量重绘会重建输入框，先保存草稿，返回聊天视图时再恢复
+  stashComposerDraft();
   appState.isMcpViewActive = true;
   shellApi.render();
 }
@@ -38,6 +41,7 @@ export function closeMcpView() {
   }
   dismissMcpViewState();
   shellApi.render();
+  restoreComposerDraft();
   startMainBalanceBarAutoRefresh();
 }
 

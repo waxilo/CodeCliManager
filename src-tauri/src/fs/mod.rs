@@ -7,6 +7,8 @@ use std::process::Command;
 
 const MAX_PROJECT_FILE_ENTRIES: usize = 20_000;
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 25 * 1024 * 1024;
+/// 单次文件读取的大小上限：防止一次读入超大文件导致整个 Tauri 进程 OOM。
+const MAX_READABLE_FILE_BYTES: u64 = 25 * 1024 * 1024;
 
 // 确保目录存在：先验证，不存在则尝试创建
 pub(crate) fn resolve_or_create_dir(cwd: &str) -> Option<String> {
@@ -137,6 +139,15 @@ fn validate_readable_path(file_path: &str) -> Result<PathBuf, String> {
         .map_err(|e| format!("文件不存在: {file_path} ({e})"))?;
     if !canonical.is_file() {
         return Err(format!("文件不存在: {}", file_path));
+    }
+    let metadata = std::fs::metadata(&canonical)
+        .map_err(|e| format!("读取文件信息失败: {file_path} ({e})"))?;
+    if metadata.len() > MAX_READABLE_FILE_BYTES {
+        return Err(format!(
+            "文件过大（{} 字节），仅支持读取 {} 字节以内的文件",
+            metadata.len(),
+            MAX_READABLE_FILE_BYTES
+        ));
     }
     if let Some(home) = dirs::home_dir() {
         if !canonical.starts_with(&home) {
@@ -307,7 +318,7 @@ pub fn import_external_path(source: String, _project_dir: String) -> Result<Impo
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_clipboard_file_name, validate_readable_path};
+    use super::{validate_clipboard_file_name, validate_readable_path, MAX_READABLE_FILE_BYTES};
 
     #[test]
     fn accepts_safe_clipboard_image_names() {
@@ -336,6 +347,20 @@ mod tests {
     #[test]
     fn rejects_nonexistent_read_paths() {
         assert!(validate_readable_path("/nonexistent/definitely-missing.txt").is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_read_paths() {
+        let Some(home) = dirs::home_dir() else { return; };
+        let path = home.join(".codecli-manager-test-oversized.bin");
+        let _ = std::fs::remove_file(&path);
+        let file = std::fs::File::create(&path).expect("create test file");
+        file.set_len(MAX_READABLE_FILE_BYTES + 1).expect("sparse extend");
+        drop(file);
+        let result = validate_readable_path(path.to_str().expect("path is utf-8"));
+        let _ = std::fs::remove_file(&path);
+        let err = result.expect_err("oversized file should be rejected");
+        assert!(err.contains("文件过大"), "unexpected error: {err}");
     }
 
     #[cfg(unix)]

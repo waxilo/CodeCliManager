@@ -1,7 +1,7 @@
 import { appState } from '../../state';
 import * as api from '../../api';
 import { escapeHtml } from '../../utils';
-import { showCopyToastMsg } from '../../ui';
+import { showCopyToastMsg, showConfirmDialog } from '../../ui';
 import {
   syncSettingsUpdateBadgeUI,
   renderAppUpdatePopoverBody,
@@ -132,7 +132,12 @@ export function renderSettingsUpdateSectionIfOpen(): void {
 
 export async function runClaudeCodeInstall(): Promise<void> {
   if (appState.claudeUpdateCheckStatus === 'installing' || appState.claudeUpdateCheckStatus === 'updating') return;
-  if (!window.confirm('将从 claude.ai 下载并执行官方 Claude Code 安装脚本。是否继续？')) return;
+  const confirmed = await showConfirmDialog({
+    title: '安装 Claude Code',
+    message: '将从 claude.ai 下载并执行官方 Claude Code 安装脚本。是否继续？',
+    confirmLabel: '安装',
+  });
+  if (!confirmed) return;
 
   appState.claudeUpdateCheckStatus = 'installing';
   appState.claudeUpdateError = null;

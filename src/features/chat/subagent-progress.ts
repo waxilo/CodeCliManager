@@ -119,6 +119,9 @@ export function syncSubagentProgressUI(): void {
       'afterend',
       `<aside class="subagent-panel" id="subagent-progress" aria-label="子代理执行清单">${inner}</aside>`,
     );
+    // 强制重排：让刚插入的面板先以收起态（width:0）完成布局，
+    // 再统一加 has-subagent-panel / 收起侧边栏，触发两侧宽度过渡动画。
+    void (container as HTMLElement).offsetWidth;
   }
   applySubagentLayoutState(true);
 }

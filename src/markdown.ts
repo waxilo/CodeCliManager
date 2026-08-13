@@ -30,7 +30,8 @@ renderer.code = function (codeObj: { text: string; lang?: string; escaped?: bool
   }
 
   const escapedCode = escapeAttr(code);
-  const langLabel = lang || 'text';
+  // 语言标签来自围栏内容，用户/模型可控；转义后再拼入类名与角标，防止属性注入
+  const langLabel = escapeAttr(lang) || 'text';
   const langBadge = lang && lang !== 'text'
     ? `<span class="code-lang-badge">${langLabel}</span>`
     : '';

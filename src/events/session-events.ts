@@ -307,7 +307,7 @@ export async function setupEventListeners() {
     const sid = event.payload;
     // 切模型重启期间旧进程的 turn-complete：不要清 running / 不要用旧历史刷 UI
     if (sid && appState.modelRestartingSessions.has(sid)) {
-      console.log('[turn-complete] 忽略切模型重启期间的过期事件:', sid);
+      console.debug('[turn-complete] 忽略切模型重启期间的过期事件:', sid);
       return;
     }
     const wasUserAbort =
@@ -374,7 +374,7 @@ export async function setupEventListeners() {
       appState.runningSessions.has(endedSessionId) &&
       !wasUserAbort
     ) {
-      console.log('[session-ended] 忽略过期结束事件（会话仍在运行）:', endedSessionId);
+      console.debug('[session-ended] 忽略过期结束事件（会话仍在运行）:', endedSessionId);
       return;
     }
 

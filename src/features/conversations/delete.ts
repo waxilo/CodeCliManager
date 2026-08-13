@@ -53,7 +53,6 @@ export async function deleteConversation(id: string, sourcePath: string | null =
 export async function deleteWorkspaceConversations(workspacePath: string) {
   const { workspaces } = groupConversationsByWorkspace();
   const ws = workspaces.find((w) => w.path === workspacePath);
-  console.log('[deleteWorkspace] path:', workspacePath, 'found:', !!ws, 'count:', ws?.conversations.length);
   if (!ws || ws.conversations.length === 0) return;
 
   const count = ws.conversations.length;
@@ -69,7 +68,6 @@ export async function deleteWorkspaceConversations(workspacePath: string) {
     const deletedCount = await api.deleteWorkspaceConversations({
       projectDir: workspacePath,
     });
-    console.log('[deleteWorkspace] deletedCount:', deletedCount);
 
     // 清理已删除会话的流式状态
     for (const conv of ws.conversations) {

@@ -53,7 +53,6 @@ export async function loadData() {
     const platform = await api.getCurrentPlatform();
     if (generation !== loadGeneration) return;
     appState.currentPlatform = platform;
-    console.log('Current platform:', appState.currentPlatform);
   } catch (e) {
     if (generation !== loadGeneration) return;
     console.error('Failed to load data:', e);

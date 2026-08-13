@@ -126,7 +126,7 @@ export function showQuestionDialog(
 
     const trySubmit = (): boolean => {
       const card = document.querySelector<HTMLElement>(
-        `.ask-card.is-interactive[data-ask-request-id="${payload.requestId}"]`,
+        `.ask-card.is-interactive[data-ask-request-id="${CSS.escape(payload.requestId)}"]`,
       );
       if (!card) return false;
       const answers = collectAnswersFromCard(card);
@@ -156,7 +156,7 @@ export function showQuestionDialog(
       // 滚到选择卡，便于直接点选
       requestAnimationFrame(() => {
         document
-          .querySelector(`.ask-card.is-interactive[data-ask-request-id="${payload.requestId}"]`)
+          .querySelector(`.ask-card.is-interactive[data-ask-request-id="${CSS.escape(payload.requestId)}"]`)
           ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
       });
     }

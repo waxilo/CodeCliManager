@@ -53,8 +53,11 @@ function renderComposerDraft(): void {
 /** 切走会话前保存输入和附件；object URL 仍由对应草稿持有，不在切换时释放。 */
 export function stashComposerDraft(key = getComposerDraftKey()): void {
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+  // 管理页（设置/API 配置/MCP）没有输入框：此时不应清空或覆盖已 stash 的草稿，
+  // 否则管理页间切换、从管理页返回会话都会把草稿弄丢。
+  if (!input) return;
   const draft: ComposerDraft = {
-    text: input?.value || '',
+    text: input.value,
     pasteAttachments: appState.pasteAttachments,
     importedFileRefs: appState.importedFileRefs,
   };

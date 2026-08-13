@@ -162,22 +162,34 @@ pub(crate) fn spawn_claude_stream(
     let mut recovery_attempts = 0u8;
     let mut stream_error: Option<String> = None;
 
+    // stderr 仅用于排障日志，必须设上限：子进程刷屏时不能让字符串无界增长。
+    const MAX_STDERR_CAPTURE_BYTES: usize = 1024 * 1024;
     let stderr_buffer = Arc::new(Mutex::new(String::new()));
     if let Some(stderr) = stderr {
         let stderr_buffer = Arc::clone(&stderr_buffer);
         thread::spawn(move || {
-            let content = BufReader::new(stderr)
-                .lines()
-                .filter_map(|line| line.ok())
-                .collect::<Vec<_>>()
-                .join("\n");
+            let mut captured = String::new();
+            for line in BufReader::new(stderr).lines() {
+                match line {
+                    Ok(line) => {
+                        if captured.len() >= MAX_STDERR_CAPTURE_BYTES {
+                            captured.push_str("\n[stderr 超过 1MB，已截断]");
+                            break;
+                        }
+                        captured.push_str(&line);
+                        captured.push('\n');
+                    }
+                    Err(_) => break,
+                }
+            }
             if let Ok(mut guard) = stderr_buffer.lock() {
-                *guard = content;
+                *guard = captured;
             }
         });
     }
 
-    let (line_tx, line_rx) = mpsc::channel();
+    // 有界通道：主循环在权限确认等长等待期间不会积压无限行；满时由子进程管道背压。
+    let (line_tx, line_rx) = mpsc::sync_channel(4096);
     thread::spawn(move || {
         for line in BufReader::new(stdout).lines() {
             match line {

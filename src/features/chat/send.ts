@@ -442,8 +442,7 @@ export async function abortSession() {
     setAbortingUi(true);
     closePermissionDialogs(abortSessionId);
 
-    const killed = await api.abortSession(args);
-    console.log('[abort] result:', killed, 'sessionId:', abortSessionId);
+    await api.abortSession(args);
 
     // 点击停止后立即从运行集合中移除转圈，并清掉本地队列快照；后端也会同步空队列事件。
     appState.queuedPromptsBySession.delete(abortSessionId);

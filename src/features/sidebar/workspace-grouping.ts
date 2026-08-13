@@ -2,9 +2,10 @@ import { appState, EXPANDED_WORKSPACES_KEY } from '../../state';
 import type { Conversation, WorkspaceGroup } from '../../types';
 import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
+import { showConfirmDialog } from '../../ui';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshModelInfo } from '../chat/render-chat';
-import { invalidateFileCache } from '../files/index';
+import { invalidateFileCache, stashComposerDraft } from '../files/index';
 import { dismissMcpViewState } from '../mcp/mount';
 import { dismissSettingsViewState } from '../settings/mount';
 import { dismissKiroViewState } from '../kiro/mount';
@@ -117,11 +118,23 @@ export function groupConversationsByWorkspace(): { workspaces: WorkspaceGroup[];
 }
 
 /** 在指定工作区快速新建对话（预设工作目录，跳过选目录步骤） */
-export function newChatInWorkspace(workspacePath: string): void {
+export async function newChatInWorkspace(workspacePath: string): Promise<void> {
+  // 有正在运行的会话时先确认，避免静默强杀丢弃正在生成的回答
+  if (appState.runningSessions.size > 0) {
+    const confirmed = await showConfirmDialog({
+      title: '新建会话',
+      message: '当前有正在运行的会话，新建会话将终止它。是否继续？',
+      sub: `工作区：${workspacePath}`,
+      confirmLabel: '终止并新建',
+    });
+    if (!confirmed) return;
+  }
   dismissApiConfigViewState();
   dismissSettingsViewState();
   dismissMcpViewState();
   dismissKiroViewState();
+  // 清除会话状态前保存当前输入草稿（对齐 pickNewWorkspaceDirectory）
+  stashComposerDraft();
   appState.activeConversationId = '';
   appState.activeConversationSourcePath = null;
   invalidateFileCache();

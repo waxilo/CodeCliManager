@@ -145,10 +145,11 @@ export function setSidebarCollapsed(collapsed: boolean, persist = true) {
 }
 
 export function toggleSidebarCollapsed() {
-  // 用户手动操作后放弃自动折叠的接管权，避免窗口变宽 / 子代理结束时被强行展开
+  // 用户手动操作后放弃自动折叠的接管权，避免窗口变宽 / 子代理结束时被强行展开。
+  // 注意：不重置 subagentSidebarManaged —— 手动展开后，本轮子代理周期的进度刷新
+  // 不应再把侧边栏压回去；该标志在子代理结束时由 syncSidebarForSubagents(false) 复位。
   sidebarAutoCollapsed = false;
   sidebarCollapsedForSubagents = false;
-  subagentSidebarManaged = false;
   setSidebarCollapsed(!isSidebarCollapsed);
 }
 
