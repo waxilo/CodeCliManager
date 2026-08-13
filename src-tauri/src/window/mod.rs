@@ -1,4 +1,3 @@
-use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewWindow};
 

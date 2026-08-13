@@ -120,6 +120,7 @@ export const appState = {
   modelRestartingSessions: new Set<string>(),
   isAbortingActiveSession: false,
   sessionProcessModels: new Map<string, string>(),
+  queuedPromptsBySession: new Map<string, number>(),
   pendingAskQuestions: new Map<string, PendingAskQuestionState>(),
   activeQuestionEnterHandler: null as (() => boolean) | null,
   activeAskQuestionCleanup: null as (() => void) | null,

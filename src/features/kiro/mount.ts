@@ -4,6 +4,7 @@ import { startMainBalanceBarAutoRefresh } from '../status-bar';
 import {
   openKiroModelConfigDialog,
   refreshKiroStatus,
+  refreshKiroModels,
   refreshKiroToken,
   scheduleKiroUsage,
   toggleKiroProxy,
@@ -86,6 +87,8 @@ export async function mountKiroView() {
   });
 
   await refreshKiroStatus();
+  if (!isMountCurrent()) return;
+  await refreshKiroModels();
   // 连点打开/关闭时，过期 mount 的异步刷新不得继续触发后续副作用
   if (!isMountCurrent()) return;
 }

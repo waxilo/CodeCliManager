@@ -1,12 +1,24 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { KiroModelsStateData, KiroStatusData, KiroUsageData } from '../types';
 
+let statusRequest: Promise<KiroStatusData> | null = null;
+let usageRequest: Promise<KiroUsageData> | null = null;
+let modelsStateRequest: Promise<KiroModelsStateData> | null = null;
+
 export function kiroStatus(): Promise<KiroStatusData> {
-  return invoke<KiroStatusData>('kiro_status');
+  if (statusRequest) return statusRequest;
+  statusRequest = invoke<KiroStatusData>('kiro_status').finally(() => {
+    statusRequest = null;
+  });
+  return statusRequest;
 }
 
 export function kiroUsage(): Promise<KiroUsageData> {
-  return invoke<KiroUsageData>('kiro_usage');
+  if (usageRequest) return usageRequest;
+  usageRequest = invoke<KiroUsageData>('kiro_usage').finally(() => {
+    usageRequest = null;
+  });
+  return usageRequest;
 }
 
 export function kiroRefreshToken(): Promise<KiroStatusData> {
@@ -22,7 +34,11 @@ export function kiroStop(): Promise<KiroStatusData> {
 }
 
 export function kiroModelsState(): Promise<KiroModelsStateData> {
-  return invoke<KiroModelsStateData>('kiro_models_state');
+  if (modelsStateRequest) return modelsStateRequest;
+  modelsStateRequest = invoke<KiroModelsStateData>('kiro_models_state').finally(() => {
+    modelsStateRequest = null;
+  });
+  return modelsStateRequest;
 }
 
 export function kiroSyncModels(): Promise<KiroModelsStateData> {

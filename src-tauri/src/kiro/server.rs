@@ -49,7 +49,6 @@ pub struct ProxyConfig {
 /// 运行中的代理句柄。
 pub struct ProxyHandle {
     pub port: u16,
-    pub config: ProxyConfig,
     pub(crate) stop: Arc<AtomicBool>,
     pub(crate) thread: Option<JoinHandle<()>>,
 }
@@ -112,7 +111,7 @@ pub fn start_proxy(mut config: ProxyConfig) -> Result<ProxyHandle, String> {
         }
     });
 
-    Ok(ProxyHandle { port, config, stop, thread: Some(handle) })
+    Ok(ProxyHandle { port, stop, thread: Some(handle) })
 }
 
 // ============ 路由 ============
@@ -184,16 +183,6 @@ fn json_response(request: Request, status: u16, body: &Value) {
 fn error_response(request: Request, status: u16, message: &str, error_type: &str) {
     let body = json!({ "type": "error", "error": { "type": error_type, "message": message } });
     json_response(request, status, &body);
-}
-
-fn sse_response(request: Request, body: String) {
-    let response = Response::from_string(body)
-        .with_status_code(StatusCode(200))
-        .with_header(Header::from_bytes("Content-Type", "text/event-stream; charset=utf-8").unwrap())
-        .with_header(Header::from_bytes("Cache-Control", "no-cache").unwrap())
-        .with_header(Header::from_bytes("X-Accel-Buffering", "no").unwrap())
-        .with_header(cors_header());
-    let _ = request.respond(response);
 }
 
 fn sse_event(event: &str, data: &Value) -> String {
@@ -580,7 +569,6 @@ fn pipe_kiro_body_to_anthropic_sse(
                         "content_block_stop",
                         &json!({ "type": "content_block_stop", "index": index }),
                     ));
-                    text_started = false;
                 }
                 // 若本轮尚未产出任何助手内容，补一条 API Error 文本，避免 result_type=user
                 if !had_assistant_content {

@@ -960,10 +960,6 @@ pub fn build_kiro_request(
 
 // ============ 响应构造 ============
 
-pub fn anthropic_message_response(id: &str, model: &str, text: &str, stop_reason: &str) -> Value {
-    anthropic_message_response_with_tools(id, model, text, "", None, &[], stop_reason)
-}
-
 pub fn anthropic_message_response_with_tools(
     id: &str,
     model: &str,
@@ -1030,19 +1026,6 @@ pub fn anthropic_message_response_with_tools(
         "stop_sequence": null,
         "usage": { "input_tokens": 0, "output_tokens": estimate_tokens(text) },
     })
-}
-
-pub fn content_blocks_to_text(content: &[Value]) -> String {
-    content
-        .iter()
-        .filter_map(|block| match block.get("type").and_then(|v| v.as_str()) {
-            Some("text") => block.get("text").and_then(|v| v.as_str()).map(|s| s.to_string()),
-            Some("tool_use") => Some(block.to_string()),
-            _ => None,
-        })
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[cfg(test)]

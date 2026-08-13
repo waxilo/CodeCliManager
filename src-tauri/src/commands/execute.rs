@@ -1,6 +1,3 @@
-use std::io::Write;
-use std::path::Path;
-use std::sync::mpsc;
 use tauri::{AppHandle, Emitter};
 
 use crate::claude::spawn_claude_stream;
@@ -29,6 +26,19 @@ pub async fn execute_prompt(
         if is_process_registered(cid) && get_active_stdin(cid).is_some() {
             let requested_model = normalize_process_model(active_model.as_deref());
             let running_model = get_active_session_model(cid).unwrap_or_default();
+            if requested_model == running_model && is_turn_active(cid) {
+                let count = enqueue_prompt(
+                    cid,
+                    QueuedPrompt {
+                        prompt: prompt.clone(),
+                        model: active_model.clone(),
+                    },
+                );
+                emit_queued_prompt_count(&app, cid);
+                eprintln!("[execute_prompt] turn active; queued followup for {} (count={})", cid, count);
+                return Ok(());
+            }
+
             if requested_model != running_model {
                 eprintln!(
                     "[execute_prompt] 模型切换 '{}' → '{}'，重启常驻会话 {}",
@@ -260,6 +270,14 @@ pub async fn abort_session(
 ) -> Result<bool, String> {
     let force_kill = force.unwrap_or(false);
     let mut aborted = false;
+
+    if let Some(ref cid) = conversation_id {
+        let cleared = clear_queued_prompts(cid);
+        if cleared > 0 {
+            emit_queued_prompt_count(&app, cid);
+            eprintln!("[abort] cleared {} queued prompts for {}", cleared, cid);
+        }
+    }
 
     if let Some(ref cid) = conversation_id {
         let _ = app.emit("session-aborting", Some(cid.clone()));

@@ -34,14 +34,14 @@ pub struct CollectedText {
 
 #[derive(Debug, Clone)]
 enum HeaderValue {
-    Bool(bool),
-    Byte(u8),
-    Int16(i16),
-    Int32(i32),
-    Int64(i64),
-    ByteArray(Vec<u8>),
+    Bool,
+    Byte,
+    Int16,
+    Int32,
+    Int64,
+    ByteArray,
     String(String),
-    Uuid(String),
+    Uuid,
 }
 
 fn read_u16_be(b: &[u8], off: usize) -> usize {
@@ -64,37 +64,40 @@ fn read_header_value(buffer: &[u8], offset: usize) -> Option<(String, HeaderValu
     let get_u8 = |o: usize| buffer.get(o).copied();
 
     let value = match value_type {
-        0 => HeaderValue::Bool(true),
-        1 => HeaderValue::Bool(false),
+        0 => HeaderValue::Bool,
+        1 => HeaderValue::Bool,
         2 => {
-            let v = get_u8(o)?;
+            get_u8(o)?;
             o += 1;
-            HeaderValue::Byte(v)
+            HeaderValue::Byte
         }
         3 => {
-            let v = i16::from_be_bytes([get_u8(o)?, get_u8(o + 1)?]);
+            get_u8(o)?;
+            get_u8(o + 1)?;
             o += 2;
-            HeaderValue::Int16(v)
+            HeaderValue::Int16
         }
         4 => {
-            let v = i32::from_be_bytes([get_u8(o)?, get_u8(o + 1)?, get_u8(o + 2)?, get_u8(o + 3)?]);
+            get_u8(o)?;
+            get_u8(o + 1)?;
+            get_u8(o + 2)?;
+            get_u8(o + 3)?;
             o += 4;
-            HeaderValue::Int32(v)
+            HeaderValue::Int32
         }
         5 | 8 => {
-            let v = i64::from_be_bytes([
-                get_u8(o)?, get_u8(o + 1)?, get_u8(o + 2)?, get_u8(o + 3)?,
-                get_u8(o + 4)?, get_u8(o + 5)?, get_u8(o + 6)?, get_u8(o + 7)?,
-            ]);
+            for index in 0..8 {
+                get_u8(o + index)?;
+            }
             o += 8;
-            HeaderValue::Int64(v)
+            HeaderValue::Int64
         }
         6 => {
             let length = read_u16_be(buffer, o);
             o += 2;
-            let v = buffer.get(o..o + length)?.to_vec();
+            buffer.get(o..o + length)?;
             o += length;
-            HeaderValue::ByteArray(v)
+            HeaderValue::ByteArray
         }
         7 => {
             let length = read_u16_be(buffer, o);
@@ -104,9 +107,9 @@ fn read_header_value(buffer: &[u8], offset: usize) -> Option<(String, HeaderValu
             HeaderValue::String(v)
         }
         9 => {
-            let v = buffer.get(o..o + 16)?.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+            buffer.get(o..o + 16)?;
             o += 16;
-            HeaderValue::Uuid(v)
+            HeaderValue::Uuid
         }
         _ => return None,
     };

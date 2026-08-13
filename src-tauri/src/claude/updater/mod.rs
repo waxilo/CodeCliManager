@@ -1,12 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::claude::runtime::{apply_cli_runtime_env, extended_path_for_cli, resolve_claude_executable};
+use crate::claude::runtime::{apply_cli_runtime_env, resolve_claude_executable};
 use crate::session::force_kill_process_tree;
 
 /// 从 `claude -v` 输出中提取版本号，例如 `2.1.138 (Claude Code)` → `2.1.138`
@@ -68,6 +67,7 @@ pub(crate) const CLAUDE_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const CLAUDE_UPDATE_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const CLAUDE_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
 pub(crate) const CLAUDE_INSTALL_SH_URL: &str = "https://claude.ai/install.sh";
+#[cfg(windows)]
 pub(crate) const CLAUDE_INSTALL_PS1_URL: &str = "https://claude.ai/install.ps1";
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x08000000;

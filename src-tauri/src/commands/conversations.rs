@@ -2,7 +2,6 @@ use std::collections::HashSet;
 use std::path::Path;
 
 use crate::history::*;
-use crate::session::session_stop_graceful;
 
 #[tauri::command]
 pub fn get_conversations() -> Vec<Conversation> {

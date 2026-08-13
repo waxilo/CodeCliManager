@@ -303,7 +303,6 @@ pub(crate) fn stop_credential_refresh_loop(state: &KiroProxyState) {
 /// 计算下次刷新等待时长：优先在 expiresAt 前 skew 秒刷新，并夹在 [MIN, DEFAULT]。
 fn next_credential_refresh_delay(expires_at: Option<&str>) -> Duration {
     let default = Duration::from_secs(KIRO_REFRESH_DEFAULT_SECS);
-    let min = Duration::from_secs(KIRO_REFRESH_MIN_SECS);
     let Some(raw) = expires_at else {
         return default;
     };
@@ -784,35 +783,50 @@ pub async fn kiro_prepare_send(
 
 /// 启动 Kiro 反代代理并自动接入 Claude Code。
 #[tauri::command]
-pub fn kiro_start(
+pub async fn kiro_start(
     app: AppHandle,
     state: tauri::State<'_, KiroProxyState>,
     port: Option<u16>,
 ) -> Result<KiroStatus, String> {
-    let _op = state
-        .op_lock
-        .lock()
-        .map_err(|_| "Kiro 操作锁获取失败".to_string())?;
-    start_kiro_proxy(Some(&app), &state, port)
+    let state_clone = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _op = state_clone
+            .op_lock
+            .lock()
+            .map_err(|_| "Kiro 操作锁获取失败".to_string())?;
+        start_kiro_proxy(Some(&app), &state_clone, port)
+    })
+    .await
+    .map_err(|e| format!("Kiro 启动任务失败: {e}"))?
 }
 
 /// 停止 Kiro 反代代理，并还原开启前的 API 配置。
 #[tauri::command]
-pub fn kiro_stop(state: tauri::State<'_, KiroProxyState>) -> Result<KiroStatus, String> {
-    let _op = state
-        .op_lock
-        .lock()
-        .map_err(|_| "Kiro 操作锁获取失败".to_string())?;
-    stop_credential_refresh_loop(&state);
-    if let Some(mut handle) = state.inner.lock().map_err(|_| "lock failed".to_string())?.take() {
-        handle.stop();
-    }
-    *state.port.lock().map_err(|_| "lock failed".to_string())? = None;
-    *state.key.lock().map_err(|_| "lock failed".to_string())? = None;
-    if let Err(e) = deactivate_kiro_runtime() {
-        eprintln!("[kiro] restore api config after stop failed: {e}");
-    }
-    Ok(build_kiro_status(&state))
+pub async fn kiro_stop(state: tauri::State<'_, KiroProxyState>) -> Result<KiroStatus, String> {
+    let state_clone = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _op = state_clone
+            .op_lock
+            .lock()
+            .map_err(|_| "Kiro 操作锁获取失败".to_string())?;
+        stop_credential_refresh_loop(&state_clone);
+        if let Some(mut handle) = state_clone
+            .inner
+            .lock()
+            .map_err(|_| "lock failed".to_string())?
+            .take()
+        {
+            handle.stop();
+        }
+        *state_clone.port.lock().map_err(|_| "lock failed".to_string())? = None;
+        *state_clone.key.lock().map_err(|_| "lock failed".to_string())? = None;
+        if let Err(e) = deactivate_kiro_runtime() {
+            eprintln!("[kiro] restore api config after stop failed: {e}");
+        }
+        Ok(build_kiro_status_from(&state_clone))
+    })
+    .await
+    .map_err(|e| format!("Kiro 停止任务失败: {e}"))?
 }
 
 /// 读取 Kiro 模型列表与当前默认模型（来自偏好 / settings）。

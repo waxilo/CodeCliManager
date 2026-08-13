@@ -1,7 +1,5 @@
 use std::collections::HashMap;
-use std::fs;
-use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::{mpsc::{self, RecvTimeoutError}, Arc, Mutex};
 use std::thread;
@@ -12,7 +10,6 @@ use crate::claude::runtime::{apply_cli_runtime_env, resolve_claude_executable};
 use crate::claude::stream_events::*;
 use crate::config::{apply_model_override_env, has_custom_api_base};
 use crate::fs::resolve_or_create_dir;
-use crate::history::{parse_claude_session_cached, rewrite_session_model};
 use crate::session::*;
 
 /// 使用 stream-json 模式启动 claude，实时推送 thinking / answer 增量

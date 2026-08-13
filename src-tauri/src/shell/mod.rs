@@ -1,7 +1,4 @@
-use std::path::PathBuf;
-use std::process::Command;
-
-use crate::claude::runtime::{apply_cli_runtime_env, resolve_claude_executable};
+use crate::claude::runtime::resolve_claude_executable;
 
 /// 在新终端窗口中打开指定目录（仅 cd，不执行额外命令）
 #[tauri::command]

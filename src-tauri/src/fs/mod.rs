@@ -1,10 +1,8 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-use crate::claude::runtime::apply_cli_runtime_env;
 
 // 确保目录存在：先验证，不存在则尝试创建
 pub(crate) fn resolve_or_create_dir(cwd: &str) -> Option<String> {

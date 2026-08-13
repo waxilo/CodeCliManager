@@ -1,14 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{mpsc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 use crate::history::{Conversation, Message};
-use crate::session::{
-    clear_turn_active, emit_turn_complete, ensure_permission_registry, is_ask_user_question_tool,
-    is_silent_permission_mode, mark_turn_active, PendingPermission, PermissionDecision,
-    PermissionRequestPayload, PENDING_PERMISSIONS,
-};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct SessionEventPayload {

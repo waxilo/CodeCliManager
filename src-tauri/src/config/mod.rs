@@ -1,8 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 
 use crate::model_fetch;
 use crate::paths::{get_claude_settings_path, get_data_path};

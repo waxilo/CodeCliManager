@@ -93,10 +93,17 @@ export function updateSendButtonState() {
   if (loading) {
     // 运行中：有内容 → 会话中追问；无内容 → 停止本轮
     const followupMode = hasContent;
+    const queuedCount = appState.activeConversationId
+      ? appState.queuedPromptsBySession.get(appState.activeConversationId) || 0
+      : 0;
     sendBtn.disabled = false;
     sendBtn.classList.toggle('is-loading', !followupMode);
     sendBtn.setAttribute('aria-label', followupMode ? '发送追问' : '停止');
-    sendBtn.title = followupMode ? '发送追问（由 Claude 会话内处理）' : '停止当前任务';
+    sendBtn.title = followupMode
+      ? queuedCount > 0
+        ? `加入队列（当前 ${queuedCount} 条）`
+        : '发送追问（回答结束后自动处理）'
+      : '停止当前任务';
     if (sendIcon) sendIcon.style.display = followupMode ? '' : 'none';
     if (stopIcon) stopIcon.style.display = followupMode ? 'none' : '';
     return;
@@ -121,7 +128,13 @@ export function getDefaultMessagePlaceholder(loading = isSendButtonLoading()): s
   if (appState.questionOtherInputActive) {
     return '在下方输入自定义回答，Enter 或点「提交」确认…';
   }
-  if (loading) return 'AI 正在回答中，可继续输入后 Enter 发送追问…';
+  if (loading) {
+    const queuedCount = appState.activeConversationId
+      ? appState.queuedPromptsBySession.get(appState.activeConversationId) || 0
+      : 0;
+    const suffix = queuedCount > 0 ? `（已排队 ${queuedCount} 条）` : '';
+    return `AI 正在回答中，可继续输入后 Enter 发送追问${suffix}…`;
+  }
   return '输入你的问题，Enter 发送，Shift+Enter 换行，@ 引用文件，粘贴图片...';
 }
 

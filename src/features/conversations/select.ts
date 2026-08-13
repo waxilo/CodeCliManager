@@ -14,8 +14,8 @@ import { renderChatHeaderHtml } from '../chat/render-chat';
 import { clearInteractionHostUi, remountActiveInteractionPanel } from '../permissions/interaction-panel';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
 
-/** 防止快速连点时过期的后端刷新覆盖当前会话 */
 let selectGeneration = 0;
+const conversationRequests = new Map<string, Promise<void>>();
 
 function isManagementDomVisible(): boolean {
   return Boolean(
@@ -107,7 +107,7 @@ function finishSelectUi(id: string): void {
 function paintSelectedConversation(id: string, wasManagement: boolean): void {
   if (wasManagement || isManagementDomVisible() || !document.querySelector('#conversation-list')) {
     shellApi.render();
-    startMainBalanceBarAutoRefresh();
+    // 管理页切回聊天时不立即触发额度网络请求，避免与页面切换/会话读取争抢资源。
     finishSelectUi(id);
     return;
   }
@@ -124,6 +124,19 @@ function paintSelectedConversation(id: string, wasManagement: boolean): void {
   syncConversationActiveHighlight(id);
   shellApi.refreshChatContent();
   finishSelectUi(id);
+}
+
+function refreshConversationOnce(id: string): Promise<void> {
+  const existing = conversationRequests.get(id);
+  if (existing) return existing;
+
+  const request = refreshConversationFromBackend(id).finally(() => {
+    if (conversationRequests.get(id) === request) {
+      conversationRequests.delete(id);
+    }
+  });
+  conversationRequests.set(id, request);
+  return request;
 }
 
 export function selectConversation(id: string) {
@@ -149,7 +162,7 @@ export function selectConversation(id: string) {
     paintSelectedConversation(id, wasManagement);
   }
 
-  void refreshConversationFromBackend(id).then(() => {
+  void refreshConversationOnce(id).then(() => {
     if (generation !== selectGeneration || appState.activeConversationId !== id) return;
 
     if (document.querySelector('#message-list')) {

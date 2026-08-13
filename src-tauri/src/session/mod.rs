@@ -1,17 +1,17 @@
-use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use serde::Serialize;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Child;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    mpsc::{self, RecvTimeoutError},
+    mpsc,
     Arc, Mutex,
 };
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
-use crate::claude::conversation_to_payload;
-use crate::history::{find_claude_session_file, invalidate_session_cache, load_claude_history};
+use crate::claude::{conversation_to_payload, emit_session_error};
+use crate::history::{find_claude_session_file, invalidate_session_cache, load_claude_history, rewrite_session_model};
 
 pub(crate) static ACTIVE_PROCESSES: Mutex<Option<HashMap<String, Arc<Mutex<Child>>>>> = Mutex::new(None);
 
@@ -39,6 +39,15 @@ pub(crate) struct PendingPermission {
     pub(crate) tool_name: String,
     pub(crate) tx: mpsc::Sender<PermissionDecision>,
 }
+
+#[derive(Debug, Clone)]
+pub(crate) struct QueuedPrompt {
+    pub(crate) prompt: String,
+    pub(crate) model: Option<String>,
+}
+
+pub(crate) static PENDING_PROMPTS: Mutex<Option<HashMap<String, VecDeque<QueuedPrompt>>>> =
+    Mutex::new(None);
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -163,6 +172,7 @@ pub(crate) fn register_active_stdin(key: &str, stdin: Arc<Mutex<std::process::Ch
 }
 
 pub(crate) fn unregister_active_process(key: &str) {
+    clear_queued_prompts(key);
     let mut reg = ACTIVE_PROCESSES.lock().unwrap();
     if let Some(map) = reg.as_mut() {
         map.remove(key);
@@ -297,7 +307,70 @@ pub(crate) fn clear_graceful_shutdown(registry_key: &str, session_id: &Option<St
     }
 }
 
-pub(crate) fn write_stdin_json(stdin: &Arc<Mutex<std::process::ChildStdin>>, value: &serde_json::Value) -> Result<(), String> {
+pub(crate) fn emit_queued_prompt_count(app: &AppHandle, session_key: &str) {
+    let payload = serde_json::json!({
+        "conversationId": session_key,
+        "count": queued_prompt_count(session_key),
+    });
+    let _ = app.emit("queued-prompts-updated", &payload);
+}
+
+pub(crate) fn dispatch_next_queued_prompt(app: &AppHandle, session_key: &str) -> bool {
+    let Some(queued) = take_queued_prompt(session_key) else {
+        return false;
+    };
+    emit_queued_prompt_count(app, session_key);
+    match try_send_followup_prompt_with_model(session_key, &queued.prompt, queued.model.as_deref()) {
+        Ok(()) => true,
+        Err(error) => {
+            let pending = clear_queued_prompts(session_key);
+            emit_queued_prompt_count(app, session_key);
+            emit_session_error(app, Some(session_key), &format!("排队追问发送失败：{error}"));
+            eprintln!("[queue] dispatch failed for {session_key}, cleared {pending} prompts");
+            false
+        }
+    }
+}
+pub(crate) fn queued_prompt_count(session_key: &str) -> usize {
+    let queues = PENDING_PROMPTS.lock().unwrap();
+    queues
+        .as_ref()
+        .and_then(|map| map.get(session_key))
+        .map(VecDeque::len)
+        .unwrap_or(0)
+}
+
+pub(crate) fn enqueue_prompt(session_key: &str, prompt: QueuedPrompt) -> usize {
+    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    let map = queues.get_or_insert_with(HashMap::new);
+    let queue = map.entry(session_key.to_string()).or_default();
+    queue.push_back(prompt);
+    queue.len()
+}
+
+pub(crate) fn take_queued_prompt(session_key: &str) -> Option<QueuedPrompt> {
+    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    let map = queues.as_mut()?;
+    let queue = map.get_mut(session_key)?;
+    let prompt = queue.pop_front();
+    if queue.is_empty() {
+        map.remove(session_key);
+    }
+    prompt
+}
+
+pub(crate) fn clear_queued_prompts(session_key: &str) -> usize {
+    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    queues
+        .as_mut()
+        .and_then(|map| map.remove(session_key))
+        .map(|queue| queue.len())
+        .unwrap_or(0)
+}
+pub(crate) fn write_stdin_json(
+    stdin: &Arc<Mutex<std::process::ChildStdin>>,
+    value: &serde_json::Value,
+) -> Result<(), String> {
     use std::io::Write;
     let line = serde_json::to_string(value).map_err(|e| e.to_string())?;
     let mut guard = stdin
@@ -393,7 +466,11 @@ pub(crate) fn is_turn_active(key: &str) -> bool {
     set.as_ref().is_some_and(|s| s.contains(key))
 }
 
-pub(crate) fn try_send_followup_prompt(session_id: &str, prompt: &str) -> Result<(), String> {
+pub(crate) fn try_send_followup_prompt_with_model(
+    session_id: &str,
+    prompt: &str,
+    model: Option<&str>,
+) -> Result<(), String> {
     let stdin = get_active_stdin(session_id).ok_or_else(|| "会话进程未就绪".to_string())?;
     let user_msg = serde_json::json!({
         "type": "user",
@@ -401,6 +478,11 @@ pub(crate) fn try_send_followup_prompt(session_id: &str, prompt: &str) -> Result
         "parent_tool_use_id": null,
         "session_id": session_id,
     });
+    if let Some(model) = model.filter(|value| !value.trim().is_empty()) {
+        if let Err(error) = rewrite_session_model(session_id, model) {
+            eprintln!("[followup] 更新会话模型失败: {error}");
+        }
+    }
     write_stdin_json(&stdin, &user_msg)?;
     mark_turn_active(session_id);
     eprintln!(
@@ -409,6 +491,14 @@ pub(crate) fn try_send_followup_prompt(session_id: &str, prompt: &str) -> Result
         prompt.len()
     );
     Ok(())
+}
+
+pub(crate) fn try_send_followup_prompt(session_id: &str, prompt: &str) -> Result<(), String> {
+    try_send_followup_prompt_with_model(session_id, prompt, None)
+}
+
+pub(crate) fn emit_turn_continued(app: &AppHandle, session_id: &str) {
+    let _ = app.emit("turn-continued", Some(session_id.to_string()));
 }
 
 pub(crate) fn emit_turn_complete(app: &AppHandle, session_id: &str) {
@@ -458,6 +548,12 @@ pub(crate) fn emit_turn_complete(app: &AppHandle, session_id: &str) {
     if !emitted_messages {
         eprintln!("[claude] turn-complete 未找到会话历史: {}", session_id);
     }
+    let has_next = queued_prompt_count(session_id) > 0;
+    if has_next && dispatch_next_queued_prompt(app, session_id) {
+        emit_turn_continued(app, session_id);
+        eprintln!("[queue] dispatched next prompt for {session_id}");
+        return;
+    }
     let _ = app.emit("turn-complete", Some(session_id.to_string()));
     eprintln!("[claude] turn-complete: {}", session_id);
 }
@@ -466,6 +562,7 @@ pub(crate) fn emit_turn_complete(app: &AppHandle, session_id: &str) {
 /// `force_kill`：删除会话等场景需要结束常驻进程
 pub(crate) fn soft_abort_session(session_key: &str, force_kill: bool) -> bool {
     reject_pending_permissions_for_session(session_key, "用户取消了会话");
+    clear_queued_prompts(session_key);
 
     let had_process = is_process_registered(session_key);
     let had_stdin = get_active_stdin(session_key).is_some();
@@ -509,6 +606,7 @@ pub(crate) const CHILD_EXIT_AFTER_STDIN_CLOSE: Duration = Duration::from_secs(5)
 /// 优雅结束常驻进程：interrupt → 通知 stream 关 stdin → 等待退出。
 /// 仅超时仍未退出时才降级强杀。所有「要结束会话进程」的外部入口应走这里。
 pub(crate) fn session_stop_graceful(session_key: &str, reason: &str) -> bool {
+    clear_queued_prompts(session_key);
     mark_session_aborted(session_key);
     reject_pending_permissions_for_session(session_key, "会话正在结束");
     mark_graceful_shutdown(session_key);
@@ -630,6 +728,29 @@ pub(crate) fn force_kill_process_tree(child: &mut Child) {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prompt(text: &str) -> QueuedPrompt {
+        QueuedPrompt {
+            prompt: text.to_string(),
+            model: None,
+        }
+    }
+
+    #[test]
+    fn queued_prompts_are_fifo_and_clearable() {
+        let key = format!("queue-test-{}", std::process::id());
+        clear_queued_prompts(&key);
+        assert_eq!(enqueue_prompt(&key, prompt("first")), 1);
+        assert_eq!(enqueue_prompt(&key, prompt("second")), 2);
+        assert_eq!(take_queued_prompt(&key).unwrap().prompt, "first");
+        assert_eq!(queued_prompt_count(&key), 1);
+        assert_eq!(clear_queued_prompts(&key), 1);
+        assert_eq!(queued_prompt_count(&key), 0);
+    }
+}
 pub(crate) fn force_kill_registered_process(key: &str) -> bool {
     let reg = ACTIVE_PROCESSES.lock().unwrap();
     if let Some(map) = reg.as_ref() {

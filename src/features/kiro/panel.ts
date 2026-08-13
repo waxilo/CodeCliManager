@@ -8,6 +8,10 @@ import { openDisplayModelsPicker } from '../models/display-models-picker';
 import { scheduleMainBalanceBar } from '../status-bar';
 
 let cachedKiroModels: KiroModelsStateData | null = null;
+let kiroStatusRequest: Promise<KiroStatusData> | null = null;
+let kiroModelsRequest: Promise<void> | null = null;
+let kiroUsageRequest: Promise<void> | null = null;
+let kiroUsageTimer: number | null = null;
 /** 模块级互斥：防止连点启动/停止与 render 重绘后按钮重新可点导致并发 invoke */
 let isTogglingKiroProxy = false;
 
@@ -21,27 +25,40 @@ export function setKiroUsageText(text: string) {
 }
 
 export async function refreshKiroUsage(): Promise<void> {
+  if (kiroUsageRequest) return kiroUsageRequest;
+
   const requestId = appState.kiroUsageGuard.next();
   const refreshBtn = document.querySelector('#kiro-card .kiro-usage-refresh') as HTMLButtonElement | null;
   if (refreshBtn) refreshBtn.disabled = true;
   setKiroUsageText('查询中…');
-  try {
-    const usage = await api.kiroUsage();
-    if (!(appState.kiroUsageGuard.isCurrent(requestId))) return;
-    setKiroUsageText(formatKiroUsageText(usage));
-  } catch (e) {
-    if (!(appState.kiroUsageGuard.isCurrent(requestId))) return;
-    setKiroUsageText(`查询失败：${String(e)}`);
-  } finally {
-    if (appState.kiroUsageGuard.isCurrent(requestId) && refreshBtn) {
-      refreshBtn.disabled = false;
+
+  kiroUsageRequest = (async () => {
+    try {
+      const usage = await api.kiroUsage();
+      if (!(appState.kiroUsageGuard.isCurrent(requestId)) || !appState.isKiroViewActive) return;
+      setKiroUsageText(formatKiroUsageText(usage));
+    } catch (e) {
+      if (!(appState.kiroUsageGuard.isCurrent(requestId)) || !appState.isKiroViewActive) return;
+      setKiroUsageText(`查询失败：${String(e)}`);
+    } finally {
+      if (appState.kiroUsageGuard.isCurrent(requestId) && refreshBtn) {
+        refreshBtn.disabled = false;
+      }
     }
+  })();
+
+  try {
+    await kiroUsageRequest;
+  } finally {
+    kiroUsageRequest = null;
   }
 }
 
-/** 延后到下一宏任务，避免挡住页面首次渲染 */
+/** 延后到下一宏任务，并合并同一轮页面切换触发的额度刷新 */
 export function scheduleKiroUsage(): void {
-  window.setTimeout(() => {
+  if (kiroUsageTimer != null) window.clearTimeout(kiroUsageTimer);
+  kiroUsageTimer = window.setTimeout(() => {
+    kiroUsageTimer = null;
     if (!appState.isKiroViewActive) return;
     void refreshKiroUsage();
   }, 0);
@@ -118,12 +135,22 @@ export function renderKiroModels(modelsState: KiroModelsStateData | null) {
 }
 
 export async function refreshKiroModels(): Promise<void> {
+  if (kiroModelsRequest) return kiroModelsRequest;
+
+  kiroModelsRequest = (async () => {
+    try {
+      const modelsState = await api.kiroModelsState();
+      if (appState.isKiroViewActive) renderKiroModels(modelsState);
+    } catch (e) {
+      console.error('获取 Kiro 模型失败:', e);
+      if (appState.isKiroViewActive) renderKiroModels(null);
+    }
+  })();
+
   try {
-    const modelsState = await api.kiroModelsState();
-    renderKiroModels(modelsState);
-  } catch (e) {
-    console.error('获取 Kiro 模型失败:', e);
-    renderKiroModels(null);
+    await kiroModelsRequest;
+  } finally {
+    kiroModelsRequest = null;
   }
 }
 
@@ -303,14 +330,28 @@ export function renderKiroCard(status: KiroStatusData | null) {
   }
 
   if (appState.isKiroViewActive) {
-    void refreshKiroModels();
+    // 状态渲染只更新卡片；模型状态由 mount/启动流程显式刷新，避免每次 status 事件再发 IPC。
   }
 }
 
 export async function refreshKiroStatus(): Promise<void> {
+  const request = kiroStatusRequest || api.kiroStatus();
+  if (!kiroStatusRequest) {
+    kiroStatusRequest = request;
+    const clearRequest = () => {
+      if (kiroStatusRequest === request) kiroStatusRequest = null;
+    };
+    void request.then(clearRequest, clearRequest);
+  }
+
   try {
-    const status = await api.kiroStatus();
-    renderKiroCard(status);
+    const status = await request;
+    // 页面已切换时只保留全局状态，不再触发标题栏/卡片副作用。
+    if (appState.isKiroViewActive) {
+      renderKiroCard(status);
+    } else {
+      appState.kiroStatus = status;
+    }
     if (status.available && appState.isKiroViewActive) {
       scheduleKiroUsage();
     }
@@ -360,6 +401,7 @@ export async function toggleKiroProxy(): Promise<void> {
       await api.kiroStart(null);
     }
     await refreshKiroStatus();
+    await refreshKiroModels();
     await loadChatModelOptions();
     scheduleMainBalanceBar();
   } catch (e) {

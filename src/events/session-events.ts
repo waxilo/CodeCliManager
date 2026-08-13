@@ -5,7 +5,7 @@ import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPay
 import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent } from '../features/chat/streaming';
 import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages, refreshConversationFromBackend } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
-import { setAbortingUi, isSendButtonLoading } from '../features/chat/session-context';
+import { setAbortingUi, setSendButtonLoading, isSendButtonLoading } from '../features/chat/session-context';
 import { hideSendingState } from '../features/chat/retry';
 import { updateConversationListSpinner } from '../features/sidebar';
 import { updateContextIndicator } from '../features/chat/context-indicator';
@@ -15,6 +15,11 @@ import { loadData } from '../features/conversations/load';
 import { normalizeMessageForCompare } from '../features/files/index';
 import type { PermissionRequestPayload } from '../types';
 import { showCopyToastMsg } from '../ui';
+
+interface QueuedPromptsUpdatedPayload {
+  conversationId: string;
+  count: number;
+}
 
 /** 防止 init 被重复调用时重复注册，导致 text_delta 字字双份 */
 let eventListenersReady = false;
@@ -176,7 +181,29 @@ export async function setupEventListeners() {
     handleSessionError(event.payload);
   });
 
-  // 监听本轮结束（进程常驻，可继续 stdin 追问）
+  await listen<QueuedPromptsUpdatedPayload>('queued-prompts-updated', (event) => {
+    const { conversationId, count } = event.payload;
+    if (!conversationId) return;
+    if (count > 0) {
+      appState.queuedPromptsBySession.set(conversationId, count);
+    } else {
+      appState.queuedPromptsBySession.delete(conversationId);
+    }
+    if (appState.activeConversationId === conversationId) {
+      shellApi.updateSendButtonState();
+    }
+  });
+
+  await listen<string | null>('turn-continued', (event) => {
+    const sid = event.payload;
+    if (!sid || sid !== appState.activeConversationId) return;
+    appState.runningSessions.add(sid);
+    appState.pendingUserMessage = null;
+    appState.pendingUserMessageConvId = null;
+    setSendButtonLoading(true);
+    updateConversationListSpinner();
+    shellApi.refreshChatContent();
+  });
   await listen<string | null>('turn-complete', (event) => {
     const sid = event.payload;
     // 切模型重启期间旧进程的 turn-complete：不要清 running / 不要用旧历史刷 UI
@@ -189,6 +216,14 @@ export async function setupEventListeners() {
       appState.abortingSessions.has('pending') ||
       (sid === appState.activeConversationId && appState.isAbortingActiveSession);
 
+    if (sid) {
+      const queuedCount = appState.queuedPromptsBySession.get(sid) || 0;
+      if (queuedCount > 0) {
+        // Rust 已在 turn-complete 前派发下一条；保留 running/loading，等待下一轮。
+        updateConversationListSpinner();
+        return;
+      }
+    }
     if (sid) {
       const streamedText = getStreamingAssistantText(sid);
       commitStreamingAssistantToConversation(sid);

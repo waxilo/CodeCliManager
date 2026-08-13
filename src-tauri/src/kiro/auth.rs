@@ -44,17 +44,16 @@ pub struct KiroUsageInfo {
 pub struct Auth {
     pub sso_cache_dir: PathBuf,
     pub profile_arn_override: Option<String>,
-    pub runtime_url: String,
     pub management_url: String,
     pub http: Client,
-    pub(crate) cache: Mutex<AuthCache>,
+    cache: Mutex<AuthCache>,
 }
 
 impl Auth {
     pub fn new(
         sso_cache_dir: PathBuf,
         profile_arn_override: Option<String>,
-        runtime_url: String,
+        _runtime_url: String,
         management_url: String,
     ) -> Self {
         let http = Client::builder()
@@ -64,7 +63,6 @@ impl Auth {
         Self {
             sso_cache_dir,
             profile_arn_override,
-            runtime_url,
             management_url,
             http,
             cache: Mutex::new(AuthCache::default()),
