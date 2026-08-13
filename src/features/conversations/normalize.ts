@@ -21,6 +21,7 @@ export function normalizeSessionEventPayload(raw: SessionEventPayload): SessionE
     title: raw.title,
     messages: raw.messages,
     project_dir: projectDir?.trim() ? projectDir.trim() : null,
+    source_path: raw.source_path ?? raw.sourcePath ?? null,
     updated_at: updatedAt,
     context_tokens: raw.context_tokens ?? null,
     last_model: raw.last_model ?? null,
@@ -270,17 +271,44 @@ export function getActiveConversation(): Conversation | undefined {
   );
 }
 
+/** 优先按 (id, source_path) 精确定位；同 id 唯一时按 id 定位，避免拆成两条。 */
+export function findConversationById(
+  id: string,
+  sourcePath?: string | null,
+): Conversation | undefined {
+  if (!id) return undefined;
+  if (sourcePath) {
+    const byInstance = appState.conversations.find((candidate) =>
+      isConversationInstance(candidate, id, sourcePath),
+    );
+    if (byInstance) return byInstance;
+  }
+  const sameId = appState.conversations.filter((candidate) => candidate.id === id);
+  if (sameId.length === 1) return sameId[0];
+  return appState.conversations.find((candidate) => candidate.id === id);
+}
+
 export function updateOrAddConversation(conv: Conversation) {
   const normalized = normalizeConversation(conv as Conversation & { projectDir?: string | null });
-  const idx = appState.conversations.findIndex((candidate) =>
+  let idx = appState.conversations.findIndex((candidate) =>
     isConversationInstance(candidate, normalized.id, normalized.source_path),
   );
+  if (idx < 0) {
+    // 同一会话可能先以 source_path=null 落地、稍后被真实路径回填（或事件未携带 source_path）。
+    // 若同 id 会话唯一则按 id 收敛到该条目，避免同一会话被拆成两条。
+    const sameId = appState.conversations.filter((candidate) => candidate.id === normalized.id);
+    if (sameId.length === 1) {
+      idx = appState.conversations.indexOf(sameId[0]);
+    }
+  }
   if (idx >= 0) {
     const existing = appState.conversations[idx];
     appState.conversations[idx] = {
       ...normalized,
       project_dir: resolveConversationProjectDir(normalized.project_dir, existing.project_dir),
-      source_path: normalized.source_path ?? existing.source_path,
+      // 保留已落地路径：新会话先为 null，回填时不再提升，避免 activeConversationSourcePath
+      // 仍为 null 时 getActiveConversation 匹配不到（下次 loadData 会用真实路径重建）。
+      source_path: existing.source_path ?? normalized.source_path,
       created_at: existing.created_at,
     };
   } else {

@@ -6,6 +6,8 @@
 //! 3. 镜像只用于改写清单里的 `platforms.*.url`，绝不提供版本元数据
 //! 4. tauri-plugin-updater 请求本机清单，资产下载使用镜像 URL
 
+use std::io::Read as _;
+use std::sync::mpsc;
 use std::sync::OnceLock;
 use std::thread;
 use std::time::Duration;
@@ -29,9 +31,6 @@ const MIRROR_PREFIXES: &[&str] = &[
     "https://gh-proxy.com/",
     "https://mirror.ghproxy.com/",
 ];
-
-/// 探测后缓存的首个可用镜像；`None` 表示全部不可达（保持直连）。
-static WORKING_MIRROR: OnceLock<Option<&'static str>> = OnceLock::new();
 
 static STARTED: OnceLock<bool> = OnceLock::new();
 
@@ -209,27 +208,51 @@ fn fetch_and_rewrite_manifest(client: &Client) -> Result<String, String> {
     serde_json::to_string(&value).map_err(|e| e.to_string())
 }
 
-/// 按序探测并缓存首个可用的镜像前缀。
+/// 并行探测所有镜像，返回第一个能真实传输内容的镜像前缀。
 ///
-/// 只探测镜像的连通性（连接建立即视为可达，4xx/3xx 不影响下载），
-/// 不探测镜像是否返回了正确内容——镜像故障时由 updater 侧走备用端点。
-/// 结果用 `OnceLock` 缓存，整个进程生命周期内只探测一次。
+/// 每次 manifest 请求都重新探测（不缓存），保证前端下载停滞重试时能换镜像；
+/// 全部失败返回 `None`，调用方保持直连 GitHub 作为兜底。
 fn pick_mirror_prefix(client: &Client) -> Option<&'static str> {
-    if let Some(cached) = WORKING_MIRROR.get() {
-        return *cached;
+    if MIRROR_PREFIXES.is_empty() {
+        return None;
     }
-    let picked = MIRROR_PREFIXES.iter().find(|prefix| {
-        let probe_url = format!("{prefix}https://github.com/");
-        client
-            .get(&probe_url)
-            .timeout(Duration::from_secs(5))
-            .send()
-            .is_ok()
-    });
-    let result = picked.copied();
-    // 竞态下多个请求同时探测：OnceLock 保证只写入一次，未写入方直接丢弃
-    let _ = WORKING_MIRROR.set(result);
-    WORKING_MIRROR.get().copied().flatten()
+    let (tx, rx) = mpsc::channel::<&'static str>();
+    let mut handles = Vec::with_capacity(MIRROR_PREFIXES.len());
+    for prefix in MIRROR_PREFIXES.iter().copied() {
+        let client = client.clone();
+        let tx = tx.clone();
+        handles.push(thread::spawn(move || {
+            if probe_mirror(&client, prefix) {
+                let _ = tx.send(prefix);
+            }
+        }));
+    }
+    drop(tx);
+    // 最先成功返回的镜像即为最快的可用镜像
+    let picked = rx.recv_timeout(Duration::from_secs(15)).ok();
+    for handle in handles {
+        let _ = handle.join();
+    }
+    picked
+}
+
+/// 真实内容传输探测：对镜像根路径发 `Range` 请求，必须实际读到 ≥1KB 才算可用。
+/// 仅 TCP 连通（如 gh-proxy.com 曾出现）但传输停滞的镜像会被淘汰。
+fn probe_mirror(client: &Client, prefix: &str) -> bool {
+    let probe_url = format!("{prefix}https://github.com/");
+    let Ok(resp) = client
+        .get(&probe_url)
+        .header(reqwest::header::RANGE, "bytes=0-2048")
+        .timeout(Duration::from_secs(8))
+        .send()
+    else {
+        return false;
+    };
+    let mut buf = Vec::with_capacity(2048);
+    match resp.take(2048).read_to_end(&mut buf) {
+        Ok(n) => n >= 1024,
+        Err(_) => false,
+    }
 }
 
 fn rewrite_platform_urls(manifest: &mut Value, mirror_prefix: &str) {

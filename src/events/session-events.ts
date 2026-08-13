@@ -2,8 +2,8 @@ import { appState } from '../state';
 import { shellApi } from '../app/shell/api';
 import { listen } from '@tauri-apps/api/event';
 import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPayload, QueuedPromptItem, SessionUsage, SessionUsageUpdatedPayload } from '../types';
-import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent, refreshStreamingUI, reconcileActiveToolsWithHistory } from '../features/chat/streaming';
-import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages } from '../features/conversations';
+import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent, refreshStreamingUI, reconcileActiveToolsWithHistory, purgeTerminalTools, clearSessionTools } from '../features/chat/streaming';
+import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages, findConversationById } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
 import { setAbortingUi, setSendButtonLoading, isSendButtonLoading } from '../features/chat/session-context';
 import { hideSendingState } from '../features/chat/retry';
@@ -105,7 +105,7 @@ export async function setupEventListeners() {
       id: payload.conversation_id,
       title: payload.title,
       messages: (() => {
-        const existing = appState.conversations.find((c) => c.id === payload.conversation_id);
+        const existing = findConversationById(payload.conversation_id, payload.source_path);
         reconcileActiveToolsWithHistory(payload.conversation_id, payload.messages);
         return mergeRemoteAndLocalMessages(payload.messages, existing?.messages);
       })(),
@@ -180,7 +180,7 @@ export async function setupEventListeners() {
       }
     }
 
-    const existingConv = appState.conversations.find((c) => c.id === payload.conversation_id);
+    const existingConv = findConversationById(payload.conversation_id, payload.source_path);
     reconcileActiveToolsWithHistory(payload.conversation_id, payload.messages);
     const mergedMessages = mergeRemoteAndLocalMessages(
       payload.messages,
@@ -247,7 +247,7 @@ export async function setupEventListeners() {
 
   await listen<QueuedPromptDispatchedPayload>('queued-prompt-dispatched', (event) => {
     const { conversationId, item } = event.payload;
-    const conversation = appState.conversations.find((entry) => entry.id === conversationId);
+    const conversation = findConversationById(conversationId);
     if (conversation && !conversation.messages.some((message) => message.id === `queued-${item.id}`)) {
       conversation.messages.push({
         id: `queued-${item.id}`,
@@ -316,10 +316,15 @@ export async function setupEventListeners() {
       (sid === appState.activeConversationId && appState.isAbortingActiveSession);
 
     if (sid) {
+      // 轮次结束：先清掉上一轮已终态的 Task，让子代理面板随新一轮重新累计
+      purgeTerminalTools(sid);
       const queuedCount = appState.queuedPromptsBySession.get(sid)?.length || 0;
       if (queuedCount > 0) {
         // Rust 已在 turn-complete 前派发下一条；保留 running/loading，等待下一轮。
         updateConversationListSpinner();
+        if (sid === appState.activeConversationId) {
+          syncSubagentProgressUI();
+        }
         return;
       }
     }
@@ -384,6 +389,8 @@ export async function setupEventListeners() {
       appState.abortingSessions.delete(endedSessionId);
       appState.sessionProcessModels.delete(endedSessionId);
       appState.runIdsBySession.delete(endedSessionId);
+      // 进程退出：清空该会话全部 active tools
+      clearSessionTools(endedSessionId);
     }
     appState.runningSessions.delete('pending');
     appState.abortingSessions.delete('pending');

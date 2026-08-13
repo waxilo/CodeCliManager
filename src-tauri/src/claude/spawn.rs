@@ -6,6 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
+use crate::claude::agent_isolation;
 use crate::claude::runtime::{apply_cli_runtime_env, resolve_claude_executable};
 use crate::claude::stream_events::*;
 use crate::config::{apply_model_override_env, has_custom_api_base};
@@ -66,6 +67,11 @@ pub(crate) fn spawn_claude_stream(
     }
 
     let effective_cwd = project_dir.and_then(|cwd| resolve_or_create_dir(cwd));
+    // 子代理 worktree 隔离：注入项目级 general-purpose agent（git 仓库时）。
+    // 在 CLI 读取 .claude/agents/ 之前完成，新会话与 --resume 走同一入口。
+    if let Some(ref cwd) = effective_cwd {
+        agent_isolation::ensure_subagent_worktree_isolation(cwd);
+    }
 
     let claude_bin = resolve_claude_executable();
     let mut cmd = Command::new(&claude_bin);

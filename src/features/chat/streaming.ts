@@ -12,7 +12,7 @@ import type {
 import { renderMarkdownCached as renderMarkdown, initCodeCopyButtons } from '../../markdown';
 import { getThinkingScroller } from './thinking-scroller';
 import { updateSendButtonState, setSendButtonLoading } from './session-context';
-import { updateOrAddConversation } from '../conversations';
+import { updateOrAddConversation, findConversationById } from '../conversations';
 import { updateConversationListSpinner } from '../sidebar';
 import { renderThinkingDetails, extractToolUseId, processToolMessages } from './render-messages';
 import { clearPendingRequestState, hideSendingState, removePendingAssistantIndicator, updatePendingStatus } from './retry';
@@ -105,7 +105,14 @@ export function reconcileActiveToolsWithHistory(sessionId: string, messages: Mes
           extractToolUseId(m.content) === toolUseId ||
           (state.taskId && extractToolUseId(m.content) === state.taskId)),
     );
-    if (!found) continue;
+    if (!found) {
+      // Scenario A：历史里完全找不到该 Task。已终态的是一轮结束后的残留，清掉；
+      // running 的可能是 tool_use 尚未落盘，保留避免闪断。
+      if (state.status === 'done' || state.status === 'failed') {
+        tools.delete(toolUseId);
+      }
+      continue;
+    }
     if (found.toolData?.toolResult !== undefined) {
       // 先写入完成态，再删除：即使后续 UI 竞态也能读到正确状态
       state.status = found.toolData.isError ? 'failed' : 'done';
@@ -122,6 +129,25 @@ export function reconcileActiveToolsWithHistory(sessionId: string, messages: Mes
     appState.activeToolsBySession.delete(sessionId);
   }
   appState.activeToolsBySession.delete('pending');
+}
+
+/** 清除某会话已终态（done/failed）的 Task，供 turn-complete 轮次切换时调用。 */
+export function purgeTerminalTools(sessionId: string): void {
+  const tools = appState.activeToolsBySession.get(sessionId);
+  if (!tools || tools.size === 0) return;
+  for (const [id, state] of [...tools.entries()]) {
+    if (state.status === 'done' || state.status === 'failed') {
+      tools.delete(id);
+    }
+  }
+  if (tools.size === 0) {
+    appState.activeToolsBySession.delete(sessionId);
+  }
+}
+
+/** 会话进程结束/出错时清空其全部 active tools。 */
+export function clearSessionTools(sessionId: string): void {
+  appState.activeToolsBySession.delete(sessionId);
 }
 
 function handleToolChunk(sid: string, kind: string, content: string): boolean {
@@ -305,7 +331,7 @@ export function commitStreamingAssistantToConversation(sessionId: string): void 
   const text = getStreamingAssistantText(sessionId);
   if (!text) return;
 
-  const conversation = appState.conversations.find((item) => item.id === sessionId);
+  const conversation = findConversationById(sessionId);
   if (!conversation) return;
 
   const last = conversation.messages[conversation.messages.length - 1];
@@ -338,7 +364,7 @@ export function commitStreamingAssistantToConversation(sessionId: string): void 
 /** 远程消息若尚未包含最新助手回复，保留本地已提交的流式文本 */
 export function ensureAssistantPresent(sessionId: string, streamedText: string): void {
   if (!sessionId || !streamedText) return;
-  const conversation = appState.conversations.find((item) => item.id === sessionId);
+  const conversation = findConversationById(sessionId);
   if (!conversation) return;
 
   const lastAssistant = [...conversation.messages].reverse().find((m) => m.role === 'assistant');
@@ -442,11 +468,15 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       appState.activeToolsBySession.delete('pending');
     }
     // 仅在尚未激活会话时设置 appState.activeConversationId，避免打断用户已切换的视图
+    const existing = findConversationById(sid);
     if (!appState.activeConversationId) {
       appState.activeConversationId = sid;
+      // 若后端已先回填 source_path（罕见顺序），同步 active 路径避免匹配不到
+      if (existing?.source_path) {
+        appState.activeConversationSourcePath = existing.source_path;
+      }
     }
     const now = Math.floor(Date.now() / 1000);
-    const existing = appState.conversations.find((c) => c.id === sid);
     // 只有当 appState.pendingUserMessage 属于此会话时才使用（防止串会话）
     const pendingMatchesThisSession = appState.pendingUserMessage &&
       (!appState.pendingUserMessageConvId || appState.pendingUserMessageConvId === sid);
@@ -613,6 +643,8 @@ export function handleSessionError(payload: SessionErrorPayload) {
   const isCurrentSession = !sid || sid === appState.activeConversationId;
   if (isCurrentSession) clearPendingRequestState();
   clearStreamingState(sid || 'pending');
+  clearSessionTools(sid || 'pending');
+  clearSessionTools('pending');
   if (isCurrentSession) hideSendingState();
 
   const errorMessage: Message = {
@@ -624,7 +656,7 @@ export function handleSessionError(payload: SessionErrorPayload) {
 
   if (sid) {
     appState.transientSessionError = null;
-    let conversation = appState.conversations.find((c) => c.id === sid);
+    let conversation = findConversationById(sid);
     if (!conversation) {
       conversation = {
         id: sid,

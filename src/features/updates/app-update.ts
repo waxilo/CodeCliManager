@@ -1,5 +1,6 @@
 import { getVersion } from '@tauri-apps/api/app';
 import { check as checkAppUpdateRemote } from '@tauri-apps/plugin-updater';
+import type { Update as AppUpdate } from '@tauri-apps/plugin-updater';
 import { relaunch } from '@tauri-apps/plugin-process';
 import { appState } from '../../state';
 import { escapeHtml } from '../../utils';
@@ -282,6 +283,115 @@ export async function relaunchAfterUpdate(): Promise<void> {
   }
 }
 
+/** 下载停滞毫秒数：超过仍无字节增长则判定镜像失效，中断并重选镜像重试 */
+const DOWNLOAD_STALL_MS = 30_000;
+const MAX_DOWNLOAD_ATTEMPTS = 3;
+
+/**
+ * 下载更新包：带进度 UI + 停滞检测。镜像只连不上、不吐数据时（本机代理已改为
+ * 真实内容探测，仍可能偶发）会在停滞阈值后主动 abort；重试前重新获取清单，
+ * 让本机代理重新探测镜像，而不是干等 300s 超时。
+ */
+async function downloadAppUpdatePackage(): Promise<void> {
+  for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt++) {
+    if (!appState.appUpdate) {
+      throw new Error('未找到可安装的更新包，请点击「重新检查」后再试。');
+    }
+    try {
+      await downloadOnceWithStallAbort(appState.appUpdate);
+      return;
+    } catch (e) {
+      const raw = String(e);
+      const stalled = /stall|timed?\s*out|timeout|连接超时|error sending request/i.test(raw);
+      console.warn(`[updater] 第 ${attempt} 次下载失败/停滞:`, e);
+      // 释放句柄并重新获取清单，触发本机代理重新探测可用镜像
+      try {
+        await appState.appUpdate.close();
+      } catch {
+        /* ignore */
+      }
+      appState.appUpdate = null;
+      if (attempt >= MAX_DOWNLOAD_ATTEMPTS) {
+        throw new Error(stalled ? '下载更新超时。请检查网络后重试。' : raw);
+      }
+      await checkAppUpdate(true);
+      if (!appState.appUpdate) {
+        throw new Error('未找到可安装的更新包，请点击「重新检查」后再试。');
+      }
+      appState.appUpdateCheckStatus = 'downloading';
+      appState.appUpdateProgress = { downloaded: 0, total: 0 };
+      syncAppUpdateButtonUI();
+      const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
+      if (panel) {
+        panel.innerHTML = renderAppUpdatePopoverBody();
+        bindAppUpdatePopoverEvents(panel);
+      }
+    }
+  }
+}
+
+/** 单次下载：监听进度刷新 UI，长时间无字节增长则调用 close() 中断下载。 */
+function downloadOnceWithStallAbort(update: AppUpdate): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let lastProgressAt = Date.now();
+
+    const renderProgress = () => {
+      const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
+      if (!panel) return;
+      const bar = panel.querySelector('.app-update-progress-bar') as HTMLElement | null;
+      const pctEl = panel.querySelector('.app-update-progress-pct') as HTMLElement | null;
+      const pct = appState.appUpdateProgress && appState.appUpdateProgress.total > 0
+        ? Math.min(100, Math.round((appState.appUpdateProgress.downloaded / appState.appUpdateProgress.total) * 100))
+        : 0;
+      if (bar) bar.style.width = `${pct}%`;
+      if (pctEl) pctEl.textContent = `${pct}%`;
+    };
+
+    // 停滞看门狗：阈值内无进展 → 中断本次下载，交给外层换镜像重试
+    const watchdog = setInterval(() => {
+      if (Date.now() - lastProgressAt <= DOWNLOAD_STALL_MS) return;
+      clearInterval(watchdog);
+      if (settled) return;
+      settled = true;
+      console.warn('[updater] 下载停滞，正在中断并重试');
+      update.close().catch(() => {});
+      reject(new Error('下载停滞（镜像不可用）'));
+    }, 5000);
+
+    update
+      .download(
+        (event) => {
+          lastProgressAt = Date.now();
+          if (event.event === 'Started') {
+            appState.appUpdateProgress = { downloaded: 0, total: event.data.contentLength ?? 0 };
+          } else if (event.event === 'Progress') {
+            appState.appUpdateProgress = {
+              downloaded: (appState.appUpdateProgress?.downloaded ?? 0) + event.data.chunkLength,
+              total: appState.appUpdateProgress?.total ?? 0,
+            };
+          }
+          renderProgress();
+        },
+        { timeout: 300_000 },
+      )
+      .then(
+        () => {
+          clearInterval(watchdog);
+          if (settled) return;
+          settled = true;
+          resolve();
+        },
+        (e) => {
+          clearInterval(watchdog);
+          if (settled) return;
+          settled = true;
+          reject(e);
+        },
+      );
+  });
+}
+
 export async function installAppUpdate(): Promise<void> {
   if (appState.appUpdateCheckStatus === 'downloading') return;
 
@@ -325,27 +435,8 @@ export async function installAppUpdate(): Promise<void> {
   };
 
   try {
-    // 1. 下载更新包（仅下载，不安装）
-    await appState.appUpdate.download((event) => {
-      if (event.event === 'Started') {
-        appState.appUpdateProgress = { downloaded: 0, total: event.data.contentLength ?? 0 };
-      } else if (event.event === 'Progress') {
-        appState.appUpdateProgress = {
-          downloaded: (appState.appUpdateProgress?.downloaded ?? 0) + event.data.chunkLength,
-          total: appState.appUpdateProgress?.total ?? 0,
-        };
-      }
-      const progressPanel = document.querySelector('#app-update-popover, #settings-app-update-view');
-      if (progressPanel) {
-        const bar = progressPanel.querySelector('.app-update-progress-bar') as HTMLElement | null;
-        const pctEl = progressPanel.querySelector('.app-update-progress-pct') as HTMLElement | null;
-        const pct = appState.appUpdateProgress && appState.appUpdateProgress.total > 0
-          ? Math.min(100, Math.round((appState.appUpdateProgress.downloaded / appState.appUpdateProgress.total) * 100))
-          : 0;
-        if (bar) bar.style.width = `${pct}%`;
-        if (pctEl) pctEl.textContent = `${pct}%`;
-      }
-    }, { timeout: 300_000 });
+    // 1. 下载更新包（仅下载，不安装）；带停滞检测，镜像失效时自动换镜像重试
+    await downloadAppUpdatePackage();
     clearStallTimer();
     appState.appUpdateProgress = null;
 

@@ -13,6 +13,7 @@ export interface SessionEventPayload {
   project_dir?: string | null;
   projectDir?: string | null;
   source_path?: string | null;
+  sourcePath?: string | null;
   updated_at: number;
   updatedAt?: number;
   context_tokens?: number | null;

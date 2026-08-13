@@ -10,6 +10,7 @@ import { getEffectiveProjectDir, setSendButtonLoading, setAbortingUi, updateSend
 import { resolveFileReferences, disposePasteAttachments, invalidateFileCache, restoreComposerDraftSnapshot, stashComposerDraft, takeComposerDraftSnapshot } from '../files';
 import { closePermissionDialogs } from '../permissions';
 import { groupConversationsByWorkspace } from '../sidebar';
+import { findConversationById } from '../conversations/normalize';
 import { clearStreamingState, commitStreamingAssistantToConversation } from './streaming';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshModelInfo } from './render-chat';
@@ -371,7 +372,7 @@ export async function executePreparedCommand(
       appState.sessionProcessModels.set(conversationId, nextModelKey);
       appState.runningSessions.add(conversationId);
 
-      const conv = appState.conversations.find((c) => c.id === conversationId);
+      const conv = findConversationById(conversationId);
       commitStreamingAssistantToConversation(conversationId);
       if (conv) {
         conv.messages.push({
