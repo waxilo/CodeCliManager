@@ -258,15 +258,31 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
   const { conversation_id: sid, kind, content } = payload;
   if (!sid) return;
 
-  // 新进程已开始输出：切模型重启保护结束
+  // 新进程已开始输出：切模型重启保护结束。
+  // 先捕获再清除，避免本条 chunk 自身把重启中的会话误判为可恢复忙碌。
+  const wasModelRestarting = appState.modelRestartingSessions.has(sid);
   appState.modelRestartingSessions.delete(sid);
 
   const isToolChunk = TOOL_CHUNK_KINDS.has(kind);
-  // 本轮已结束：忽略迟到的流式块；Task 工具 chunk 在 activeTools 仍在或 start 时仍接受
+  // 常驻进程本轮结束后（turn-complete）可能立刻开始新一轮输出：
+  // 新内容块应允许恢复忙碌，而不是被当作迟到的旧块丢弃——否则进程在跑、界面却停在「已结束」。
+  const isContentStreamChunk =
+    kind === 'thinking_start' ||
+    kind === 'thinking_delta' ||
+    kind === 'thinking_end' ||
+    kind === 'text_start' ||
+    kind === 'text_delta' ||
+    kind === 'text_end' ||
+    kind === 'stream_end';
+  const canReBusyAfterTurn =
+    isContentStreamChunk &&
+    !appState.abortingSessions.has(sid) &&
+    !wasModelRestarting;
   if (
     kind !== 'session_created' &&
     !appState.runningSessions.has(sid) &&
     !appState.runningSessions.has('pending') &&
+    !canReBusyAfterTurn &&
     !(isToolChunk && (sessionHasActiveTools(sid) || kind === 'tool_use_start'))
   ) {
     return;
@@ -352,7 +368,11 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
     kind === 'thinking_delta' ||
     kind === 'text_delta'
   ) {
-    if (!appState.runningSessions.has(sid) && !appState.abortingSessions.has(sid)) {
+    if (
+      !appState.runningSessions.has(sid) &&
+      !appState.abortingSessions.has(sid) &&
+      !wasModelRestarting
+    ) {
       appState.runningSessions.add(sid);
       updateConversationListSpinner();
       if (isActive) {
