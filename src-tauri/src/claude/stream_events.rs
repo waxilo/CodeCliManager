@@ -255,6 +255,47 @@ pub(crate) fn extract_assistant_text(value: &serde_json::Value) -> Option<String
         .map(|text| text.to_string())
 }
 
+/// 取 assistant 事件的全部文本块（`\n\n` 拼接）。
+/// 与 `extract_assistant_text`（只取首块）不同：多文本块消息的最终报告需整块覆盖判断。
+pub(crate) fn extract_full_assistant_text(value: &serde_json::Value) -> Option<String> {
+    let blocks = value
+        .get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(|content| content.as_array())?;
+    let texts: Vec<&str> = blocks
+        .iter()
+        .filter_map(|block| {
+            if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                block
+                    .get("text")
+                    .and_then(|t| t.as_str())
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if texts.is_empty() {
+        return None;
+    }
+    Some(texts.join("\n\n"))
+}
+
+/// 是否为子代理（sidechain）事件。启用 --include-partial-messages 后子代理的
+/// assistant / result 也会进入父流，但带非空 parent_tool_use_id 或 isSidechain 标记；
+/// 这些文本不会落入本会话 JSONL 的主链，不能用于「最终回复已落盘」的判断。
+fn is_sidechain_event(value: &serde_json::Value) -> bool {
+    for key in ["parent_tool_use_id", "parentToolUseId", "is_sidechain", "isSidechain"] {
+        match value.get(key) {
+            Some(v) if v.is_string() && v.as_str().is_some_and(|s| !s.is_empty()) => return true,
+            Some(v) if v.as_bool() == Some(true) => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 pub(crate) fn record_stream_error(
     stream_error: &mut Option<String>,
     app: &AppHandle,
@@ -377,6 +418,7 @@ pub(crate) fn process_claude_stream_line(
     outstanding_task_ids: &mut HashSet<String>,
     protocol_guard: &mut ProtocolLeakGuard,
     stream_error: &mut Option<String>,
+    last_assistant_text: &mut Option<String>,
 ) {
     let value: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -752,6 +794,12 @@ pub(crate) fn process_claude_stream_line(
                 if is_api_error_text(&text) {
                     let sid = resolve_stream_session_id(captured_session_id, &value);
                     record_stream_error(stream_error, app, sid.as_deref(), text);
+                }
+            }
+            // 仅主链 assistant 事件更新“最终助手文本”；子代理文本不会落入本会话 JSONL 主链
+            if !is_sidechain_event(&value) {
+                if let Some(full) = extract_full_assistant_text(&value) {
+                    *last_assistant_text = Some(full);
                 }
             }
         }

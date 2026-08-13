@@ -167,6 +167,9 @@ pub(crate) fn spawn_claude_stream(
     let mut protocol_guard = ProtocolLeakGuard::default();
     let mut recovery_attempts = 0u8;
     let mut stream_error: Option<String> = None;
+    // 本轮流式中主链最后一条 assistant 文本（全部文本块 \n\n 拼接）。
+    // turn-complete 时据此等待最终回复真正落盘，避免提前 messages-updated 清掉前端流式文本。
+    let mut last_assistant_text: Option<String> = None;
 
     // stderr 仅用于排障日志，必须设上限：子进程刷屏时不能让字符串无界增长。
     const MAX_STDERR_CAPTURE_BYTES: usize = 1024 * 1024;
@@ -383,6 +386,7 @@ pub(crate) fn spawn_claude_stream(
                     &mut outstanding_task_ids,
                     &mut protocol_guard,
                     &mut stream_error,
+                    &mut last_assistant_text,
                 );
                 // 首次捕获到 session_id 时，用 session_id 重新注册进程（方便按 session_id abort）
                 if let Some(ref sid) = captured_session_id {
@@ -520,7 +524,8 @@ pub(crate) fn spawn_claude_stream(
                     if let Some(ref sid) = captured_session_id {
                         emit_session_usage_if_any(&app, sid);
                         emit_message_chunk(&app, sid, "complete", "");
-                        emit_turn_complete(&app, sid);
+                        emit_turn_complete(&app, sid, last_assistant_text.clone());
+                        last_assistant_text = None;
                     } else {
                         clear_turn_active(&captured_registry_key);
                         let _ = app.emit("turn-complete", Some(captured_registry_key.clone()));
@@ -668,6 +673,7 @@ pub(crate) fn spawn_claude_stream(
             &mut outstanding_task_ids,
             &mut protocol_guard,
             &mut stream_error,
+            &mut last_assistant_text,
         );
     }
 

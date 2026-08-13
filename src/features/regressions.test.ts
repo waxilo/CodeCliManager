@@ -6,8 +6,16 @@ import {
   updateOrAddConversation,
   findConversationById,
   mergeRemoteAndLocalMessages,
+  assistantTextCovers,
 } from './conversations/normalize';
-import { handleMessageChunk, purgeTerminalTools, reconcileActiveToolsWithHistory } from './chat/streaming';
+import {
+  handleMessageChunk,
+  purgeTerminalTools,
+  reconcileActiveToolsWithHistory,
+  commitStreamingAssistantToConversation,
+  ensureAssistantPresent,
+  getStreamingAssistantText,
+} from './chat/streaming';
 import { showConfirmDialog } from '../ui/confirm-dialog';
 import { appState } from '../state';
 import type { Message, MessageChunkPayload } from '../types';
@@ -265,5 +273,183 @@ describe('resident session re-busy after turn-complete', () => {
 
     expect(appState.runningSessions.has(sid)).toBe(true);
     expect(appState.modelRestartingSessions.has(sid)).toBe(false);
+  });
+});
+
+describe('assistantTextCovers content-level coverage', () => {
+  it('short progress does not cover the longer final stream text', () => {
+    const progress = '正在读取代码...';
+    const report = '# CodeCliManager 项目分析报告\n\n完整内容';
+    expect(assistantTextCovers(progress, `${progress}\n\n${report}`)).toBe(false);
+    expect(assistantTextCovers(report, `${progress}\n\n${report}`)).toBe(true);
+  });
+
+  it('covers exact, superset, tail, and whitespace-normalized text', () => {
+    expect(assistantTextCovers('报告正文', '报告正文')).toBe(true);
+    expect(assistantTextCovers('前缀\n\n报告正文', '报告正文')).toBe(true);
+    expect(assistantTextCovers('报告\n正文', '报告 正文')).toBe(true);
+    expect(assistantTextCovers('', '报告')).toBe(false);
+    expect(assistantTextCovers('报告', '')).toBe(false);
+  });
+});
+
+describe('mergeRemoteAndLocalMessages keeps the final report on premature refresh', () => {
+  beforeEach(() => {
+    resetSessionState();
+    appState.conversations = [];
+  });
+
+  const progress = '正在读取代码...';
+  const report = '# CodeCliManager 项目分析报告\n\n最终完整报告内容';
+  const streamedFull = `${progress}\n\n${report}`;
+
+  it('premature remote (only progress + Task cards) must not drop local stream text', () => {
+    const local = [
+      message('user-1720000000', 'user', '分析这个项目'),
+      message('stream-assistant-1720000001', 'assistant', streamedFull),
+    ];
+    // 子代理 Task 已落盘、但最终报告尚未写入 JSONL 的提前快照
+    const remotePremature = [
+      message('u1', 'user', '分析这个项目'),
+      message('a1', 'assistant', progress),
+      message('t1', 'tool_use', '{"name":"Task","id":"task-1"}'),
+      message('t2', 'tool_result', '{"tool_use_id":"task-1"}'),
+    ];
+
+    const merged = mergeRemoteAndLocalMessages(remotePremature, local);
+
+    // 最终报告必须仍在
+    expect(merged.some((m) => m.content === streamedFull)).toBe(true);
+    expect(merged.some((m) => m.role === 'assistant' && (m.content || '').includes('# CodeCliManager 项目分析报告'))).toBe(true);
+  });
+
+  it('flushed remote (report present) dedups the local stream bubble', () => {
+    const local = [
+      message('user-1720000000', 'user', '分析这个项目'),
+      message('stream-assistant-1720000001', 'assistant', streamedFull),
+    ];
+    const remoteFlushed = [
+      message('u1', 'user', '分析这个项目'),
+      message('a1', 'assistant', progress),
+      message('a2', 'assistant', report),
+    ];
+
+    const merged = mergeRemoteAndLocalMessages(remoteFlushed, local);
+
+    expect(merged.filter((m) => m.content === report)).toHaveLength(1);
+    expect(merged.some((m) => m.content === streamedFull)).toBe(false);
+    // 远端已含完整报告，最终 assistant 文本只出现一次，不叠两层
+    const assistants = merged.filter((m) => m.role === 'assistant');
+    expect(assistants.map((m) => m.content)).toEqual([progress, report]);
+  });
+});
+
+describe('commitStreamingAssistantToConversation / ensureAssistantPresent', () => {
+  beforeEach(() => {
+    resetSessionState();
+    appState.conversations = [];
+  });
+
+  const progress = '正在读取代码...';
+  const report = '# CodeCliManager 项目分析报告\n\n最终完整报告内容';
+  const streamedFull = `${progress}\n\n${report}`;
+
+  it('does not duplicate a stream bubble when remote already covers the text', () => {
+    const sid = 'session-commit-1';
+    updateOrAddConversation({
+      id: sid,
+      title: 'T',
+      messages: [message('u1', 'user', 'hi'), message('a1', 'assistant', report)],
+      platform: 'claude',
+      project_dir: null,
+      source_path: null,
+      created_at: 1,
+      updated_at: 1,
+    });
+    appState.streamingBySession.set(sid, {
+      blocks: [
+        { type: 'text', content: progress, finalized: true },
+        { type: 'text', content: report, finalized: true },
+      ],
+      thinkingDone: true,
+      currentBlockIdx: 1,
+    });
+
+    commitStreamingAssistantToConversation(sid);
+
+    const conv = findConversationById(sid)!;
+    expect(conv.messages.filter((m) => m.role === 'assistant')).toHaveLength(1);
+    expect(conv.messages[conv.messages.length - 1].content).toBe(report);
+  });
+
+  it('grows the temporary stream bubble to the full text', () => {
+    const sid = 'session-commit-2';
+    updateOrAddConversation({
+      id: sid,
+      title: 'T',
+      messages: [
+        message('u1', 'user', 'hi'),
+        message('stream-assistant-1', 'assistant', progress),
+      ],
+      platform: 'claude',
+      project_dir: null,
+      source_path: null,
+      created_at: 1,
+      updated_at: 1,
+    });
+    appState.streamingBySession.set(sid, {
+      blocks: [
+        { type: 'text', content: progress, finalized: true },
+        { type: 'text', content: report, finalized: true },
+      ],
+      thinkingDone: true,
+      currentBlockIdx: 1,
+    });
+
+    commitStreamingAssistantToConversation(sid);
+
+    const conv = findConversationById(sid)!;
+    expect(getStreamingAssistantText(sid)).toBe(streamedFull);
+    expect(conv.messages[conv.messages.length - 1].content).toBe(streamedFull);
+  });
+
+  it('ensureAssistantPresent is a no-op when an assistant already covers the streamed text', () => {
+    const sid = 'session-ensure-1';
+    updateOrAddConversation({
+      id: sid,
+      title: 'T',
+      messages: [message('u1', 'user', 'hi'), message('a1', 'assistant', report)],
+      platform: 'claude',
+      project_dir: null,
+      source_path: null,
+      created_at: 1,
+      updated_at: 1,
+    });
+
+    ensureAssistantPresent(sid, streamedFull);
+
+    const conv = findConversationById(sid)!;
+    expect(conv.messages.filter((m) => m.role === 'assistant')).toHaveLength(1);
+  });
+
+  it('ensureAssistantPresent appends the reply when the conversation lacks it', () => {
+    const sid = 'session-ensure-2';
+    updateOrAddConversation({
+      id: sid,
+      title: 'T',
+      messages: [message('u1', 'user', 'hi')],
+      platform: 'claude',
+      project_dir: null,
+      source_path: null,
+      created_at: 1,
+      updated_at: 1,
+    });
+
+    ensureAssistantPresent(sid, 'hello');
+
+    const conv = findConversationById(sid)!;
+    expect(
+      conv.messages.some((m) => m.role === 'assistant' && m.content === 'hello'),
+    ).toBe(true);
   });
 });

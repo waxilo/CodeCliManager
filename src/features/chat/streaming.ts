@@ -12,7 +12,7 @@ import type {
 import { renderMarkdownCached as renderMarkdown, initCodeCopyButtons } from '../../markdown';
 import { getThinkingScroller } from './thinking-scroller';
 import { updateSendButtonState, setSendButtonLoading } from './session-context';
-import { updateOrAddConversation, findConversationById } from '../conversations';
+import { updateOrAddConversation, findConversationById, assistantTextCovers } from '../conversations';
 import { updateConversationListSpinner } from '../sidebar';
 import { renderThinkingDetails, extractToolUseId, processToolMessages } from './render-messages';
 import { clearPendingRequestState, hideSendingState, removePendingAssistantIndicator, updatePendingStatus } from './retry';
@@ -337,14 +337,20 @@ export function commitStreamingAssistantToConversation(sessionId: string): void 
   const last = conversation.messages[conversation.messages.length - 1];
   if (last?.role === 'assistant') {
     const prev = last.content || '';
-    if (
+    const isTemp = String(last.id).startsWith('stream-assistant-');
+    const extendsExisting =
       prev === text ||
       text.startsWith(prev) ||
-      prev.startsWith(text.slice(0, Math.min(80, text.length)))
-    ) {
+      prev.startsWith(text.slice(0, Math.min(80, text.length)));
+    if (isTemp || extendsExisting) {
       if (text.length >= prev.length) {
         last.content = text;
       }
+      conversation.updated_at = Math.floor(Date.now() / 1000);
+      return;
+    }
+    // 远程已有同源最终内容（如只落最终报告、本地含进度前缀）：不重复追加流式文本
+    if (assistantTextCovers(prev, text)) {
       conversation.updated_at = Math.floor(Date.now() / 1000);
       return;
     }
@@ -361,25 +367,24 @@ export function commitStreamingAssistantToConversation(sessionId: string): void 
   }
 }
 
-/** 远程消息若尚未包含最新助手回复，保留本地已提交的流式文本 */
+/** 会话消息若已「内容级」包含最新助手回复则不再补；否则在用户消息后补一条流式文本。 */
 export function ensureAssistantPresent(sessionId: string, streamedText: string): void {
   if (!sessionId || !streamedText) return;
   const conversation = findConversationById(sessionId);
   if (!conversation) return;
 
-  const lastAssistant = [...conversation.messages].reverse().find((m) => m.role === 'assistant');
-  if (lastAssistant) {
-    const prev = lastAssistant.content || '';
-    if (prev === streamedText || prev.includes(streamedText) || streamedText.includes(prev)) {
-      if (streamedText.length > prev.length) {
-        lastAssistant.content = streamedText;
-      }
-      return;
-    }
-  }
+  // 任一 assistant 已覆盖流式文本（相等 / 超集 / 结尾最终消息）→ 不再补，避免叠两层
+  const covered = conversation.messages.some(
+    (m) =>
+      m.role === 'assistant' &&
+      (m.content || '').trim() &&
+      assistantTextCovers(m.content || '', streamedText),
+  );
+  if (covered) return;
 
   const last = conversation.messages[conversation.messages.length - 1];
-  if (last?.role === 'user' || !lastAssistant) {
+  const hasAssistant = conversation.messages.some((m) => m.role === 'assistant');
+  if (last?.role === 'user' || !hasAssistant) {
     conversation.messages.push({
       id: `stream-assistant-${Date.now()}`,
       role: 'assistant',

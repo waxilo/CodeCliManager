@@ -13,8 +13,7 @@ use tauri::{AppHandle, Emitter};
 use crate::claude::{conversation_to_payload, emit_session_error};
 use crate::history::{
     find_claude_session_file, invalidate_session_cache, load_claude_conversation,
-    message_is_task_tool_use,
-    rewrite_session_model,
+    rewrite_session_model, Conversation,
 };
 
 pub(crate) static ACTIVE_PROCESSES: Mutex<Option<HashMap<String, Arc<Mutex<Child>>>>> = Mutex::new(None);
@@ -678,15 +677,82 @@ fn clear_turn_complete_generation_if_latest(session_id: &str, generation: u64) {
     }
 }
 
-pub(crate) fn emit_turn_complete(app: &AppHandle, session_id: &str) {
+pub(crate) fn emit_turn_complete(
+    app: &AppHandle,
+    session_id: &str,
+    expected_assistant_text: Option<String>,
+) {
     clear_turn_active(session_id);
     let generation = next_turn_complete_generation(session_id);
     let app = app.clone();
     let session_id = session_id.to_string();
-    thread::spawn(move || finish_turn_complete(&app, &session_id, generation));
+    thread::spawn(move || {
+        finish_turn_complete(&app, &session_id, generation, expected_assistant_text)
+    });
 }
 
-fn finish_turn_complete(app: &AppHandle, session_id: &str, generation: u64) {
+/// 本轮是否已到「可从 JSONL 出图」的终态。
+/// 有流式文本时：等待最终 assistant 文本（相对流式内容）完整落盘，
+/// 而不是看「历史里存在任意 Task」或「任意末条 assistant」——否则子代理启动后、
+/// 最终报告尚未写入时就会提前 messages-updated，前端把本地流式文本清掉。
+fn turn_snapshot_ready(conv: &Conversation, expected_text: Option<&str>) -> bool {
+    match expected_text.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(expected) => turn_final_text_persisted(conv, expected),
+        None => turn_reached_terminal_state(conv),
+    }
+}
+
+/// 最后一轮 user 之后的 assistant 文本（`\n\n` 拼接）能覆盖 expected → 视为已落盘。
+fn turn_final_text_persisted(conv: &Conversation, expected: &str) -> bool {
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return false;
+    }
+    let start = conv
+        .messages
+        .iter()
+        .rposition(|m| m.role == "user")
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let texts: Vec<&str> = conv.messages[start..]
+        .iter()
+        .filter(|m| m.role == "assistant")
+        .map(|m| m.content.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if texts.is_empty() {
+        return false;
+    }
+    // 最终一块直接等于 expected（常见：单文本块助手回复）
+    if texts[texts.len() - 1] == expected {
+        return true;
+    }
+    // 多块：整轮拼接后覆盖（含同一消息多文本块）
+    let joined = texts.join("\n\n");
+    if joined.contains(expected) {
+        return true;
+    }
+    // 空白差异兜底（尾随换行 / 额外空格）
+    collapse_ws(&joined).contains(&collapse_ws(expected))
+}
+
+/// 无文本轮次：末条为 assistant / tool_result / user 即视为已到达可出图终态。
+fn turn_reached_terminal_state(conv: &Conversation) -> bool {
+    conv.messages
+        .last()
+        .is_some_and(|m| matches!(m.role.as_str(), "assistant" | "tool_result" | "user"))
+}
+
+fn collapse_ws(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn finish_turn_complete(
+    app: &AppHandle,
+    session_id: &str,
+    generation: u64,
+    expected_assistant_text: Option<String>,
+) {
     // Claude 落盘 JSONL 可能略晚于 result；且 SESSION_CACHE 按秒级 mtime，
     // 需主动失效缓存并短重试，避免前端清掉流式后又读到旧消息。
     let mut session_path = find_claude_session_file(session_id);
@@ -703,14 +769,7 @@ fn finish_turn_complete(app: &AppHandle, session_id: &str, generation: u64) {
             invalidate_session_cache(path);
         }
         if let Some(conv) = session_path.as_ref().and_then(load_claude_conversation) {
-            let last_is_assistant = conv
-                .messages
-                .last()
-                .map(|m| m.role == "assistant")
-                .unwrap_or(false);
-            // Task 结束后末条常为 tool_use / tool_result，不能只认 assistant
-            let has_task_tool = conv.messages.iter().any(message_is_task_tool_use);
-            let snapshot_ready = last_is_assistant || has_task_tool;
+            let snapshot_ready = turn_snapshot_ready(&conv, expected_assistant_text.as_deref());
             if snapshot_ready || attempt == 9 {
                 if !is_latest_turn_complete_generation(session_id, generation)
                     || is_turn_active(session_id)
@@ -727,14 +786,14 @@ fn finish_turn_complete(app: &AppHandle, session_id: &str, generation: u64) {
                 emitted_messages = true;
                 if snapshot_ready {
                     eprintln!(
-                        "[claude] turn-complete 消息已刷新 (attempt={}, msgs={}, task={})",
+                        "[claude] turn-complete 消息已刷新 (attempt={}, msgs={}, expected_text_len={})",
                         attempt + 1,
                         conv.messages.len(),
-                        has_task_tool
+                        expected_assistant_text.as_deref().map(|t| t.len()).unwrap_or(0)
                     );
                 } else {
                     eprintln!(
-                        "[claude] turn-complete 重试后仍无 assistant/Task 落盘 (attempt={})",
+                        "[claude] turn-complete 重试后仍无最终 assistant 文本落盘 (attempt={})",
                         attempt + 1
                     );
                 }
@@ -1038,6 +1097,94 @@ mod tests {
         assert_eq!(guard.as_ref().map(|v| v.len()), Some(3));
         guard.as_mut().unwrap().push(4);
         assert_eq!(guard.as_ref().map(|v| v.len()), Some(4));
+    }
+
+    fn msg(id: &str, role: &str, content: &str) -> crate::history::Message {
+        crate::history::Message {
+            id: id.to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            thinking: None,
+            timestamp: 0,
+        }
+    }
+
+    fn mk_conv(messages: Vec<crate::history::Message>) -> crate::history::Conversation {
+        crate::history::Conversation {
+            id: "c1".to_string(),
+            title: "t".to_string(),
+            messages,
+            platform: "claude".to_string(),
+            project_dir: None,
+            source_path: None,
+            created_at: 0,
+            updated_at: 0,
+            context_tokens: None,
+            last_model: None,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn turn_final_text_waits_for_report_not_any_task_or_progress() {
+        let report = "# CodeCliManager 项目分析报告\n\n这是一份完整报告".to_string();
+        // 子代理 Task 已落盘、末条为进度文本（真实 bug 场景的提前快照）
+        let premature = mk_conv(vec![
+            msg("u1", "user", "分析这个项目"),
+            msg("p1", "assistant", "正在读取代码..."),
+            msg("t1", "tool_use", "{\"name\":\"Task\"}"),
+            msg("t2", "tool_result", "{\"tool_use_id\":\"t1\"}"),
+        ]);
+        assert!(!turn_final_text_persisted(&premature, &report));
+        assert!(!turn_snapshot_ready(&premature, Some(&report)));
+
+        // 最终报告已落盘（同轮，任意消息位置）
+        let flushed = mk_conv(vec![
+            msg("u1", "user", "分析这个项目"),
+            msg("p1", "assistant", "正在读取代码..."),
+            msg("t1", "tool_use", "{\"name\":\"Task\"}"),
+            msg("t2", "tool_result", "{\"tool_use_id\":\"t1\"}"),
+            msg("a1", "assistant", &report),
+        ]);
+        assert!(turn_final_text_persisted(&flushed, &report));
+        assert!(turn_snapshot_ready(&flushed, Some(&report)));
+    }
+
+    #[test]
+    fn turn_final_text_covers_multiple_text_blocks_joined() {
+        // 单个 assistant 消息内含两个文本块，extract_full_assistant_text 以 \n\n 拼接
+        let expected = "第一部分\n\n第二部分";
+        let conv = mk_conv(vec![
+            msg("u1", "user", "hi"),
+            msg("a1", "assistant", "第一部分\n\n第二部分"),
+        ]);
+        assert!(turn_final_text_persisted(&conv, expected));
+    }
+
+    #[test]
+    fn turn_final_text_tolerates_trailing_whitespace() {
+        let conv = mk_conv(vec![
+            msg("u1", "user", "hi"),
+            msg("a1", "assistant", "报告内容"),
+        ]);
+        assert!(turn_final_text_persisted(&conv, " 报告内容\n"));
+    }
+
+    #[test]
+    fn no_text_turn_uses_terminal_state() {
+        // 纯工具轮：无 expected 文本，末条为 tool_result 即视为可出图
+        let conv = mk_conv(vec![
+            msg("u1", "user", "hi"),
+            msg("t1", "tool_use", "{\"name\":\"Bash\"}"),
+            msg("t2", "tool_result", "ok"),
+        ]);
+        assert!(turn_snapshot_ready(&conv, None));
+        // 提前快照：末条仍是 tool_use，不能出图
+        let mid = mk_conv(vec![
+            msg("u1", "user", "hi"),
+            msg("t1", "tool_use", "{\"name\":\"Bash\"}"),
+        ]);
+        assert!(!turn_snapshot_ready(&mid, None));
     }
 
     #[cfg(unix)]

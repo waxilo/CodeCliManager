@@ -44,6 +44,27 @@ export function resolveConversationProjectDir(
   return null;
 }
 
+/**
+ * candidate 文本是否已内容级覆盖 target 文本：
+ * - 相等 / candidate 是 target 的超集 → 覆盖
+ * - candidate 是 target 的结尾（本地流式文本含进度前缀、远程只落最终报告时，报告即覆盖）
+ * 空白差异（换行 / 尾随空格）折叠后再比一次作为兜底。
+ * 方向性：只看 candidate 能否代表 target 的实质内容，不用对称的 includes——
+ * 否则「远程是短进度、本地是长报告」时会把报告误删。
+ */
+export function assistantTextCovers(candidate: string, target: string): boolean {
+  const a = (candidate || '').trim();
+  const b = (target || '').trim();
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.includes(b) || b.endsWith(a)) return true;
+  const norm = (s: string) => s.split(/\s+/).filter(Boolean).join(' ');
+  const na = norm(a);
+  const nb = norm(b);
+  if (na.includes(nb) || nb.endsWith(na)) return true;
+  return false;
+}
+
 // 在内存中更新或添加会话
 /**
  * 合并远程历史与本地乐观消息，避免切模型重启时的 messages-updated
@@ -77,16 +98,6 @@ export function mergeRemoteAndLocalMessages(remote: Message[], local: Message[] 
     }) ||
     remote.some((m) => m.toolData?.toolUseId === toolUseId);
 
-  const assistantTextSimilar = (a: string, b: string) => {
-    const left = (a || '').trim();
-    const right = (b || '').trim();
-    if (!left || !right) return false;
-    if (left === right) return true;
-    if (left.includes(right) || right.includes(left)) return true;
-    const head = Math.min(80, left.length, right.length);
-    return head > 0 && (left.startsWith(right.slice(0, head)) || right.startsWith(left.slice(0, head)));
-  };
-
   const userKey = (content: string) => normalizeMessageForCompare(content);
   const countUser = (msgs: Message[], content: string) => {
     const key = userKey(content);
@@ -107,21 +118,18 @@ export function mergeRemoteAndLocalMessages(remote: Message[], local: Message[] 
 
     for (const msg of trailingOptimistic) {
       if (msg.role === 'assistant') {
-        const lastRemoteAssistant = [...remote].reverse().find((m) => m.role === 'assistant');
-        if (
-          lastRemoteAssistant &&
-          assistantTextSimilar(lastRemoteAssistant.content || '', msg.content || '')
-        ) {
-          continue;
-        }
-        // 远程最后一轮用户之后已有助手，也视为已落盘
+        // 仅看当前轮（最后一轮 user 之后）的远程助手：其文本能内容级覆盖本地流式文本
+        // 才丢弃。不能因为「本轮已存在任意 progress assistant」就丢更长的最终报告。
         const lastRemoteUserIdx = [...remote].map((m) => m.role).lastIndexOf('user');
-        if (lastRemoteUserIdx >= 0) {
-          const hasAssistantAfter = remote
-            .slice(lastRemoteUserIdx + 1)
-            .some((m) => m.role === 'assistant' && (m.content || '').trim());
-          if (hasAssistantAfter) continue;
-        }
+        const turnRemote =
+          lastRemoteUserIdx >= 0 ? remote.slice(lastRemoteUserIdx + 1) : remote;
+        const remoteCovers = turnRemote.some(
+          (m) =>
+            m.role === 'assistant' &&
+            (m.content || '').trim() &&
+            assistantTextCovers(m.content || '', msg.content || ''),
+        );
+        if (remoteCovers) continue;
         filteredTrailing.push(msg);
         continue;
       }
@@ -170,7 +178,7 @@ export function mergeRemoteAndLocalMessages(remote: Message[], local: Message[] 
         m.role === 'user' &&
         normalizeMessageForCompare(m.content) === normalizeMessageForCompare(content),
     );
-  const remoteHasAssistantAfterUser = (userContent: string) => {
+  const remoteHasAssistantAfterUser = (userContent: string, localContent: string) => {
     for (let i = 0; i < remote.length; i++) {
       const m = remote[i];
       if (
@@ -179,7 +187,11 @@ export function mergeRemoteAndLocalMessages(remote: Message[], local: Message[] 
       ) {
         for (let j = i + 1; j < remote.length; j++) {
           if (remote[j].role === 'user') break;
-          if (remote[j].role === 'assistant' && (remote[j].content || '').trim()) {
+          if (
+            remote[j].role === 'assistant' &&
+            (remote[j].content || '').trim() &&
+            assistantTextCovers(remote[j].content || '', localContent)
+          ) {
             return true;
           }
         }
@@ -197,7 +209,7 @@ export function mergeRemoteAndLocalMessages(remote: Message[], local: Message[] 
     const prevUser = [...local.slice(0, i)].reverse().find((m) => m.role === 'user');
     if (!prevUser) continue;
     if (!remoteHasUser(prevUser.content)) continue;
-    if (remoteHasAssistantAfterUser(prevUser.content)) continue;
+    if (remoteHasAssistantAfterUser(prevUser.content, localMsg.content)) continue;
 
     let insertAt = merged.findIndex(
       (m) =>

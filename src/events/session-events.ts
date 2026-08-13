@@ -3,7 +3,7 @@ import { shellApi } from '../app/shell/api';
 import { listen } from '@tauri-apps/api/event';
 import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPayload, QueuedPromptItem, SessionUsage, SessionUsageUpdatedPayload } from '../types';
 import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent, refreshStreamingUI, reconcileActiveToolsWithHistory, purgeTerminalTools, clearSessionTools } from '../features/chat/streaming';
-import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages, findConversationById } from '../features/conversations';
+import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages, findConversationById, assistantTextCovers } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
 import { setAbortingUi, setSendButtonLoading, isSendButtonLoading } from '../features/chat/session-context';
 import { hideSendingState } from '../features/chat/retry';
@@ -201,11 +201,16 @@ export async function setupEventListeners() {
       usage: payload.usage ?? null,
     });
 
-    // 远程已有助手时不要再塞一条 stream-assistant；先清流式 DOM，避免与历史气泡叠两层
-    const remoteHasAssistant = payload.messages.some(
-      (m) => m.role === 'assistant' && (m.content || '').trim(),
+    // 远程已「内容级」包含当前流式文本（最终报告已落盘）才不再补 stream-assistant。
+    // 仅凭「存在任意 assistant 气泡」会漏判「远程只有更早的 progress、最终报告尚未写入」，
+    // 导致清掉流式 DOM 时报告消失。
+    const remoteCoversStreamed = payload.messages.some(
+      (m) =>
+        m.role === 'assistant' &&
+        (m.content || '').trim() &&
+        assistantTextCovers(m.content || '', streamedText),
     );
-    if (!remoteHasAssistant) {
+    if (!remoteCoversStreamed) {
       ensureAssistantPresent(payload.conversation_id, streamedText);
     }
     clearStreamingState(payload.conversation_id);
