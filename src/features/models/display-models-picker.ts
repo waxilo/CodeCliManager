@@ -1,5 +1,6 @@
 import { escapeHtml } from '../../utils';
 import type { FetchedModel } from '../../types';
+import { showToast } from '../../ui';
 
 export interface DisplayModelsPickerSavePayload {
   display: string[];
@@ -399,7 +400,7 @@ export function openDisplayModelsPicker(options: OpenDisplayModelsPickerOptions)
       renderDialog();
       await persistDraft();
     } catch (e) {
-      alert('同步模型失败: ' + String(e));
+      showToast('同步模型失败: ' + String(e));
     } finally {
       modelsFetchInFlight = Math.max(0, modelsFetchInFlight - 1);
       if (syncBtn) {

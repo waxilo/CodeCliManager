@@ -233,7 +233,7 @@
 
 .input-composer-toolbar-end {
   display: grid;
-  grid-template-columns: 156px auto 36px;
+  grid-template-columns: 156px 36px;
   column-gap: 6px;
   align-items: center;
   flex-shrink: 0;
@@ -241,6 +241,33 @@
 
 .input-composer-toolbar-end .send-btn {
   justify-self: end;
+}
+
+/* 输入框外下方：权限模式（左）+ Token/计费（右） */
+.composer-below-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 0 2px;
+  min-width: 0;
+}
+
+.composer-below-row .permission-mode-bar {
+  margin-top: 0;
+  padding: 0;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.composer-usage-bar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+  min-width: 0;
 }
 
 .input-composer .chat-model-picker-value {
@@ -727,25 +754,7 @@
   background: var(--color-bg-surface-active);
 }
 
-/* ── 子代理进度面板 ───────────────────────────── */
-.subagent-progress {
-  margin-bottom: 8px;
-  padding: 8px 10px;
-  border: 1px solid var(--color-composer-border);
-  border-radius: 12px;
-  background: var(--color-bg-surface);
-}
-
-.subagent-progress-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-text-muted);
-}
-
+/* ── 子代理进度行（右侧清单栏复用） ───────────── */
 .subagent-progress-list {
   display: flex;
   flex-direction: column;
@@ -759,7 +768,7 @@
   align-items: center;
   gap: 7px;
   min-width: 0;
-  padding: 4px 7px;
+  padding: 7px 8px;
   border-radius: 8px;
   background: var(--color-bg-base);
 }
@@ -777,7 +786,7 @@
 }
 
 .subagent-status-dot.is-done {
-  background: #a6e3a1;
+  background: var(--color-success);
 }
 
 .subagent-status-dot.is-failed {
@@ -863,8 +872,8 @@
 }
 
 .todo-row.is-completed .todo-check {
-  background: #a6e3a1;
-  color: #1e1e2e;
+  background: var(--color-success);
+  color: var(--color-on-accent);
 }
 
 .todo-row.is-in-progress .todo-check {
@@ -888,16 +897,16 @@
   color: var(--color-text-muted);
 }
 
-/* ── 成本 / Token 消耗指示器 ───────────────────── */
+/* ── 成本 / Token 消耗指示器（输入框外下方） ───── */
 .cost-indicator {
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 3px 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--color-bg-surface) 80%, transparent);
-  border: 1px solid var(--color-composer-border);
+  padding: 2px 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
   color: var(--color-text-muted);
   font-size: 10px;
   line-height: 1;

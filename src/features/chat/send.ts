@@ -3,7 +3,7 @@ import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
 import type { FileRef, WorkspaceGroup, PreparedCommand } from '../../types';
 import { escapeHtml } from '../../utils';
-import { showCopyToastMsg } from '../../ui';
+import { showCopyToastMsg, showToast } from '../../ui';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getActiveChatModel } from './model-picker';
 import { getEffectiveProjectDir, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading, syncMessageInputPlaceholder } from './session-context';
@@ -83,7 +83,7 @@ async function prepareKiroBeforeSend(
     return true;
   } catch (error) {
     console.error('[kiro] 发送前检查失败:', error);
-    alert(`Kiro 代理不可用，消息未发送：${String(error)}`);
+    showToast(`Kiro 代理不可用，消息未发送：${String(error)}`);
     input.focus();
     return false;
   } finally {
@@ -308,7 +308,7 @@ export async function sendMessage() {
     disposePasteAttachments(snapshot.pasteAttachments);
   } catch (error) {
     console.error('Failed to prepare message:', error);
-    alert('Failed to send message: ' + String(error));
+    showToast('Failed to send message: ' + String(error));
   } finally {
     if (shouldRestore) restoreComposerDraftSnapshot(draftKey, snapshot);
   }
@@ -405,7 +405,7 @@ export async function executePreparedCommand(
     return true;
   } catch (e) {
     console.error('Failed to send message:', e);
-    alert('Failed to send message: ' + String(e));
+    showToast('Failed to send message: ' + String(e));
     appState.pendingUserMessage = null;
     appState.pendingUserMessageConvId = null;
     appState.runningSessions.delete(conversationId || 'pending');

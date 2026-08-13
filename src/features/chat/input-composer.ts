@@ -7,7 +7,6 @@ import { renderChatModelPickerHtml } from './model-picker';
 import { getPermissionMode } from '../permissions/permission-mode';
 import * as api from '../../api';
 import { renderContextIndicatorHtml } from './context-indicator';
-import { renderSubagentProgressHtml } from './subagent-progress';
 import { renderTodoPanelHtml } from './todo-panel';
 import { renderCostIndicatorHtml } from './cost-indicator';
 export function renderCopyIconHtml(className = 'toolbar-copy-icon'): string {
@@ -184,7 +183,6 @@ export function renderInputComposerHtml(): string {
     <div class="input-area">
       <div id="interaction-host" class="interaction-host" hidden></div>
       ${renderQueuedPromptsHtml()}
-      ${renderSubagentProgressHtml()}
       ${renderTodoPanelHtml()}
       <div id="paste-attachments-bar" class="paste-attachments-bar" style="display:none"></div>
       <div id="imported-file-bar" class="imported-file-bar" style="display:none"></div>
@@ -213,21 +211,25 @@ export function renderInputComposerHtml(): string {
           </div>
           <div class="input-composer-toolbar-end">
             ${renderChatModelPickerHtml()}
-            ${renderCostIndicatorHtml()}
-            ${renderContextIndicatorHtml()}
             ${renderSendButtonHtml()}
           </div>
         </div>
       </div>
-      <div class="permission-mode-bar" role="radiogroup" aria-label="工具权限模式">
-        <label class="permission-mode-chip${mode === 'ask' ? ' is-selected' : ''}" title="同工具类型首次询问，之后本会话自动放行">
-          <input type="radio" name="permission-mode" value="ask"${mode === 'ask' ? ' checked' : ''} />
-          <span>每次询问</span>
-        </label>
-        <label class="permission-mode-chip${mode === 'silent' ? ' is-selected' : ''}" title="自动允许工具请求，不再询问">
-          <input type="radio" name="permission-mode" value="silent"${mode === 'silent' ? ' checked' : ''} />
-          <span>静默授权</span>
-        </label>
+      <div class="composer-below-row">
+        <div class="permission-mode-bar" role="radiogroup" aria-label="工具权限模式">
+          <label class="permission-mode-chip${mode === 'ask' ? ' is-selected' : ''}" title="同工具类型首次询问，之后本会话自动放行">
+            <input type="radio" name="permission-mode" value="ask"${mode === 'ask' ? ' checked' : ''} />
+            <span>每次询问</span>
+          </label>
+          <label class="permission-mode-chip${mode === 'silent' ? ' is-selected' : ''}" title="自动允许工具请求，不再询问">
+            <input type="radio" name="permission-mode" value="silent"${mode === 'silent' ? ' checked' : ''} />
+            <span>静默授权</span>
+          </label>
+        </div>
+        <div class="composer-usage-bar" id="composer-usage-bar">
+          ${renderCostIndicatorHtml()}
+          ${renderContextIndicatorHtml()}
+        </div>
       </div>
     </div>
   `;

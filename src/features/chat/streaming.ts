@@ -53,6 +53,35 @@ function parseChunkJson(content: string): Record<string, unknown> | null {
   }
 }
 
+/** CLI task_notification：completed/failed/stopped；旧版可能是 success/error */
+function isTerminalTaskStatus(status: string): boolean {
+  return (
+    status === 'completed' ||
+    status === 'success' ||
+    status === 'failed' ||
+    status === 'error' ||
+    status === 'stopped'
+  );
+}
+
+function isFailedTaskStatus(status: string): boolean {
+  return status === 'failed' || status === 'error' || status === 'stopped';
+}
+
+function findActiveTool(
+  tools: Map<string, ActiveToolState>,
+  toolUseId: string,
+  taskId = '',
+): ActiveToolState | undefined {
+  if (toolUseId && tools.has(toolUseId)) return tools.get(toolUseId);
+  if (taskId) {
+    for (const state of tools.values()) {
+      if (state.taskId === taskId || state.toolUseId === taskId) return state;
+    }
+  }
+  return undefined;
+}
+
 function refreshActiveToolUI(sessionId: string) {
   if (appState.activeConversationId === sessionId) {
     shellApi.refreshChatContent();
@@ -61,7 +90,7 @@ function refreshActiveToolUI(sessionId: string) {
   }
 }
 
-/** 历史落盘后清掉已完成的 active Task，避免与历史卡片重复 */
+/** 历史落盘后：同步完成态并从 active 清掉，避免与历史卡片重复 */
 export function reconcileActiveToolsWithHistory(sessionId: string, messages: Message[]) {
   const tools = appState.activeToolsBySession.get(sessionId);
   if (!tools || tools.size === 0) return;
@@ -71,10 +100,18 @@ export function reconcileActiveToolsWithHistory(sessionId: string, messages: Mes
     const found = processed.find(
       (m) =>
         m.role === 'tool' &&
-        (m.toolData?.toolUseId === toolUseId || extractToolUseId(m.content) === toolUseId),
+        (m.toolData?.toolUseId === toolUseId ||
+          m.toolData?.toolUseId === state.taskId ||
+          extractToolUseId(m.content) === toolUseId ||
+          (state.taskId && extractToolUseId(m.content) === state.taskId)),
     );
     if (!found) continue;
     if (found.toolData?.toolResult !== undefined) {
+      // 先写入完成态，再删除：即使后续 UI 竞态也能读到正确状态
+      state.status = found.toolData.isError ? 'failed' : 'done';
+      state.isError = found.toolData.isError;
+      state.toolResult = found.toolData.toolResult;
+      state.input = found.toolData.toolInput || state.input;
       tools.delete(toolUseId);
     } else if (state.status === 'running') {
       // 历史已有 tool_use 但尚无 result：保留 running，避免闪断
@@ -140,9 +177,11 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
 
   if (kind === 'tool_result') {
     const toolUseId = String(data?.tool_use_id || data?.toolUseId || '');
-    if (!toolUseId) return false;
+    const taskId = String(data?.task_id || data?.taskId || '');
+    if (!toolUseId && !taskId) return false;
     const tools = appState.activeToolsBySession.get(sid) || appState.activeToolsBySession.get('pending');
-    const state = tools?.get(toolUseId);
+    if (!tools) return false;
+    const state = findActiveTool(tools, toolUseId, taskId);
     if (!state) return false;
     const isError = Boolean(data?.is_error || data?.isError);
     state.status = isError ? 'failed' : 'done';
@@ -156,29 +195,50 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
   if (kind === 'task_started') {
     // 官方子代理进度：补充描述，确保子代理卡片立即可见
     const toolUseId = String(data?.tool_use_id || data?.toolUseId || '');
-    if (!toolUseId) return false;
+    const taskId = String(data?.task_id || data?.taskId || '');
+    if (!toolUseId && !taskId) return false;
     const tools = getActiveToolsMap(sid);
-    const existing = tools.get(toolUseId);
+    const key = toolUseId || taskId;
+    const existing = findActiveTool(tools, toolUseId, taskId);
     const description =
       String(data?.description || '') || String(data?.prompt || '') || existing?.description;
-    tools.set(toolUseId, {
-      toolUseId,
+    const next: ActiveToolState = {
+      toolUseId: existing?.toolUseId || key,
       toolName: 'Task',
       input: existing?.input || {},
-      status: 'running',
+      status: existing?.status === 'done' || existing?.status === 'failed' ? existing.status : 'running',
       startedAt: existing?.startedAt || Date.now(),
+      taskId: taskId || existing?.taskId,
       description,
-    });
+      progress: existing?.progress,
+      toolResult: existing?.toolResult,
+      isError: existing?.isError,
+    };
+    tools.set(next.toolUseId, next);
     refreshActiveToolUI(sid);
     return true;
   }
 
   if (kind === 'task_progress') {
     const toolUseId = String(data?.tool_use_id || data?.toolUseId || '');
-    if (!toolUseId) return false;
+    const taskId = String(data?.task_id || data?.taskId || '');
+    if (!toolUseId && !taskId) return false;
     const tools = getActiveToolsMap(sid);
-    const state = tools.get(toolUseId);
-    if (!state) return false;
+    let state = findActiveTool(tools, toolUseId, taskId);
+    // 通知可能早于 tool_use_start：先占位，避免进度丢失
+    if (!state) {
+      const key = toolUseId || taskId;
+      state = {
+        toolUseId: key,
+        toolName: 'Task',
+        input: {},
+        status: 'running',
+        startedAt: Date.now(),
+        taskId: taskId || undefined,
+      };
+      tools.set(key, state);
+    }
+    if (taskId) state.taskId = taskId;
     const status = String(data?.status || '');
     state.progress = {
       status: status || state.progress?.status,
@@ -186,8 +246,9 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
       toolUses: Number(data?.tool_uses ?? state.progress?.toolUses) || state.progress?.toolUses,
       durationMs: Number(data?.duration_ms ?? state.progress?.durationMs) || state.progress?.durationMs,
     };
-    if (status === 'success' || status === 'error') {
-      state.status = status === 'error' ? 'failed' : 'done';
+    if (isTerminalTaskStatus(status)) {
+      state.status = isFailedTaskStatus(status) ? 'failed' : 'done';
+      state.isError = isFailedTaskStatus(status);
     }
     refreshActiveToolUI(sid);
     return true;

@@ -88,11 +88,11 @@
 
 .thinking-content {
   padding: 10px 14px;
-  color: #6c7086;
+  color: var(--color-text-muted);
 }
 
 [data-theme="light"] .thinking-content {
-  color: #585b6e;
+  color: var(--color-text-muted);
 }
 
 .thinking-content pre {

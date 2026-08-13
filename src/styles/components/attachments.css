@@ -23,9 +23,9 @@
   transform: translateX(-50%) translateY(0);
 }
 .toast-notification.is-toast-warning {
-  background: #fff3cd;
-  color: #664d03;
-  box-shadow: 0 4px 16px rgba(102,77,3,0.15);
+  background: var(--color-warning-bg);
+  color: var(--color-warning-text);
+  box-shadow: 0 4px 16px color-mix(in srgb, var(--color-warning-text) 15%, transparent);
 }
 
 /* ── @file 引用下拉建议 ─────────────────────────────────────────── */
@@ -140,6 +140,16 @@
   color: var(--color-accent);
 }
 
+.copy-toast--error {
+  border-color: var(--color-error-border);
+  background: var(--color-error-bg);
+  color: var(--color-error-text);
+}
+
+.copy-toast--error svg {
+  color: var(--color-danger);
+}
+
 /* ── 文件引用芯片 ─────────────────────────────────────────────────── */
 .file-ref-chips {
   display: flex;
@@ -210,7 +220,7 @@
 .message.user .file-ref-chip {
   background: rgba(0, 0, 0, 0.06);
   border-color: rgba(22, 101, 52, 0.2);
-  color: #111827;
+  color: var(--color-bubble-user-text);
   backdrop-filter: blur(2px);
 }
 
@@ -227,7 +237,7 @@
 }
 
 .message.user .file-ref-chip-path {
-  color: #1f2937;
+  color: var(--color-bubble-user-code-text);
 }
 
 .message.user .file-ref-chip-thumb {

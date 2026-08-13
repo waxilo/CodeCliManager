@@ -91,8 +91,52 @@ impl ProxyHandle {
     }
 }
 
-fn cors_header() -> Header {
-    Header::from_bytes("Access-Control-Allow-Origin", "*").expect("valid header")
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    let bare = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest).to_string()
+    } else {
+        host.split(':').next().unwrap_or(host).to_string()
+    };
+    matches!(
+        bare.as_str(),
+        "127.0.0.1" | "localhost" | "::1" | "0:0:0:0:0:0:0:1"
+    )
+}
+
+fn request_origin(request: &Request) -> Option<&str> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("origin"))
+        .map(|header| header.value.as_str())
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    origin == "tauri://localhost"
+        || origin == "http://tauri.localhost"
+        || origin == "https://tauri.localhost"
+        || origin.starts_with("http://localhost:")
+        || origin.starts_with("https://localhost:")
+        || origin.starts_with("http://127.0.0.1:")
+        || origin.starts_with("https://127.0.0.1:")
+        || origin.starts_with("http://[::1]:")
+        || origin.starts_with("https://[::1]:")
+}
+
+/// 仅对本机来源回显 CORS 头；其余（原生客户端无 Origin / 恶意跨源）一律不发。
+/// 任意网页便无法读取本地代理的响应（DNS rebinding 已由 Host 校验拦截）。
+fn cors_headers_for(request: &Request) -> Vec<Header> {
+    let Some(origin) = request_origin(request) else {
+        return Vec::new();
+    };
+    if !is_loopback_origin(origin) {
+        return Vec::new();
+    }
+    vec![
+        Header::from_bytes("Access-Control-Allow-Origin", origin).expect("valid header"),
+        Header::from_bytes("Vary", "Origin").expect("valid header"),
+    ]
 }
 
 /// 尝试绑定端口（被占用时自动 +1，最多试 20 个）。
@@ -161,16 +205,45 @@ pub fn start_proxy(mut config: ProxyConfig) -> Result<ProxyHandle, String> {
 // ============ 路由 ============
 
 fn handle_request(request: Request, config: &ProxyConfig, auth: &Arc<Auth>) {
+    // Host 校验：仅接受本机回环地址，阻断 DNS rebinding（浏览器把恶意域名解析到 127.0.0.1）
+    let host_ok = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("host"))
+        .map(|header| is_loopback_host(header.value.as_str()))
+        .unwrap_or(false);
+    if !host_ok {
+        return error_response(
+            request,
+            400,
+            "Invalid Host header.",
+            "invalid_request_error",
+        );
+    }
+    // Origin 校验：非本机来源直接拒绝
+    if let Some(origin) = request_origin(&request) {
+        if !is_loopback_origin(origin) {
+            return error_response(
+                request,
+                403,
+                "Cross-origin requests are not allowed.",
+                "invalid_request_error",
+            );
+        }
+    }
+
     let method = request.method().clone();
     let url = request.url().to_string();
     let path = url.split('?').next().unwrap_or(&url).to_string();
 
     if method == Method::Options {
-        let response = Response::from_string("")
+        let mut response = Response::from_string("")
             .with_status_code(StatusCode(204))
-            .with_header(cors_header())
             .with_header(Header::from_bytes("Access-Control-Allow-Methods", "GET,POST,OPTIONS").unwrap())
             .with_header(Header::from_bytes("Access-Control-Allow-Headers", "content-type,x-api-key,authorization").unwrap());
+        for header in cors_headers_for(&request) {
+            response = response.with_header(header);
+        }
         let _ = request.respond(response);
         return;
     }
@@ -244,10 +317,12 @@ fn respond_body_error(request: Request, error: BodyReadError) {
 
 fn json_response(request: Request, status: u16, body: &Value) {
     let data = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
-    let response = Response::from_string(data)
+    let mut response = Response::from_string(data)
         .with_status_code(StatusCode(status))
-        .with_header(Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap())
-        .with_header(cors_header());
+        .with_header(Header::from_bytes("Content-Type", "application/json; charset=utf-8").unwrap());
+    for header in cors_headers_for(&request) {
+        response = response.with_header(header);
+    }
     let _ = request.respond(response);
 }
 
@@ -1015,20 +1090,15 @@ fn respond_sse_stream_fetch(
         pos: 0,
         eof: false,
     };
-    let response = Response::new(
-        StatusCode(200),
-        vec![
-            Header::from_bytes("Content-Type", "text/event-stream; charset=utf-8").unwrap(),
-            Header::from_bytes("Cache-Control", "no-cache").unwrap(),
-            Header::from_bytes("Connection", "keep-alive").unwrap(),
-            Header::from_bytes("X-Accel-Buffering", "no").unwrap(),
-            cors_header(),
-        ],
-        reader,
-        None,
-        None,
-    )
-    .with_chunked_threshold(0);
+    let mut headers = vec![
+        Header::from_bytes("Content-Type", "text/event-stream; charset=utf-8").unwrap(),
+        Header::from_bytes("Cache-Control", "no-cache").unwrap(),
+        Header::from_bytes("Connection", "keep-alive").unwrap(),
+        Header::from_bytes("X-Accel-Buffering", "no").unwrap(),
+    ];
+    headers.extend(cors_headers_for(&request));
+    let response = Response::new(StatusCode(200), headers, reader, None, None)
+        .with_chunked_threshold(0);
 
     let _ = request.respond(response);
     let _ = producer.join();
@@ -1142,15 +1212,9 @@ fn resolve_kiro_model(auth: &Auth, requested: &str, default_model: &str) -> Stri
 
 // ============ 路由实现 ============
 
-fn handle_health(request: Request, config: &ProxyConfig, auth: &Auth) {
-    let body = json!({
-        "ok": true,
-        "service": "codecli-manager-kiro",
-        "port": config.port,
-        "default_model": config.default_model,
-        "auth_source": auth.describe_auth_source(),
-        "endpoints": ["/v1/messages", "/v1/messages/count_tokens", "/v1/models"],
-    });
+fn handle_health(request: Request, _config: &ProxyConfig, _auth: &Auth) {
+    // 健康检查只暴露最少信息：不含端口、默认模型、认证来源/令牌路径等细节
+    let body = json!({ "ok": true, "service": "codecli-manager-kiro" });
     json_response(request, 200, &body);
 }
 
@@ -1726,6 +1790,79 @@ mod tests {
             .send()
             .unwrap();
         assert_eq!(resp.status(), 404);
+
+        handle.stop();
+    }
+
+    #[test]
+    fn health_does_not_leak_sensitive_fields() {
+        let mut handle = start_proxy(test_config(39873)).expect("proxy starts");
+        let port = handle.port;
+        let client = reqwest::blocking::Client::new();
+
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .send()
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+        let health: Value = resp.json().unwrap();
+        assert_eq!(health["ok"], true);
+        assert!(health.get("auth_source").is_none());
+        assert!(health.get("default_model").is_none());
+        assert!(health.get("port").is_none());
+        assert!(health.get("endpoints").is_none());
+
+        handle.stop();
+    }
+
+    #[test]
+    fn foreign_host_header_is_rejected() {
+        let mut handle = start_proxy(test_config(39875)).expect("proxy starts");
+        let port = handle.port;
+        let client = reqwest::blocking::Client::new();
+
+        // 伪造 Host → DNS rebinding 场景，必须被拒绝
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .header(reqwest::header::HOST, "evil.example.com")
+            .send()
+            .unwrap();
+        assert_eq!(resp.status(), 400);
+
+        handle.stop();
+    }
+
+    #[test]
+    fn cors_header_only_for_loopback_origins() {
+        let mut handle = start_proxy(test_config(39877)).expect("proxy starts");
+        let port = handle.port;
+        let client = reqwest::blocking::Client::new();
+
+        // 本机来源 → 回显对应 Origin
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .header(reqwest::header::ORIGIN, "http://localhost:1420")
+            .send()
+            .unwrap();
+        assert_eq!(
+            resp.headers().get("access-control-allow-origin").unwrap(),
+            "http://localhost:1420"
+        );
+
+        // 恶意跨源 → 不返回任何 CORS 头
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .header(reqwest::header::ORIGIN, "https://evil.example.com")
+            .send()
+            .unwrap();
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+
+        // 原生客户端（无 Origin）→ 不返回 CORS 头
+        let resp = client
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .send()
+            .unwrap();
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
 
         handle.stop();
     }

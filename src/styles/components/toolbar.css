@@ -87,7 +87,7 @@
   height: 7px;
   border: 2px solid var(--color-titlebar);
   border-radius: 50%;
-  background: #3fb950;
+  background: var(--color-status-success);
   box-sizing: content-box;
   pointer-events: none;
 }

@@ -86,6 +86,8 @@ export interface ActiveToolState {
   toolResult?: string;
   isError?: boolean;
   startedAt: number;
+  /** 子代理 Task：CLI task_id（与 tool_use_id 可能不同时用于匹配通知） */
+  taskId?: string;
   /** 子代理 Task：执行描述（system/task_started 下发） */
   description?: string;
   /** 子代理 Task：进度汇总（system/task_notification 下发） */

@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::config_io::atomic_write;
 use crate::paths::{get_claude_history_path, get_data_path};
 use crate::usage::SessionUsage;
 
@@ -91,7 +92,7 @@ pub(crate) fn save_overlay(overlay: &AppOverlay) {
         let _ = fs::create_dir_all(&data_path);
     }
     if let Ok(content) = serde_json::to_string_pretty(overlay) {
-        let _ = fs::write(get_overlay_path(), content);
+        let _ = atomic_write(&get_overlay_path(), content.as_bytes());
     }
 }
 
@@ -169,7 +170,7 @@ pub(crate) fn file_mtime_secs(path: &Path) -> i64 {
 pub(crate) fn parse_claude_session_cached(path: &PathBuf) -> Option<Conversation> {
     let mtime = file_mtime_secs(path);
     {
-        let cache = SESSION_CACHE.lock().unwrap();
+        let cache = SESSION_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(map) = cache.as_ref() {
             if let Some((cached_mtime, conv)) = map.get(path) {
                 if *cached_mtime == mtime {
@@ -179,7 +180,7 @@ pub(crate) fn parse_claude_session_cached(path: &PathBuf) -> Option<Conversation
         }
     }
     let conv = parse_claude_session(path)?;
-    let mut cache = SESSION_CACHE.lock().unwrap();
+    let mut cache = SESSION_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = cache.get_or_insert_with(HashMap::new);
     map.insert(path.clone(), (mtime, conv.clone()));
     Some(conv)
@@ -188,7 +189,7 @@ pub(crate) fn parse_claude_session_cached(path: &PathBuf) -> Option<Conversation
 /// 会话文件被本地改写后必须失效缓存。
 /// mtime 精度只有秒级，同秒内连续写入（发送后立刻撤回）会命中旧缓存，导致 UI 看起来“没撤回”。
 pub(crate) fn invalidate_session_cache(path: &Path) {
-    let mut cache = SESSION_CACHE.lock().unwrap();
+    let mut cache = SESSION_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = cache.as_mut() {
         map.remove(path);
     }
@@ -900,7 +901,7 @@ pub(crate) fn save_app_state(state: &AppState) {
     }
     let path = data_path.join("state.json");
     if let Ok(content) = serde_json::to_string_pretty(state) {
-        let _ = fs::write(path, content);
+        let _ = atomic_write(&path, content.as_bytes());
     }
 }
 
@@ -1102,7 +1103,7 @@ pub(crate) fn rewrite_session_model(session_id: &str, new_model: &str) -> Result
 
     if modified {
         let new_content = new_lines.join("\n");
-        std::fs::write(&path, new_content)
+        atomic_write(&path, new_content.as_bytes())
             .map_err(|e| format!("Failed to write session file: {}", e))?;
         invalidate_session_cache(&path);
         eprintln!(

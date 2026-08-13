@@ -1,6 +1,6 @@
 [package]
 name = "codecli-manager"
-version = "0.2.14"
+version = "0.2.15"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -30,4 +30,5 @@ base64 = "0.22"
 tiny_http = "0.12"
 regex = "1"
 tauri-plugin-process = "2"
+arboard = "3"
 

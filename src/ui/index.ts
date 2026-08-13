@@ -29,9 +29,10 @@ export {
   syncSidebarCollapsedUI,
   setSidebarCollapsed,
   toggleSidebarCollapsed,
+  syncSidebarForSubagents,
   initSidebarCollapsed,
   syncSidebarResponsiveState,
   bindSidebarResponsive,
 } from './sidebar-layout';
 export { showConfirmDialog, showDeleteConfirm, type ConfirmDialogOptions } from './confirm-dialog';
-export { showCopyToastMsg } from './toast';
+export { showCopyToastMsg, showToast, type ToastVariant } from './toast';

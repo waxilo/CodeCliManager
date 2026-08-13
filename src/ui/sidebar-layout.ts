@@ -13,6 +13,10 @@ let sidebarWidth = DEFAULT_SIDEBAR_WIDTH;
 let isSidebarCollapsed = false;
 /** 侧边栏当前是否处于「窄窗口自动折叠」状态（区别于用户手动折叠） */
 let sidebarAutoCollapsed = false;
+/** 因子代理清单栏弹出而临时收起左侧会话栏（区别于用户手动折叠） */
+let sidebarCollapsedForSubagents = false;
+/** 本轮子代理生命周期内是否已处理过侧边栏联动（避免进度刷新时反复强收） */
+let subagentSidebarManaged = false;
 /** 上一次判定的窗口宽度区间，用于只在跨越断点时触发自动折叠 */
 let sidebarWasNarrow: boolean | null = null;
 
@@ -141,9 +145,36 @@ export function setSidebarCollapsed(collapsed: boolean, persist = true) {
 }
 
 export function toggleSidebarCollapsed() {
-  // 用户手动操作后放弃自动折叠的接管权，避免窗口变宽时被强行展开
+  // 用户手动操作后放弃自动折叠的接管权，避免窗口变宽 / 子代理结束时被强行展开
   sidebarAutoCollapsed = false;
+  sidebarCollapsedForSubagents = false;
+  subagentSidebarManaged = false;
   setSidebarCollapsed(!isSidebarCollapsed);
+}
+
+/**
+ * 有子代理时自动收起左侧会话栏，腾出宽度给右侧清单；
+ * 子代理全部消失后恢复到用户持久化偏好（若本次是因子代理而收起）。
+ * 同一轮子代理周期只联动一次，避免进度刷新时把用户手动展开再次压回去。
+ */
+export function syncSidebarForSubagents(hasSubagents: boolean) {
+  if (hasSubagents) {
+    if (!subagentSidebarManaged) {
+      subagentSidebarManaged = true;
+      if (!isSidebarCollapsed) {
+        sidebarCollapsedForSubagents = true;
+        sidebarAutoCollapsed = false;
+        setSidebarCollapsed(true, false);
+      }
+    }
+    return;
+  }
+
+  subagentSidebarManaged = false;
+  if (sidebarCollapsedForSubagents) {
+    sidebarCollapsedForSubagents = false;
+    setSidebarCollapsed(loadSidebarCollapsed(), false);
+  }
 }
 
 export function initSidebarCollapsed() {

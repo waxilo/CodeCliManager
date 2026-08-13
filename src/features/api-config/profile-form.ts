@@ -73,36 +73,35 @@ export function setApiKeyBoxMode(overlay: HTMLElement, mode: ApiKeyBoxMode) {
   if (cancelBtn) cancelBtn.hidden = mode !== 'edit';
 }
 
-/** 重置 API Key 输入框（清空输入与缓存的明文），常用于切换 profile 时。 */
+/** 重置 API Key 输入框（清空输入与脱敏缓存），常用于切换 profile 时。 */
 export function resetApiKeyBox(overlay: HTMLElement) {
   const box = overlay.querySelector('.settings-apikey-box') as HTMLElement | null;
   if (!box) return;
   const valueEl = box.querySelector('.settings-apikey-display-value') as HTMLElement | null;
   if (valueEl) {
     valueEl.textContent = '';
-    delete valueEl.dataset.full;
     delete valueEl.dataset.masked;
+    delete valueEl.dataset.hasKey;
   }
   const input = box.querySelector('input[name="apiKey"]') as HTMLInputElement | null;
   if (input) input.value = '';
   setApiKeyBoxMode(overlay, 'empty');
 }
 
-/** 根据 profile 拉取明文密钥并展示首尾脱敏。无密钥则保持「输入」模式。 */
+/** 根据 profile 拉取脱敏密钥并展示首尾。明文密钥不进入前端，仅在用户点击复制时由后端写入剪贴板。 */
 export async function loadApiKeyPreview(overlay: HTMLElement, profileId: string | null) {
   resetApiKeyBox(overlay);
   if (!profileId || profileId === OFFICIAL_PROFILE_ID) return;
   try {
-    const key = await api.getApiProfileKey(profileId);
-    const trimmed = (key || '').trim();
-    if (!trimmed) return;
+    const masked = await api.getApiProfileKeyMasked(profileId);
+    if (!masked) return;
     // 异步加载期间用户可能已经切换到别的 profile，丢弃陈旧结果。
     if (overlay.dataset.profileId !== profileId) return;
     const valueEl = overlay.querySelector('.settings-apikey-display-value') as HTMLElement | null;
     if (!valueEl) return;
-    valueEl.dataset.full = trimmed;
-    valueEl.dataset.masked = maskApiKey(trimmed);
-    valueEl.textContent = valueEl.dataset.masked;
+    valueEl.dataset.masked = masked;
+    valueEl.dataset.hasKey = '1';
+    valueEl.textContent = masked;
     setApiKeyBoxMode(overlay, 'view');
   } catch {
     /* keep empty mode */

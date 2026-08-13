@@ -1,7 +1,8 @@
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import { projectRelativePath, stripFileRefsFromDisplay } from './files';
 import { dedupeAdjacentDuplicateMessages } from './conversations/normalize';
 import { handleMessageChunk } from './chat/streaming';
+import { showConfirmDialog } from '../ui/confirm-dialog';
 import { appState } from '../state';
 import type { Message, MessageChunkPayload } from '../types';
 
@@ -56,6 +57,41 @@ describe('message deduplication', () => {
         persisted,
       ]),
     ).toEqual([persisted]);
+  });
+});
+
+describe('confirm dialog escaping and dismissal', () => {
+  afterEach(() => {
+    document.querySelector('.confirm-overlay')?.remove();
+  });
+
+  it('escapes message HTML instead of injecting it', async () => {
+    const promise = showConfirmDialog({
+      title: 't',
+      message: '<img src=x onerror="window.__pwned=1">',
+    });
+    const dialog = document.querySelector('.confirm-dialog');
+    expect(dialog).toBeTruthy();
+    expect(dialog?.querySelector('.confirm-message')?.innerHTML).not.toContain('<img');
+    expect(dialog?.querySelector('.confirm-message')?.textContent).toContain(
+      '<img src=x onerror=',
+    );
+    (dialog?.querySelector('.confirm-btn.cancel') as HTMLButtonElement).click();
+    await expect(promise).resolves.toBe(false);
+  });
+
+  it('closes on Escape and resolves false', async () => {
+    const promise = showConfirmDialog({ title: 't', message: 'm' });
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await expect(promise).resolves.toBe(false);
+    expect(document.querySelector('.confirm-overlay')).toBeNull();
+  });
+
+  it('resolves true on danger button click', async () => {
+    const promise = showConfirmDialog({ title: 't', message: 'm', confirmLabel: '确定' });
+    const dialog = document.querySelector('.confirm-dialog') as HTMLElement;
+    (dialog.querySelector('.confirm-btn.danger') as HTMLButtonElement).click();
+    await expect(promise).resolves.toBe(true);
   });
 });
 

@@ -27,8 +27,12 @@ export function importCcSwitchProfiles(): Promise<CcSwitchImportResult> {
   return invoke<CcSwitchImportResult>('import_cc_switch_profiles');
 }
 
-export function getApiProfileKey(profileId: string): Promise<string> {
-  return invoke<string>('get_api_profile_key', { profileId });
+export function getApiProfileKeyMasked(profileId: string): Promise<string> {
+  return invoke<string>('get_api_profile_key_masked', { profileId });
+}
+
+export function copyApiProfileKey(profileId: string): Promise<boolean> {
+  return invoke<boolean>('copy_api_profile_key', { profileId });
 }
 
 export function getApiProfileConfig(profileId: string): Promise<ClaudeCodeApiConfig> {

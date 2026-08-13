@@ -10,8 +10,11 @@
   --color-bg-thinking: #262637;
   --color-bg-active-profile: #2a3147;
   --color-text: #cdd6f4;
+  --color-text-primary: #cdd6f4;
   --color-text-secondary: #a6adc8;
   --color-text-muted: #6c7086;
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-bg-hover: #45475a;
   --color-icon: #bac2de;
   --color-accent: #89b4fa;
   --color-accent-hover: #93c5fd;
@@ -55,6 +58,37 @@
   --color-send-btn-disabled: #313244;
   --color-send-icon: #cdd6f4;
 
+  /* ── 代码块面板（highlight.js 恒为 github-dark，两主题共用）── */
+  --color-code-bg: #0d1117;
+  --color-code-header-bg: #161b22;
+  --color-code-border: #30363d;
+  --color-code-btn-bg: #21262d;
+  --color-code-btn-hover-bg: #30363d;
+  --color-code-text: #c9d1d9;
+  --color-code-muted: #8b949e;
+  --color-code-json-bg: #1a1a2e;
+  --color-code-json-border: #2d2d4a;
+  --color-code-json-badge: #7b8cff;
+
+  /* ── 状态徽章 / 运行指示（工具卡片、Kiro、更新红点）────────── */
+  --color-status-running: #58a6ff;
+  --color-status-running-bg: rgba(88, 166, 255, 0.15);
+  --color-status-success: #3fb950;
+  --color-status-success-bg: rgba(63, 185, 80, 0.15);
+  --color-status-success-border: #238636;
+  --color-status-error: #f85149;
+  --color-status-error-bg: rgba(248, 81, 73, 0.15);
+  --color-tool-border: #8b949e;
+
+  /* ── 上下文用量警告 / 危险 ───────────────────────────────── */
+  --color-warning: #e0a300;
+  --color-warning-bg: #fff3cd;
+  --color-warning-text: #664d03;
+
+  /* 用户气泡始终为淡绿底，链接/代码文字固定深色 */
+  --color-bubble-user-link: #166534;
+  --color-bubble-user-code-text: #1f2937;
+
   /* ── 侧边栏（AI 工作区导航）───────────────────────────────── */
   --sidebar-bg: #181825;
   --sidebar-header-bg: #181825;
@@ -88,8 +122,11 @@
   --color-bg-thinking: #eef0f4;
   --color-bg-active-profile: #e8eefc;
   --color-text: #1e1e2e;
+  --color-text-primary: #1e1e2e;
   --color-text-secondary: #45475a;
   --color-text-muted: #6c7086;
+  --color-border: rgba(15, 23, 42, 0.1);
+  --color-bg-hover: #dfe2e8;
   --color-icon: #334155;
   --color-accent: #2563eb;
   --color-accent-hover: #1d4ed8;
@@ -132,6 +169,21 @@
   --color-send-btn-hover: #ddd6fe;
   --color-send-btn-disabled: #e8eaef;
   --color-send-icon: #6366f1;
+
+  /* ── 状态徽章 / 运行指示（浅色主题适配）───────────────────── */
+  --color-status-running: #0969da;
+  --color-status-running-bg: rgba(9, 105, 218, 0.12);
+  --color-status-success: #1a7f37;
+  --color-status-success-bg: rgba(26, 127, 55, 0.12);
+  --color-status-success-border: #2da44e;
+  --color-status-error: #cf222e;
+  --color-status-error-bg: rgba(207, 34, 46, 0.12);
+  --color-tool-border: #d1d9e0;
+
+  /* ── 上下文用量警告 / 危险（浅色主题适配）──────────────────── */
+  --color-warning: #9a6700;
+  --color-warning-bg: #fff8c5;
+  --color-warning-text: #4d4000;
 
   /* ── 侧边栏（AI 工作区导航）───────────────────────────────── */
   --sidebar-bg: #f7f8fa;

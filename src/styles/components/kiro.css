@@ -74,8 +74,8 @@
 }
 
 .kiro-status-indicator[data-kiro-indicator='running'] {
-  background: #3fb950;
-  box-shadow: 0 0 0 4px color-mix(in srgb, #3fb950 18%, transparent);
+  background: var(--color-status-success);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-status-success) 18%, transparent);
 }
 
 .kiro-status-indicator[data-kiro-indicator='stopped'] {
@@ -106,7 +106,7 @@
 }
 
 .kiro-card-status[data-kiro-status='running'] {
-  color: #3fb950;
+  color: var(--color-status-success);
 }
 
 .kiro-card-status[data-kiro-status='stopped'] {

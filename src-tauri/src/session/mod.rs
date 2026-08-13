@@ -83,25 +83,25 @@ pub(crate) fn pending_key_for_run(run_id: &str) -> String {
 }
 
 pub(crate) fn register_run_key(run_id: &str, key: &str) {
-    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     runs.get_or_insert_with(HashMap::new)
         .insert(run_id.to_string(), key.to_string());
 }
 
 pub(crate) fn unregister_run_id(run_id: &str) {
-    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = runs.as_mut() {
         map.remove(run_id);
     }
 }
 
 pub(crate) fn resolve_run_key(run_id: &str) -> Option<String> {
-    let runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    let runs = ACTIVE_RUN_KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     runs.as_ref().and_then(|map| map.get(run_id).cloned())
 }
 
 fn rekey_run_key(old_key: &str, new_key: &str) {
-    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = runs.as_mut() {
         for key in map.values_mut() {
             if key == old_key {
@@ -112,7 +112,7 @@ fn rekey_run_key(old_key: &str, new_key: &str) {
 }
 
 fn unregister_runs_for_key(key: &str) {
-    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap();
+    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = runs.as_mut() {
         map.retain(|_, mapped_key| mapped_key != key);
     }
@@ -121,7 +121,7 @@ fn unregister_runs_for_key(key: &str) {
 pub(crate) fn pending_process_keys() -> Vec<String> {
     let mut keys = HashSet::new();
     {
-        let runs = ACTIVE_RUN_KEYS.lock().unwrap();
+        let runs = ACTIVE_RUN_KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(map) = runs.as_ref() {
             keys.extend(
                 map.values()
@@ -131,7 +131,7 @@ pub(crate) fn pending_process_keys() -> Vec<String> {
         }
     }
     {
-        let processes = ACTIVE_PROCESSES.lock().unwrap();
+        let processes = ACTIVE_PROCESSES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(map) = processes.as_ref() {
             keys.extend(
                 map.keys()
@@ -154,21 +154,21 @@ pub(crate) fn configure_process_group(command: &mut Command) {
 }
 
 pub(crate) fn ensure_process_registry() {
-    let mut reg = ACTIVE_PROCESSES.lock().unwrap();
+    let mut reg = ACTIVE_PROCESSES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if reg.is_none() {
         *reg = Some(HashMap::new());
     }
 }
 
 pub(crate) fn ensure_stdin_registry() {
-    let mut reg = ACTIVE_STDIN.lock().unwrap();
+    let mut reg = ACTIVE_STDIN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if reg.is_none() {
         *reg = Some(HashMap::new());
     }
 }
 
 pub(crate) fn ensure_permission_registry() {
-    let mut reg = PENDING_PERMISSIONS.lock().unwrap();
+    let mut reg = PENDING_PERMISSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if reg.is_none() {
         *reg = Some(HashMap::new());
     }
@@ -197,7 +197,7 @@ pub(crate) fn native_permission_mode() -> &'static str {
 /// 将权限模式同步给已运行的 Claude Code 进程，无需等到下次重建会话。
 pub(crate) fn sync_active_permission_mode() {
     let stdins = {
-        let reg = ACTIVE_STDIN.lock().unwrap();
+        let reg = ACTIVE_STDIN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         reg.as_ref()
             .map(|map| map.values().cloned().collect::<Vec<_>>())
             .unwrap_or_default()
@@ -225,7 +225,7 @@ pub(crate) fn sync_active_permission_mode() {
 /// 切换为静默授权时，立即放行已经弹出的普通工具请求。
 pub(crate) fn allow_pending_non_question_permissions() {
     let pending = {
-        let mut reg = PENDING_PERMISSIONS.lock().unwrap();
+        let mut reg = PENDING_PERMISSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(map) = reg.as_mut() else {
             return;
         };
@@ -250,7 +250,7 @@ pub(crate) fn allow_pending_non_question_permissions() {
 
 pub(crate) fn register_active_process(key: &str, child: Arc<Mutex<Child>>) {
     ensure_process_registry();
-    let mut reg = ACTIVE_PROCESSES.lock().unwrap();
+    let mut reg = ACTIVE_PROCESSES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = reg.as_mut() {
         map.insert(key.to_string(), child);
     }
@@ -258,7 +258,7 @@ pub(crate) fn register_active_process(key: &str, child: Arc<Mutex<Child>>) {
 
 pub(crate) fn register_active_stdin(key: &str, stdin: Arc<Mutex<std::process::ChildStdin>>) {
     ensure_stdin_registry();
-    let mut reg = ACTIVE_STDIN.lock().unwrap();
+    let mut reg = ACTIVE_STDIN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = reg.as_mut() {
         map.insert(key.to_string(), stdin);
     }
@@ -267,11 +267,11 @@ pub(crate) fn register_active_stdin(key: &str, stdin: Arc<Mutex<std::process::Ch
 pub(crate) fn unregister_active_process(key: &str) {
     clear_queued_prompts(key);
     unregister_runs_for_key(key);
-    let mut reg = ACTIVE_PROCESSES.lock().unwrap();
+    let mut reg = ACTIVE_PROCESSES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = reg.as_mut() {
         map.remove(key);
     }
-    let mut stdin_reg = ACTIVE_STDIN.lock().unwrap();
+    let mut stdin_reg = ACTIVE_STDIN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = stdin_reg.as_mut() {
         map.remove(key);
     }
@@ -284,11 +284,11 @@ pub(crate) fn rekey_active_session(old_key: &str, new_key: &str, child: Arc<Mute
     }
     let session_model = get_active_session_model(old_key);
     let stdin = {
-        let mut reg = ACTIVE_STDIN.lock().unwrap();
+        let mut reg = ACTIVE_STDIN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         reg.as_mut().and_then(|map| map.remove(old_key))
     };
     {
-        let mut reg = ACTIVE_PROCESSES.lock().unwrap();
+        let mut reg = ACTIVE_PROCESSES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         if let Some(map) = reg.as_mut() {
             map.remove(old_key);
         }
@@ -321,7 +321,7 @@ pub(crate) fn normalize_process_model(model: Option<&str>) -> String {
 }
 
 pub(crate) fn set_active_session_model(key: &str, model: &str) {
-    let mut reg = ACTIVE_SESSION_MODELS.lock().unwrap();
+    let mut reg = ACTIVE_SESSION_MODELS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if reg.is_none() {
         *reg = Some(HashMap::new());
     }
@@ -331,19 +331,19 @@ pub(crate) fn set_active_session_model(key: &str, model: &str) {
 }
 
 pub(crate) fn get_active_session_model(key: &str) -> Option<String> {
-    let reg = ACTIVE_SESSION_MODELS.lock().unwrap();
+    let reg = ACTIVE_SESSION_MODELS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     reg.as_ref().and_then(|map| map.get(key).cloned())
 }
 
 pub(crate) fn clear_active_session_model(key: &str) {
-    let mut reg = ACTIVE_SESSION_MODELS.lock().unwrap();
+    let mut reg = ACTIVE_SESSION_MODELS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = reg.as_mut() {
         map.remove(key);
     }
 }
 
 pub(crate) fn mark_model_restart(key: &str) {
-    let mut set = MODEL_RESTART_SESSIONS.lock().unwrap();
+    let mut set = MODEL_RESTART_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if set.is_none() {
         *set = Some(HashSet::new());
     }
@@ -353,12 +353,12 @@ pub(crate) fn mark_model_restart(key: &str) {
 }
 
 pub(crate) fn take_model_restart(key: &str) -> bool {
-    let mut set = MODEL_RESTART_SESSIONS.lock().unwrap();
+    let mut set = MODEL_RESTART_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     set.as_mut().is_some_and(|s| s.remove(key))
 }
 
 pub(crate) fn is_model_restart(key: &str) -> bool {
-    let set = MODEL_RESTART_SESSIONS.lock().unwrap();
+    let set = MODEL_RESTART_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     set.as_ref().is_some_and(|s| s.contains(key))
 }
 
@@ -370,7 +370,7 @@ pub(crate) fn is_stream_model_restart(registry_key: &str, session_id: &Option<St
 }
 
 pub(crate) fn mark_graceful_shutdown(key: &str) {
-    let mut set = GRACEFUL_SHUTDOWN_SESSIONS.lock().unwrap();
+    let mut set = GRACEFUL_SHUTDOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if set.is_none() {
         *set = Some(HashSet::new());
     }
@@ -380,12 +380,12 @@ pub(crate) fn mark_graceful_shutdown(key: &str) {
 }
 
 pub(crate) fn take_graceful_shutdown(key: &str) -> bool {
-    let mut set = GRACEFUL_SHUTDOWN_SESSIONS.lock().unwrap();
+    let mut set = GRACEFUL_SHUTDOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     set.as_mut().is_some_and(|s| s.remove(key))
 }
 
 pub(crate) fn is_graceful_shutdown(registry_key: &str, session_id: &Option<String>) -> bool {
-    let set = GRACEFUL_SHUTDOWN_SESSIONS.lock().unwrap();
+    let set = GRACEFUL_SHUTDOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(s) = set.as_ref() else {
         return false;
     };
@@ -393,7 +393,7 @@ pub(crate) fn is_graceful_shutdown(registry_key: &str, session_id: &Option<Strin
 }
 
 pub(crate) fn clear_graceful_shutdown(registry_key: &str, session_id: &Option<String>) {
-    let mut set = GRACEFUL_SHUTDOWN_SESSIONS.lock().unwrap();
+    let mut set = GRACEFUL_SHUTDOWN_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(s) = set.as_mut() {
         s.remove(registry_key);
         if let Some(sid) = session_id {
@@ -403,7 +403,7 @@ pub(crate) fn clear_graceful_shutdown(registry_key: &str, session_id: &Option<St
 }
 
 pub(crate) fn queued_prompts_snapshot(session_key: &str) -> Vec<QueuedPrompt> {
-    let queues = PENDING_PROMPTS.lock().unwrap();
+    let queues = PENDING_PROMPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     queues
         .as_ref()
         .and_then(|map| map.get(session_key))
@@ -420,7 +420,7 @@ pub(crate) fn emit_queued_prompts(app: &AppHandle, session_key: &str) {
 }
 
 fn restore_queued_prompt_front(session_key: &str, prompt: QueuedPrompt) -> usize {
-    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    let mut queues = PENDING_PROMPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = queues.get_or_insert_with(HashMap::new);
     let queue = map.entry(session_key.to_string()).or_default();
     queue.push_front(prompt);
@@ -465,7 +465,7 @@ pub(crate) fn dispatch_next_queued_prompt(app: &AppHandle, session_key: &str) ->
     }
 }
 pub(crate) fn queued_prompt_count(session_key: &str) -> usize {
-    let queues = PENDING_PROMPTS.lock().unwrap();
+    let queues = PENDING_PROMPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     queues
         .as_ref()
         .and_then(|map| map.get(session_key))
@@ -474,7 +474,7 @@ pub(crate) fn queued_prompt_count(session_key: &str) -> usize {
 }
 
 pub(crate) fn enqueue_prompt(session_key: &str, prompt: QueuedPrompt) -> usize {
-    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    let mut queues = PENDING_PROMPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = queues.get_or_insert_with(HashMap::new);
     let queue = map.entry(session_key.to_string()).or_default();
     queue.push_back(prompt);
@@ -482,7 +482,7 @@ pub(crate) fn enqueue_prompt(session_key: &str, prompt: QueuedPrompt) -> usize {
 }
 
 pub(crate) fn take_queued_prompt(session_key: &str) -> Option<QueuedPrompt> {
-    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    let mut queues = PENDING_PROMPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = queues.as_mut()?;
     let queue = map.get_mut(session_key)?;
     let prompt = queue.pop_front();
@@ -493,7 +493,7 @@ pub(crate) fn take_queued_prompt(session_key: &str) -> Option<QueuedPrompt> {
 }
 
 pub(crate) fn remove_queued_prompt(session_key: &str, prompt_id: &str) -> bool {
-    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    let mut queues = PENDING_PROMPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let Some(map) = queues.as_mut() else {
         return false;
     };
@@ -509,7 +509,7 @@ pub(crate) fn remove_queued_prompt(session_key: &str, prompt_id: &str) -> bool {
     removed
 }
 pub(crate) fn clear_queued_prompts(session_key: &str) -> usize {
-    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    let mut queues = PENDING_PROMPTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     queues
         .as_mut()
         .and_then(|map| map.remove(session_key))
@@ -535,7 +535,7 @@ pub(crate) fn write_stdin_json(
 
 pub(crate) fn reject_pending_permissions_for_session(session_key: &str, reason: &str) {
     let pending = {
-        let mut reg = PENDING_PERMISSIONS.lock().unwrap();
+        let mut reg = PENDING_PERMISSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let Some(map) = reg.as_mut() else {
             return;
         };
@@ -558,12 +558,12 @@ pub(crate) fn reject_pending_permissions_for_session(session_key: &str, reason: 
 }
 
 pub(crate) fn get_active_stdin(key: &str) -> Option<Arc<Mutex<std::process::ChildStdin>>> {
-    let reg = ACTIVE_STDIN.lock().unwrap();
+    let reg = ACTIVE_STDIN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     reg.as_ref().and_then(|map| map.get(key).cloned())
 }
 
 pub(crate) fn is_process_registered(key: &str) -> bool {
-    let reg = ACTIVE_PROCESSES.lock().unwrap();
+    let reg = ACTIVE_PROCESSES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     reg.as_ref().is_some_and(|map| map.contains_key(key))
 }
 
@@ -595,7 +595,7 @@ pub(crate) fn try_send_interrupt(session_key: &str) -> bool {
 pub(crate) static TURN_ACTIVE: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 pub(crate) fn mark_turn_active(key: &str) {
-    let mut set = TURN_ACTIVE.lock().unwrap();
+    let mut set = TURN_ACTIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if set.is_none() {
         *set = Some(HashSet::new());
     }
@@ -605,14 +605,14 @@ pub(crate) fn mark_turn_active(key: &str) {
 }
 
 pub(crate) fn clear_turn_active(key: &str) {
-    let mut set = TURN_ACTIVE.lock().unwrap();
+    let mut set = TURN_ACTIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(s) = set.as_mut() {
         s.remove(key);
     }
 }
 
 pub(crate) fn is_turn_active(key: &str) -> bool {
-    let set = TURN_ACTIVE.lock().unwrap();
+    let set = TURN_ACTIVE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     set.as_ref().is_some_and(|s| s.contains(key))
 }
 
@@ -654,7 +654,7 @@ pub(crate) fn emit_turn_continued(app: &AppHandle, session_id: &str) {
 static TURN_COMPLETE_GENERATIONS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 
 fn next_turn_complete_generation(session_id: &str) -> u64 {
-    let mut generations = TURN_COMPLETE_GENERATIONS.lock().unwrap();
+    let mut generations = TURN_COMPLETE_GENERATIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = generations.get_or_insert_with(HashMap::new);
     let generation = map.entry(session_id.to_string()).or_insert(0);
     *generation += 1;
@@ -662,7 +662,7 @@ fn next_turn_complete_generation(session_id: &str) -> u64 {
 }
 
 fn is_latest_turn_complete_generation(session_id: &str, generation: u64) -> bool {
-    let generations = TURN_COMPLETE_GENERATIONS.lock().unwrap();
+    let generations = TURN_COMPLETE_GENERATIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     generations
         .as_ref()
         .and_then(|map| map.get(session_id))
@@ -670,7 +670,7 @@ fn is_latest_turn_complete_generation(session_id: &str, generation: u64) -> bool
 }
 
 fn clear_turn_complete_generation_if_latest(session_id: &str, generation: u64) {
-    let mut generations = TURN_COMPLETE_GENERATIONS.lock().unwrap();
+    let mut generations = TURN_COMPLETE_GENERATIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = generations.as_mut() {
         if map.get(session_id).is_some_and(|current| *current == generation) {
             map.remove(session_id);
@@ -1017,6 +1017,29 @@ mod tests {
         clear_queued_prompts(&key);
     }
 
+    #[test]
+    fn poisoned_mutex_recovers_inner_value() {
+        // 模拟静态 Mutex 毒锁：持有 guard 时 panic，随后用 into_inner 恢复
+        let mutex = Mutex::new(Some(vec![1, 2, 3]));
+        let handle = {
+            let mutex = Arc::new(mutex);
+            let inner = Arc::clone(&mutex);
+            let handle = std::thread::spawn(move || {
+                let _guard = inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+                panic!("simulated panic while holding the lock");
+            });
+            std::thread::sleep(Duration::from_millis(20));
+            (handle, mutex)
+        };
+        let (handle, mutex) = handle;
+        let _ = handle.join();
+
+        let mut guard = mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(guard.as_ref().map(|v| v.len()), Some(3));
+        guard.as_mut().unwrap().push(4);
+        assert_eq!(guard.as_ref().map(|v| v.len()), Some(4));
+    }
+
     #[cfg(unix)]
     #[test]
     fn configured_child_uses_own_process_group() {
@@ -1038,7 +1061,7 @@ mod tests {
     }
 }
 pub(crate) fn force_kill_registered_process(key: &str) -> bool {
-    let reg = ACTIVE_PROCESSES.lock().unwrap();
+    let reg = ACTIVE_PROCESSES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = reg.as_ref() {
         if let Some(child_arc) = map.get(key) {
             let child_arc = Arc::clone(child_arc);
@@ -1056,7 +1079,7 @@ pub(crate) fn force_kill_registered_process(key: &str) -> bool {
 pub(crate) static ABORTED_SESSIONS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
 pub(crate) fn mark_session_aborted(key: &str) {
-    let mut set = ABORTED_SESSIONS.lock().unwrap();
+    let mut set = ABORTED_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if set.is_none() {
         *set = Some(HashSet::new());
     }
@@ -1066,12 +1089,12 @@ pub(crate) fn mark_session_aborted(key: &str) {
 }
 
 pub(crate) fn is_session_aborted(key: &str) -> bool {
-    let set = ABORTED_SESSIONS.lock().unwrap();
+    let set = ABORTED_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     set.as_ref().is_some_and(|s| s.contains(key))
 }
 
 pub(crate) fn clear_session_aborted(key: &str) {
-    let mut set = ABORTED_SESSIONS.lock().unwrap();
+    let mut set = ABORTED_SESSIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(s) = set.as_mut() {
         s.remove(key);
     }

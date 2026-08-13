@@ -1012,17 +1012,53 @@ pub fn get_api_profile_config(profile_id: String) -> Result<ClaudeCodeApiConfig,
     Ok(config_from_profile(profile))
 }
 
-/// 返回指定配置的原始 API Key，用于前端的「复制」与「显示首尾」预览。
-/// 注意：仅在用户主动点击复制 / 显示时调用，避免将密钥放入常规列表数据中。
+/// 生成首尾可见的脱敏 Key，例如 `sk-a••••••••••wxyz`；空 Key 返回空串。
+pub(crate) fn mask_api_key_for_display(key: &str) -> String {
+    let trimmed = key.trim();
+    let chars: Vec<char> = trimmed.chars().collect();
+    if chars.is_empty() {
+        return String::new();
+    }
+    if chars.len() <= 8 {
+        return "•".repeat(chars.len());
+    }
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 4..].iter().collect();
+    let dots = 6usize.max(12.min(chars.len() - 8));
+    format!("{head}{}{tail}", "•".repeat(dots))
+}
+
+/// 返回指定配置的脱敏 API Key（首尾可见）。明文密钥不进入前端。
 #[tauri::command]
-pub fn get_api_profile_key(profile_id: String) -> Result<String, String> {
+pub fn get_api_profile_key_masked(profile_id: String) -> Result<String, String> {
     let store = load_api_profiles_store();
     let profile = store
         .profiles
         .iter()
         .find(|profile| profile.id == profile_id)
         .ok_or_else(|| "API profile not found".to_string())?;
-    Ok(profile.api_key.clone())
+    Ok(mask_api_key_for_display(&profile.api_key))
+}
+
+/// 在 Rust 侧将指定配置的完整 API Key 复制到系统剪贴板，不把明文传给前端。
+#[tauri::command]
+pub fn copy_api_profile_key(profile_id: String) -> Result<bool, String> {
+    let store = load_api_profiles_store();
+    let profile = store
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or_else(|| "API profile not found".to_string())?;
+    let key = profile.api_key.trim();
+    if key.is_empty() {
+        return Ok(false);
+    }
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("无法访问系统剪贴板: {e}"))?;
+    clipboard
+        .set_text(key.to_string())
+        .map_err(|e| format!("写入剪贴板失败: {e}"))?;
+    Ok(true)
 }
 
 /// 立即把当前选中的默认模型写入配置文件：

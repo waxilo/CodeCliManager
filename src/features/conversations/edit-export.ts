@@ -2,7 +2,7 @@ import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
 import { toMillis } from '../../utils';
-import { showCopyToastMsg } from '../../ui';
+import { showCopyToastMsg, showToast } from '../../ui';
 import type { Conversation } from '../../types';
 import { normalizeConversation } from './normalize';
 export function sanitizeFileName(name: string): string {
@@ -67,7 +67,7 @@ export async function exportConversationToMarkdown(
     if (saved) showCopyToastMsg('已导出会话');
   } catch (e) {
     console.error('Failed to export conversation:', e);
-    alert('导出会话失败: ' + String(e));
+    showToast('导出会话失败: ' + String(e));
   }
 }
 
@@ -117,7 +117,7 @@ export async function saveEdit(id: string, sourcePath: string | null = null) {
     shellApi.render();
   } catch (e) {
     console.error('Failed to update title:', e);
-    alert('修改标题失败: ' + String(e));
+    showToast('修改标题失败: ' + String(e));
   }
 }
 

@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
 
 #[derive(Debug, Serialize)]
@@ -31,6 +32,7 @@ impl ExecutePromptResult {
 
 use crate::claude::spawn_claude_stream;
 use crate::claude::stream_events::*;
+use crate::config_io::atomic_write;
 use crate::history::*;
 use crate::session::*;
 
@@ -133,7 +135,9 @@ pub async fn execute_prompt(
     register_run_key(&run_id, &initial_run_key);
     let run_id_for_task = run_id.clone();
     tauri::async_runtime::spawn(async move {
-        let before_conversations = load_claude_history();
+        let before_conversations = tauri::async_runtime::spawn_blocking(load_claude_history)
+            .await
+            .unwrap_or_default();
         let before_ids: std::collections::HashSet<String> =
             before_conversations.iter().map(|c| c.id.clone()).collect();
 
@@ -192,7 +196,10 @@ pub async fn execute_prompt(
         match stream_result {
             Ok(Ok(outcome)) => match outcome {
                 StreamOutcome::Success(final_session_id) => {
-                    let after_conversations = load_claude_history();
+                    let after_conversations =
+                        tauri::async_runtime::spawn_blocking(load_claude_history)
+                            .await
+                            .unwrap_or_default();
                     let resolved_id = final_session_id
                         .or(active_cid.clone())
                         .or_else(|| {
@@ -368,29 +375,36 @@ pub async fn abort_session(
         }
     }
 
-    // runId 精确指向 pending 或已重映射的正式 session，并始终优先于 conversationId。
-    if let Some(ref key) = run_key {
-        let _ = app.emit("session-aborting", Some(key.clone()));
-        // 即使进程尚未注册，也先标记；spawn 注册后会兑现取消。
-        mark_session_aborted(key);
-        aborted = soft_abort_session(key, force_kill) || key.starts_with("pending-");
+    // 确定要取消的目标：runId 优先（可精确指向 pending），其次 conversationId，
+    // 最后回退到「唯一 pending」。确定后再把阻塞轮询移到 blocking 线程。
+    let abort_target: Option<String> = if let Some(ref key) = run_key {
+        Some(key.clone())
     } else if let Some(ref cid) = conversation_id {
-        let _ = app.emit("session-aborting", Some(cid.clone()));
-        aborted = soft_abort_session(cid, force_kill);
-    }
-
-    // 旧前端未传 runId：仅当唯一 pending 时安全兼容；并发时拒绝而非任意误杀。
-    if !aborted && requested_run_id.is_none() && conversation_id.is_none() {
+        Some(cid.clone())
+    } else if requested_run_id.is_none() && conversation_id.is_none() {
         let pending_keys = pending_process_keys();
         match pending_keys.as_slice() {
-            [key] => {
-                let _ = app.emit("session-aborting", Some(key.clone()));
-                mark_session_aborted(key);
-                aborted = soft_abort_session(key, force_kill) || key.starts_with("pending-");
-            }
-            [] => {}
+            [key] => Some(key.clone()),
+            [] => None,
             _ => return Err("存在多个待启动会话，请提供 runId 以精确取消".to_string()),
         }
+    } else {
+        None
+    };
+
+    if let Some(key) = abort_target {
+        let _ = app.emit("session-aborting", Some(key.clone()));
+        // 即使进程尚未注册，也先标记；spawn 注册后会兑现取消。
+        mark_session_aborted(&key);
+        let was_pending = key.starts_with("pending-");
+        let force = force_kill;
+        // soft_abort_session 内部有最长 3s 的轮询，移到 spawn_blocking 避免卡住 async worker。
+        let aborted_by_session = tauri::async_runtime::spawn_blocking(move || {
+            soft_abort_session(&key, force)
+        })
+        .await
+        .map_err(|e| format!("取消会话失败: {e}"))?;
+        aborted = aborted_by_session || was_pending;
     }
 
     if !aborted {
@@ -500,90 +514,101 @@ pub async fn retry_message(
     // 1. 如果正在运行，先优雅结束常驻进程
     let _ = session_stop_graceful_async(conversation_id.clone(), "重新生成/撤回").await;
 
-    // 2. 找到 JSONL 文件
-    let path = find_claude_session_file(&conversation_id)
-        .ok_or_else(|| format!("找不到会话文件: {}", conversation_id))?;
+    // 2-5. 找文件、读、解析、截断并写回：全部在 blocking 线程执行，避免卡住 async worker。
+    let cid_for_truncate = conversation_id.clone();
+    let mode_for_truncate = mode.clone();
+    let (last_user_prompt, path): (Option<String>, PathBuf) =
+        tauri::async_runtime::spawn_blocking(move || {
+        let path = find_claude_session_file(&cid_for_truncate)
+            .ok_or_else(|| format!("找不到会话文件: {}", cid_for_truncate))?;
 
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("读取会话文件失败: {}", e))?;
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("读取会话文件失败: {}", e))?;
 
-    // 3. 解析所有行，找到截断点；用户消息必须是「人类消息」，不能把 tool_result 当成用户提问
-    let mut last_user_prompt: Option<String> = None;
-    let mut last_user_line_idx: i64 = -1;
-    let mut last_assistant_line_idx: i64 = -1;
-    let lines: Vec<&str> = content.lines().collect();
+        // 解析所有行，找到截断点；用户消息必须是「人类消息」，不能把 tool_result 当成用户提问
+        let mut last_user_prompt: Option<String> = None;
+        let mut last_user_line_idx: i64 = -1;
+        let mut last_assistant_line_idx: i64 = -1;
+        let lines: Vec<&str> = content.lines().collect();
 
-    for (i, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() {
-            continue;
+        for (i, line) in lines.iter().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let value: serde_json::Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if is_human_user_message_line(&value) {
+                last_user_line_idx = i as i64;
+                if let Some(message) = value.get("message") {
+                    last_user_prompt = extract_human_user_prompt(message);
+                }
+                continue;
+            }
+
+            let role = value
+                .get("message")
+                .and_then(|m| m.get("role"))
+                .and_then(|r| r.as_str())
+                .unwrap_or("");
+            if role == "assistant" {
+                last_assistant_line_idx = i as i64;
+            }
         }
-        let value: serde_json::Value = match serde_json::from_str(line) {
-            Ok(v) => v,
-            Err(_) => continue,
+
+        // 确定截断位置
+        let truncate_idx: usize = match mode_for_truncate.as_str() {
+            "regenerate" => {
+                if last_user_prompt.is_none() {
+                    return Err("未找到可重试的用户消息".to_string());
+                }
+                if last_assistant_line_idx < 0 {
+                    return Err("未找到可重试的 AI 回复".to_string());
+                }
+                if last_assistant_line_idx <= last_user_line_idx {
+                    return Err("数据异常：AI 回复在用户消息之前，无法重试".to_string());
+                }
+                // 删除最后一轮中「最后一条人类消息之后」的全部内容，避免留下半截 tool 回合
+                (last_user_line_idx as usize) + 1
+            }
+            "undo" => {
+                if last_user_line_idx < 0 {
+                    return Err("未找到可撤回的用户消息".to_string());
+                }
+                last_user_line_idx as usize
+            }
+            _ => return Err(format!("未知模式: {}", mode_for_truncate)),
         };
 
-        if is_human_user_message_line(&value) {
-            last_user_line_idx = i as i64;
-            if let Some(message) = value.get("message") {
-                last_user_prompt = extract_human_user_prompt(message);
-            }
-            continue;
-        }
+        // 截断并写回 JSONL（保留末尾换行，符合 JSONL 习惯）
+        let new_content = if truncate_idx == 0 {
+            String::new()
+        } else {
+            format!("{}\n", lines[..truncate_idx].join("\n"))
+        };
+        atomic_write(&path, new_content.as_bytes())
+            .map_err(|e| format!("写入会话文件失败: {}", e))?;
+        invalidate_session_cache(&path);
 
-        let role = value
-            .get("message")
-            .and_then(|m| m.get("role"))
-            .and_then(|r| r.as_str())
-            .unwrap_or("");
-        if role == "assistant" {
-            last_assistant_line_idx = i as i64;
-        }
-    }
+        eprintln!(
+            "[retry_message] 截断会话 {}（模式={}），保留 {} 行，删除了 {} 行",
+            cid_for_truncate,
+            mode_for_truncate,
+            truncate_idx,
+            lines.len().saturating_sub(truncate_idx),
+        );
 
-    // 4. 确定截断位置
-    let truncate_idx = match mode.as_str() {
-        "regenerate" => {
-            if last_user_prompt.is_none() {
-                return Err("未找到可重试的用户消息".into());
-            }
-            if last_assistant_line_idx < 0 {
-                return Err("未找到可重试的 AI 回复".into());
-            }
-            if last_assistant_line_idx <= last_user_line_idx {
-                return Err("数据异常：AI 回复在用户消息之前，无法重试".into());
-            }
-            // 删除最后一轮中「最后一条人类消息之后」的全部内容，避免留下半截 tool 回合
-            (last_user_line_idx as usize) + 1
-        }
-        "undo" => {
-            if last_user_line_idx < 0 {
-                return Err("未找到可撤回的用户消息".into());
-            }
-            last_user_line_idx as usize
-        }
-        _ => return Err(format!("未知模式: {}", mode)),
-    };
-
-    // 5. 截断并写回 JSONL（保留末尾换行，符合 JSONL 习惯）
-    let new_content = if truncate_idx == 0 {
-        String::new()
-    } else {
-        format!("{}\n", lines[..truncate_idx].join("\n"))
-    };
-    std::fs::write(&path, &new_content)
-        .map_err(|e| format!("写入会话文件失败: {}", e))?;
-    invalidate_session_cache(&path);
-
-    eprintln!(
-        "[retry_message] 截断会话 {}（模式={}），保留 {} 行，删除了 {} 行",
-        conversation_id,
-        mode,
-        truncate_idx,
-        lines.len().saturating_sub(truncate_idx),
-    );
+        Ok::<(Option<String>, PathBuf), String>((last_user_prompt, path))
+    })
+    .await
+    .map_err(|e| format!("重试处理失败: {e}"))??;
 
     // 6. 通知前端更新消息列表（从截断后的 JSONL 重新加载）
-    let after_conv = load_claude_history()
+    let after_conv = tauri::async_runtime::spawn_blocking(load_claude_history)
+        .await
+        .unwrap_or_default()
         .into_iter()
         .find(|c| c.id == conversation_id);
     if let Some(conv) = after_conv {
@@ -614,7 +639,9 @@ pub async fn retry_message(
             let cid = conversation_id.clone();
 
             // 获取会话当前的模型和项目目录（同步于 execute_prompt 的行为）
-            let regen_info = load_claude_history()
+            let regen_info = tauri::async_runtime::spawn_blocking(load_claude_history)
+                .await
+                .unwrap_or_default()
                 .iter()
                 .find(|c| c.id == cid)
                 .map(|c| (c.last_model.clone(), c.project_dir.clone()))
@@ -661,7 +688,10 @@ pub async fn retry_message(
                 match stream_result {
                     Ok(Ok(outcome)) => match outcome {
                         StreamOutcome::Success(_final_session_id) => {
-                            let after_conversations = load_claude_history();
+                            let after_conversations =
+                                tauri::async_runtime::spawn_blocking(load_claude_history)
+                                    .await
+                                    .unwrap_or_default();
                             if let Some(conv) = after_conversations.iter().find(|c| c.id == cid) {
                                 let payload = conversation_to_payload(conv);
                                 let _ = app_clone.emit("messages-updated", &payload);

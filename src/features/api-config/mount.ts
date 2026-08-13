@@ -1,7 +1,7 @@
 import { appState } from '../../state';
 import * as api from '../../api';
-import { escapeHtml, copyTextToClipboard } from '../../utils';
-import { showConfirmDialog, showCopyToastMsg } from '../../ui';
+import { escapeHtml } from '../../utils';
+import { showConfirmDialog, showCopyToastMsg, showToast } from '../../ui';
 import type { ClaudeCodeApiConfig, FetchedModel } from '../../types';
 import { fillSettingsForm, refreshSettingsModal, setApiKeyBoxMode, fillOfficialView } from './profile-form';
 import { renderSettingsProfileList, showProfileContextMenu, closeProfileContextMenu } from './profile-list';
@@ -232,7 +232,7 @@ export async function mountApiConfigView() {
     const formData = new FormData(form);
     const profileName = String(formData.get('profileName') || '').trim();
     if (!profileName) {
-      alert('请先填写配置名称');
+      showToast('请先填写配置名称');
       return false;
     }
 
@@ -279,7 +279,7 @@ export async function mountApiConfigView() {
       return true;
     } catch (e) {
       console.error('保存模型配置失败:', e);
-      alert('保存模型配置失败: ' + String(e));
+      showToast('保存模型配置失败: ' + String(e));
       return false;
     }
   };
@@ -636,7 +636,7 @@ export async function mountApiConfigView() {
           }
         }
       } catch (e) {
-        alert('同步模型失败: ' + String(e));
+        showToast('同步模型失败: ' + String(e));
       } finally {
         if (syncBtn) {
           syncBtn.disabled = false;
@@ -754,14 +754,14 @@ export async function mountApiConfigView() {
         }
         await loadChatModelOptions();
       } catch (e) {
-        alert('应用 API 配置失败: ' + String(e));
+        showToast('应用 API 配置失败: ' + String(e));
       }
     };
 
     const deleteProfile = async (profileId: string, profileName: string) => {
       const confirmed = await showConfirmDialog({
         title: '删除配置',
-        message: `确定要删除配置「${escapeHtml(profileName)}」吗？`,
+        message: `确定要删除配置「${profileName}」吗？`,
         sub: '删除后无法恢复；若正在使用该配置，将自动切换到其他配置。',
         confirmLabel: '删除',
       });
@@ -774,7 +774,7 @@ export async function mountApiConfigView() {
           livePathEl.textContent = `配置文件：${refreshed.state.current.configPath}`;
         }
       } catch (e) {
-        alert('删除配置失败: ' + String(e));
+        showToast('删除配置失败: ' + String(e));
       }
     };
 
@@ -790,7 +790,7 @@ export async function mountApiConfigView() {
         }
         await loadChatModelOptions();
       } catch (e) {
-        alert('切换到官方默认失败: ' + String(e));
+        showToast('切换到官方默认失败: ' + String(e));
       }
     };
 
@@ -821,7 +821,7 @@ export async function mountApiConfigView() {
       try {
         await refreshSettingsModal(overlay, profileId, handleProfileConfigLoaded);
       } catch (e) {
-        alert('加载 API 配置失败: ' + String(e));
+        showToast('加载 API 配置失败: ' + String(e));
       }
     });
 
@@ -891,21 +891,22 @@ export async function mountApiConfigView() {
     const action = target.dataset.action;
     const input = apiKeyBox.querySelector('input[name="apiKey"]') as HTMLInputElement | null;
     const valueEl = apiKeyBox.querySelector('.settings-apikey-display-value') as HTMLElement | null;
-    const fullKey = valueEl?.dataset.full || '';
+    const hasKey = valueEl?.dataset.hasKey === '1';
+    const profileId = overlay.dataset.profileId || null;
 
     if (action === 'edit') {
       setApiKeyBoxMode(overlay, 'edit');
       if (input) {
         input.value = '';
-        input.placeholder = fullKey ? '已配置，留空则不修改' : 'sk-...';
+        input.placeholder = hasKey ? '已配置，留空则不修改' : 'sk-...';
         input.focus();
       }
     } else if (action === 'cancel') {
       if (input) input.value = '';
-      setApiKeyBoxMode(overlay, fullKey ? 'view' : 'empty');
+      setApiKeyBoxMode(overlay, hasKey ? 'view' : 'empty');
     } else if (action === 'copy') {
-      if (!fullKey) return;
-      const ok = await copyTextToClipboard(fullKey);
+      if (!hasKey || !profileId) return;
+      const ok = await api.copyApiProfileKey(profileId);
       showCopyToastMsg(ok ? '已复制密钥' : '复制失败');
     }
   });
@@ -1043,7 +1044,7 @@ export async function mountApiConfigView() {
         }, 1500);
       }
     } catch (e) {
-      alert('应用 API 配置失败: ' + String(e));
+      showToast('应用 API 配置失败: ' + String(e));
       if (applyBtn) applyBtn.textContent = '应用';
     } finally {
       if (applyBtn) applyBtn.disabled = false;
@@ -1105,9 +1106,9 @@ export async function mountApiConfigView() {
       } else {
         message = 'CC Switch 配置已全部添加，无需重复导入。';
       }
-      alert(message);
+      showToast(message, 'success');
     } catch (e) {
-      alert('从 CC Switch 导入失败: ' + String(e));
+      showToast('从 CC Switch 导入失败: ' + String(e));
     } finally {
       if (importBtn) {
         importBtn.disabled = false;
@@ -1135,7 +1136,7 @@ export async function mountApiConfigView() {
     bindModelConfigEvents();
   } catch (e) {
     if (!isMountCurrent()) return;
-    alert('加载 API 配置失败: ' + String(e));
+    showToast('加载 API 配置失败: ' + String(e));
     close();
   }
 }

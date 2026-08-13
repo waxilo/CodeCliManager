@@ -200,7 +200,7 @@ export function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: bo
         </span>
       </div>
       <div class="workspace-body">
-        <div class="workspace-appState.conversations">
+        <div class="workspace-conversations">
           ${ws.conversations.map((c) => renderConversationItemHtml(c)).join('')}
         </div>
       </div>

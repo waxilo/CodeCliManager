@@ -1,6 +1,7 @@
 import { appState } from '../../state';
 import * as api from '../../api';
 import { shellApi } from '../../app/shell/api';
+import { showToast } from '../../ui';
 import type { FetchedModel, KiroModelsStateData, KiroStatusData } from '../../types';
 import { formatKiroExpiry, formatKiroUsageText } from '../api-config/balance-helpers';
 import { getActiveChatModel, loadChatModelOptions, updateChatModelPicker } from '../chat/model-picker';
@@ -215,7 +216,7 @@ export function openKiroModelConfigDialog(): void {
         return true;
       } catch (e) {
         console.error('保存 Kiro 模型配置失败:', e);
-        alert('保存模型配置失败: ' + String(e));
+        showToast('保存模型配置失败: ' + String(e));
         return false;
       }
     },
@@ -240,7 +241,7 @@ export async function applyKiroDefaultModel(model: string): Promise<void> {
     await loadChatModelOptions();
   } catch (e) {
     console.error('设置 Kiro 默认模型失败:', e);
-    alert('设置默认模型失败: ' + String(e));
+    showToast('设置默认模型失败: ' + String(e));
     await refreshKiroModels();
   }
 }
@@ -375,7 +376,7 @@ export async function refreshKiroToken(): Promise<void> {
     scheduleMainBalanceBar();
   } catch (e) {
     console.error('刷新 Kiro 凭据失败:', e);
-    alert('刷新 Kiro 凭据失败: ' + String(e));
+    showToast('刷新 Kiro 凭据失败: ' + String(e));
     await refreshKiroStatus();
   } finally {
     const current = document.querySelector('#kiro-card .kiro-token-refresh') as HTMLButtonElement | null;
@@ -406,7 +407,7 @@ export async function toggleKiroProxy(): Promise<void> {
     scheduleMainBalanceBar();
   } catch (e) {
     console.error('切换 Kiro 代理失败:', e);
-    alert('Kiro 代理操作失败: ' + String(e));
+    showToast('Kiro 代理操作失败: ' + String(e));
     await refreshKiroStatus();
   } finally {
     isTogglingKiroProxy = false;

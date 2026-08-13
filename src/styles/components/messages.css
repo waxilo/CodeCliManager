@@ -130,7 +130,7 @@
 }
 
 .message.user .message-content .markdown-body a {
-  color: #166534;
+  color: var(--color-bubble-user-link);
   text-decoration: underline;
 }
 
@@ -152,7 +152,7 @@
 
 .message.user .message-content .code-block-wrapper pre code,
 .message.user .message-content .code-block-wrapper .hljs {
-  color: #1f2937 !important;
+  color: var(--color-bubble-user-code-text) !important;
   background: transparent !important;
 }
 
@@ -284,7 +284,7 @@
   margin: 0.75em 0;
   border-radius: 8px;
   overflow: hidden;
-  background: #0d1117; /* GitHub dark bg */
+  background: var(--color-code-bg);
   border: 1px solid var(--color-bg-surface-hover);
 }
 
@@ -293,15 +293,15 @@
   align-items: center;
   justify-content: space-between;
   padding: 6px 12px;
-  background: #161b22;
-  border-bottom: 1px solid #30363d;
+  background: var(--color-code-header-bg);
+  border-bottom: 1px solid var(--color-code-border);
 }
 
 .code-lang-badge {
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  color: #8b949e;
+  color: var(--color-code-muted);
   letter-spacing: 0.5px;
 }
 
@@ -310,10 +310,10 @@
   align-items: center;
   gap: 5px;
   padding: 3px 8px;
-  border: 1px solid #30363d;
+  border: 1px solid var(--color-code-border);
   border-radius: 6px;
-  background: #21262d;
-  color: #c9d1d9;
+  background: var(--color-code-btn-bg);
+  color: var(--color-code-text);
   font-size: 11px;
   cursor: pointer;
   opacity: 0;
@@ -327,12 +327,12 @@
 }
 
 .code-copy-btn:hover {
-  background: #30363d;
+  background: var(--color-code-btn-hover-bg);
 }
 
 .code-copy-btn.copied {
-  border-color: #238636;
-  color: #3fb950;
+  border-color: var(--color-status-success-border);
+  color: var(--color-status-success);
 }
 
 .code-block-wrapper pre {
@@ -352,17 +352,17 @@
   background: transparent !important;
   padding: 0;
   border-radius: 0;
-  color: #c9d1d9 !important;
+  color: var(--color-code-text) !important;
   font-size: inherit;
 }
 
 /* JSON 自动检测块 */
 .json-block .code-block-header {
-  background: #1a1a2e;
-  border-bottom-color: #2d2d4a;
+  background: var(--color-code-json-bg);
+  border-bottom-color: var(--color-code-json-border);
 }
 .json-block .code-lang-badge {
-  color: #7b8cff;
+  color: var(--color-code-json-badge);
 }
 
 /* 消息中的代码块样式覆盖 */
@@ -404,7 +404,7 @@
 .code-block-wrapper .hljs,
 .code-block-wrapper pre code {
   background: transparent !important;
-  color: #c9d1d9 !important;
+  color: var(--color-code-text) !important;
 }
 
 /* 兼容旧版 pre */
@@ -424,7 +424,7 @@
 
 .markdown-body th,
 .markdown-body td {
-  border: 1px solid var(--color-bg-surface-hover);
+  border: 1px solid color-mix(in srgb, var(--color-bg-surface-hover) 55%, transparent);
   padding: 6px 10px;
   text-align: left;
 }
@@ -435,8 +435,9 @@
 
 .markdown-body hr {
   border: none;
-  border-top: 1px solid var(--color-bg-surface-hover);
-  margin: 0.75em 0;
+  border-top: 1px solid color-mix(in srgb, var(--color-bg-surface-hover) 45%, transparent);
+  margin: 1.1em 0;
+  opacity: 0.55;
 }
 
 .message.user .markdown-body {
@@ -552,8 +553,8 @@
 }
 
 .msg-copy-btn.copied {
-  color: #3fb950;
-  border-color: #238636;
+  color: var(--color-status-success);
+  border-color: var(--color-status-success-border);
 }
 
 /* ---- 消息操作按钮（重新生成 / 撤回）---- */

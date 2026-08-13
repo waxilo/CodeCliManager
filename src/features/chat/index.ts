@@ -5,6 +5,8 @@ export * from './input-composer';
 export * from './streaming';
 export * from './render-messages';
 export * from './context-indicator';
+export * from './cost-indicator';
+export * from './subagent-progress';
 export * from './render-chat';
 export * from './send';
 export * from './retry';

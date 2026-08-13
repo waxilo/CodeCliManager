@@ -445,6 +445,10 @@ pub(crate) fn process_claude_stream_line(
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        let task_id = system_event_field(&value, "task_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let description = system_event_field(&value, "description")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
@@ -455,6 +459,7 @@ pub(crate) fn process_claude_stream_line(
                             .to_string();
                         let payload = serde_json::json!({
                             "tool_use_id": tool_use_id,
+                            "task_id": task_id,
                             "description": description,
                             "prompt": prompt,
                         });
@@ -468,26 +473,55 @@ pub(crate) fn process_claude_stream_line(
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
+                        let task_id = system_event_field(&value, "task_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
                         let status = system_event_field(&value, "status")
                             .and_then(|v| v.as_str())
                             .unwrap_or("")
                             .to_string();
-                        // 兜底：子代理成功/失败通知即视为完成，避免 tool_result 偶发未匹配时卡死
-                        if !tool_use_id.is_empty() && (status == "success" || status == "error") {
-                            outstanding_task_ids.remove(&tool_use_id);
+                        // CLI 可能下发 completed/failed/stopped，旧版也可能是 success/error
+                        let is_terminal = matches!(
+                            status.as_str(),
+                            "completed" | "success" | "failed" | "error" | "stopped"
+                        );
+                        // 兜底：子代理终态通知即视为完成，避免 tool_result 偶发未匹配时卡死
+                        if is_terminal {
+                            if !tool_use_id.is_empty() {
+                                outstanding_task_ids.remove(&tool_use_id);
+                            }
                         }
+                        // usage 可能嵌套在 usage 对象内，也可能平铺在顶层
+                        let usage = system_event_field(&value, "usage");
+                        let total_tokens = usage
+                            .and_then(|u| u.get("total_tokens"))
+                            .and_then(|v| v.as_u64())
+                            .or_else(|| {
+                                system_event_field(&value, "total_tokens").and_then(|v| v.as_u64())
+                            })
+                            .unwrap_or(0);
+                        let tool_uses = usage
+                            .and_then(|u| u.get("tool_uses"))
+                            .and_then(|v| v.as_u64())
+                            .or_else(|| {
+                                system_event_field(&value, "tool_uses").and_then(|v| v.as_u64())
+                            })
+                            .unwrap_or(0);
+                        let duration_ms = usage
+                            .and_then(|u| u.get("duration_ms"))
+                            .and_then(|v| v.as_u64())
+                            .or_else(|| {
+                                system_event_field(&value, "duration_ms").and_then(|v| v.as_u64())
+                            })
+                            .unwrap_or(0);
                         let payload = serde_json::json!({
                             "tool_use_id": tool_use_id,
+                            "task_id": task_id,
                             "status": status,
-                            "total_tokens": system_event_field(&value, "total_tokens")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            "tool_uses": system_event_field(&value, "tool_uses")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
-                            "duration_ms": system_event_field(&value, "duration_ms")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(0),
+                            "total_tokens": total_tokens,
+                            "tool_uses": tool_uses,
+                            "duration_ms": duration_ms,
                         });
                         emit_message_chunk(app, &sid, "task_progress", &payload.to_string());
                     }

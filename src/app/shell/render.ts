@@ -25,6 +25,7 @@ import { renderChatContent, renderEmptyState, renderChatHeaderHtml } from '../..
 import { renderInputComposerHtml, renderBalanceStatusBarHtml, bindSessionIdCopyEvents, bindQueuedPromptEvents } from '../../features/chat/input-composer';
 import { setSendButtonLoading, isActiveConversationRunning, updateSendButtonState } from '../../features/chat/session-context';
 import { refreshStreamingUI } from '../../features/chat/streaming';
+import { renderSubagentProgressHtml, syncSubagentProgressUI } from '../../features/chat/subagent-progress';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { bindPermissionModeBarEvents } from '../../features/settings/mount';
 import {
@@ -181,6 +182,7 @@ function performRender() {
         ${renderInputComposerHtml()}
         `}
       </div>
+      ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderSubagentProgressHtml() : ''}
       </div>
       ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderBalanceStatusBarHtml() : ''}
     </div>
@@ -197,6 +199,8 @@ function performRender() {
     if (sid && appState.streamingBySession.has(sid)) {
       refreshStreamingUI(sid);
     }
+    // 同步右侧子代理栏显隐与左侧会话栏收起状态（全量 HTML 已嵌入面板时也要补 class）
+    syncSubagentProgressUI();
   }
   remountActiveInteractionPanel();
   if (appState.isKiroViewActive) {

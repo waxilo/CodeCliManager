@@ -129,13 +129,27 @@ pub fn get_git_branch(project_dir: String) -> Result<Option<String>, String> {
 }
 
 // ── 文件引用功能：读取文件内容 ──────────────────────────────────────
-#[tauri::command]
-pub fn read_file_content(file_path: String) -> Result<String, String> {
-    let path = Path::new(&file_path);
-    if !path.is_file() {
+/// 校验可读路径：canonicalize 解析符号链接/`..`，并限制在用户主目录内，
+/// 作为 CSP 之外的纵深防御，避免前端被注入时读取系统级文件。
+fn validate_readable_path(file_path: &str) -> Result<PathBuf, String> {
+    let canonical = Path::new(file_path)
+        .canonicalize()
+        .map_err(|e| format!("文件不存在: {file_path} ({e})"))?;
+    if !canonical.is_file() {
         return Err(format!("文件不存在: {}", file_path));
     }
-    fs::read_to_string(path).map_err(|e| format!("读取文件失败: {}", e))
+    if let Some(home) = dirs::home_dir() {
+        if !canonical.starts_with(&home) {
+            return Err(format!("仅允许读取用户目录内的文件: {}", file_path));
+        }
+    }
+    Ok(canonical)
+}
+
+#[tauri::command]
+pub fn read_file_content(file_path: String) -> Result<String, String> {
+    let path = validate_readable_path(&file_path)?;
+    fs::read_to_string(&path).map_err(|e| format!("读取文件失败: {}", e))
 }
 
 #[tauri::command]
@@ -256,11 +270,8 @@ pub fn write_clipboard_image(
 /// 读取文件为 base64 字符串（用于图片预览）
 #[tauri::command]
 pub fn read_file_base64(file_path: String) -> Result<String, String> {
-    let path = Path::new(&file_path);
-    if !path.is_file() {
-        return Err(format!("文件不存在: {}", file_path));
-    }
-    let bytes = fs::read(path).map_err(|e| format!("读取文件失败: {}", e))?;
+    let path = validate_readable_path(&file_path)?;
+    let bytes = fs::read(&path).map_err(|e| format!("读取文件失败: {}", e))?;
     Ok(STANDARD.encode(&bytes))
 }
 
@@ -296,7 +307,7 @@ pub fn import_external_path(source: String, _project_dir: String) -> Result<Impo
 
 #[cfg(test)]
 mod tests {
-    use super::validate_clipboard_file_name;
+    use super::{validate_clipboard_file_name, validate_readable_path};
 
     #[test]
     fn accepts_safe_clipboard_image_names() {
@@ -320,5 +331,17 @@ mod tests {
         ] {
             assert!(validate_clipboard_file_name(name).is_err(), "accepted {name}");
         }
+    }
+
+    #[test]
+    fn rejects_nonexistent_read_paths() {
+        assert!(validate_readable_path("/nonexistent/definitely-missing.txt").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_system_files_outside_home() {
+        // /etc/hosts 存在且在用户主目录之外，应被拒绝
+        assert!(validate_readable_path("/etc/hosts").is_err());
     }
 }

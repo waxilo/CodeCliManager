@@ -1,11 +1,10 @@
 import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
-import { showConfirmDialog, showDeleteConfirm, showCopyToastMsg } from '../../ui';
+import { showConfirmDialog, showDeleteConfirm, showCopyToastMsg, showToast } from '../../ui';
 import { clearStreamingState } from '../chat/streaming';
 import { loadData } from './load';
 import { groupConversationsByWorkspace } from '../sidebar/workspace-grouping';
-import { escapeHtml } from '../../utils';
 import { isConversationInstance } from './normalize';
 export async function deleteConversation(id: string, sourcePath: string | null = null) {
   const conversation = appState.conversations.find((candidate) =>
@@ -45,7 +44,7 @@ export async function deleteConversation(id: string, sourcePath: string | null =
     shellApi.render();
   } catch (e) {
     console.error('Failed to delete conversation:', e);
-    alert('删除会话失败: ' + String(e));
+    showToast('删除会话失败: ' + String(e));
     await loadData();
     shellApi.render();
   }
@@ -60,8 +59,8 @@ export async function deleteWorkspaceConversations(workspacePath: string) {
   const count = ws.conversations.length;
   const confirmed = await showConfirmDialog({
     title: '删除目录下所有会话',
-    message: `确定要删除「${escapeHtml(ws.displayName)}」下的全部 ${count} 个会话吗？`,
-    sub: `目录路径: ${escapeHtml(workspacePath)}\n此操作将永久删除所有会话记录及对应的 Claude 会话文件，且不可恢复。`,
+    message: `确定要删除「${ws.displayName}」下的全部 ${count} 个会话吗？`,
+    sub: `目录路径: ${workspacePath}\n此操作将永久删除所有会话记录及对应的 Claude 会话文件，且不可恢复。`,
     confirmLabel: '全部删除',
   });
   if (!confirmed) return;
@@ -93,7 +92,7 @@ export async function deleteWorkspaceConversations(workspacePath: string) {
     showCopyToastMsg(`已删除 ${deletedCount} 个会话`);
   } catch (e) {
     console.error('Failed to delete workspace conversations:', e);
-    alert('删除目录会话失败: ' + String(e));
+    showToast('删除目录会话失败: ' + String(e));
     await loadData();
     shellApi.render();
   }

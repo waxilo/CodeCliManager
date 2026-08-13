@@ -3,9 +3,9 @@
    ============================================================ */
 
 .tool-card {
-  margin: 0.25em 0;
-  border: 1px solid var(--color-bg-surface-hover);
-  border-left: 3px solid #8b949e;
+  margin: 0.15em 0;
+  border: 1px solid color-mix(in srgb, var(--color-bg-surface-hover) 55%, transparent);
+  border-left: 3px solid var(--color-tool-border);
   border-radius: 8px;
   background: var(--color-bg-elevated);
   overflow: hidden;
@@ -16,9 +16,9 @@
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 12px;
+  padding: 5px 10px;
   background: var(--color-bg-surface);
-  border-bottom: 1px solid var(--color-bg-surface-hover);
+  border-bottom: none;
   cursor: default;
   user-select: none;
 }
@@ -91,18 +91,18 @@
 }
 
 .tool-status-running {
-  background: rgba(88, 166, 255, 0.15);
-  color: #58a6ff;
+  background: var(--color-status-running-bg);
+  color: var(--color-status-running);
 }
 
 .tool-status-done {
-  background: rgba(63, 185, 80, 0.15);
-  color: #3fb950;
+  background: var(--color-status-success-bg);
+  color: var(--color-status-success);
 }
 
 .tool-status-error {
-  background: rgba(248, 81, 73, 0.15);
-  color: #f85149;
+  background: var(--color-status-error-bg);
+  color: var(--color-status-error);
 }
 
 /* 工具卡片正文 */
@@ -112,7 +112,7 @@
 
 /* 单行 - 终端风格 */
 .tool-oneline-terminal .tool-cmd-prefix {
-  color: #3fb950;
+  color: var(--color-status-success);
   font-weight: 600;
   margin-right: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
@@ -173,7 +173,7 @@
 /* 工具结果区 */
 .tool-card-result {
   padding: 8px 12px;
-  border-top: 1px solid var(--color-bg-surface-hover);
+  border-top: 1px solid color-mix(in srgb, var(--color-bg-surface-hover) 50%, transparent);
   max-height: 400px;
   overflow-y: auto;
 }

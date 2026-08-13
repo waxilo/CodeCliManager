@@ -42,8 +42,8 @@
 }
 
 .interaction-panel-badge.is-question {
-  color: #58a6ff;
-  background: color-mix(in srgb, #58a6ff 16%, transparent);
+  color: var(--color-status-running);
+  background: color-mix(in srgb, var(--color-status-running) 16%, transparent);
 }
 
 .interaction-panel-title {
@@ -282,7 +282,7 @@
 }
 
 .ask-card.is-pending {
-  border-color: color-mix(in srgb, #58a6ff 45%, var(--color-composer-border));
+  border-color: color-mix(in srgb, var(--color-status-running) 45%, var(--color-composer-border));
 }
 
 .ask-card-bar {
@@ -298,8 +298,8 @@
   border-radius: 999px;
   font-size: 11px;
   font-weight: 650;
-  color: #58a6ff;
-  background: color-mix(in srgb, #58a6ff 16%, transparent);
+  color: var(--color-status-running);
+  background: color-mix(in srgb, var(--color-status-running) 16%, transparent);
 }
 
 .ask-card-status {
@@ -319,7 +319,7 @@
 }
 
 .ask-card.is-interactive .ask-option:hover {
-  border-color: #58a6ff;
+  border-color: var(--color-status-running);
 }
 
 .ask-card.is-interactive .ask-option input {
@@ -387,8 +387,8 @@
 }
 
 .ask-option.is-selected {
-  border-color: #58a6ff;
-  background: color-mix(in srgb, #58a6ff 12%, var(--color-bg-deep));
+  border-color: var(--color-status-running);
+  background: color-mix(in srgb, var(--color-status-running) 12%, var(--color-bg-deep));
 }
 
 .ask-option-top {
@@ -416,7 +416,7 @@
 
 .ask-option-check {
   flex-shrink: 0;
-  color: #58a6ff;
+  color: var(--color-status-running);
   font-weight: 700;
   font-size: 12px;
 }

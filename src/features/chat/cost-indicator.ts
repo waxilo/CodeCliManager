@@ -8,7 +8,7 @@ function getActiveUsage(): SessionUsage | null {
   return appState.usageBySession.get(sessionId) || null;
 }
 
-/** 工具栏右下角的成本 / Token 消耗指示器（当前会话累计） */
+/** 输入框外下方的成本 / Token 消耗指示器（当前会话累计） */
 export function renderCostIndicatorHtml(): string {
   const usage = getActiveUsage();
   if (!usage) return '';
@@ -46,8 +46,12 @@ export function updateCostIndicator(): void {
     existing.replaceWith(next.content.firstElementChild!);
     return;
   }
-  // 渲染时无用量 → 指示器未创建；插到 context 环之前，保持 模型/成本/上下文/发送 的稳定顺序
+  // 渲染时无用量 → 指示器未创建；插到 usage 栏最前（成本在上下文环左侧）
+  const usageBar = document.querySelector('#composer-usage-bar');
   const contextSlot = document.querySelector('#context-indicator-slot');
-  const ref = contextSlot || document.querySelector('.input-composer-toolbar-end');
-  ref?.insertAdjacentHTML('beforebegin', html);
+  if (contextSlot) {
+    contextSlot.insertAdjacentHTML('beforebegin', html);
+    return;
+  }
+  usageBar?.insertAdjacentHTML('afterbegin', html);
 }

@@ -4,7 +4,10 @@ on:
   pull_request:
     branches:
       - main
-  # main 分支发版由 fast_push_mac.sh 打 tag 触发 release.yml，避免重复构建
+  # 日常直推 main 的提交也需要门禁；tag 推送走独立事件，与 branch push 互不重复
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
@@ -53,6 +56,16 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      # 测试只在一个平台跑一次，避免矩阵重复；构建在全部平台执行
+      - name: Run frontend tests
+        if: matrix.name == 'macOS-x64'
+        run: npm test
+
+      - name: Run Rust tests
+        if: matrix.name == 'macOS-x64'
+        working-directory: src-tauri
+        run: cargo test
 
       - name: Build Tauri app
         # CI 无签名私钥，临时关闭 updater 产物以避免签名失败；Release 工作流才生成并签名

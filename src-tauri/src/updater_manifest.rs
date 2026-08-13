@@ -30,6 +30,9 @@ const MIRROR_PREFIXES: &[&str] = &[
     "https://mirror.ghproxy.com/",
 ];
 
+/// 探测后缓存的首个可用镜像；`None` 表示全部不可达（保持直连）。
+static WORKING_MIRROR: OnceLock<Option<&'static str>> = OnceLock::new();
+
 static STARTED: OnceLock<bool> = OnceLock::new();
 
 /// 启动本地清单代理（幂等）。失败只打日志，不阻断应用启动。
@@ -62,43 +65,71 @@ pub fn start_updater_manifest_proxy() {
 
         for request in server.incoming_requests() {
             let path = request.url().split('?').next().unwrap_or("/");
+
+            // Host 校验：仅接受本机回环地址，阻断 DNS rebinding
+            let host_ok = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("host"))
+                .map(|header| is_loopback_host(header.value.as_str()))
+                .unwrap_or(false);
+            if !host_ok {
+                let body = r#"{"error":"invalid host"}"#;
+                let response = Response::from_string(body)
+                    .with_status_code(StatusCode(400))
+                    .with_header(json_header())
+                    .with_header(Header::from_bytes("Connection", "close").expect("valid header"));
+                let _ = request.respond(response);
+                continue;
+            }
+
             if request.method() == &tiny_http::Method::Options {
-                let response = Response::from_string("")
+                let mut response = Response::from_string("")
                     .with_status_code(StatusCode(204))
-                    .with_header(cors_header());
+                    .with_header(Header::from_bytes("Access-Control-Allow-Methods", "GET,OPTIONS").expect("valid header"))
+                    .with_header(Header::from_bytes("Access-Control-Allow-Headers", "content-type").expect("valid header"));
+                for header in cors_headers_for(&request) {
+                    response = response.with_header(header);
+                }
                 let _ = request.respond(response);
                 continue;
             }
 
             if path != "/latest.json" && path != "/" {
                 let body = r#"{"error":"not found"}"#;
-                let response = Response::from_string(body)
+                let mut response = Response::from_string(body)
                     .with_status_code(StatusCode(404))
-                    .with_header(json_header())
-                    .with_header(cors_header());
+                    .with_header(json_header());
+                for header in cors_headers_for(&request) {
+                    response = response.with_header(header);
+                }
                 let _ = request.respond(response);
                 continue;
             }
 
             match fetch_and_rewrite_manifest(&client) {
                 Ok(json) => {
-                    let response = Response::from_string(json)
+                    let mut response = Response::from_string(json)
                         .with_status_code(StatusCode(200))
                         .with_header(json_header())
-                        .with_header(cors_header())
                         .with_header(
                             Header::from_bytes("Cache-Control", "no-store").expect("valid header"),
                         );
+                    for header in cors_headers_for(&request) {
+                        response = response.with_header(header);
+                    }
                     let _ = request.respond(response);
                 }
                 Err(e) => {
                     eprintln!("[updater-manifest] fetch failed: {e}");
                     let body =
                         format!(r#"{{"error":{}}}"#, serde_json::to_string(&e).unwrap_or_else(|_| "\"error\"".into()));
-                    let response = Response::from_string(body)
+                    let mut response = Response::from_string(body)
                         .with_status_code(StatusCode(502))
-                        .with_header(json_header())
-                        .with_header(cors_header());
+                        .with_header(json_header());
+                    for header in cors_headers_for(&request) {
+                        response = response.with_header(header);
+                    }
                     let _ = request.respond(response);
                 }
             }
@@ -110,8 +141,51 @@ fn json_header() -> Header {
     Header::from_bytes("Content-Type", "application/json; charset=utf-8").expect("valid header")
 }
 
-fn cors_header() -> Header {
-    Header::from_bytes("Access-Control-Allow-Origin", "*").expect("valid header")
+fn is_loopback_host(host: &str) -> bool {
+    let host = host.trim();
+    let bare = if let Some(rest) = host.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest).to_string()
+    } else {
+        host.split(':').next().unwrap_or(host).to_string()
+    };
+    matches!(
+        bare.as_str(),
+        "127.0.0.1" | "localhost" | "::1" | "0:0:0:0:0:0:0:1"
+    )
+}
+
+fn request_origin(request: &tiny_http::Request) -> Option<&str> {
+    request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("origin"))
+        .map(|header| header.value.as_str())
+}
+
+fn is_loopback_origin(origin: &str) -> bool {
+    origin == "tauri://localhost"
+        || origin == "http://tauri.localhost"
+        || origin == "https://tauri.localhost"
+        || origin.starts_with("http://localhost:")
+        || origin.starts_with("https://localhost:")
+        || origin.starts_with("http://127.0.0.1:")
+        || origin.starts_with("https://127.0.0.1:")
+        || origin.starts_with("http://[::1]:")
+        || origin.starts_with("https://[::1]:")
+}
+
+/// 仅对本机来源回显 CORS 头；原生客户端（无 Origin）不返回任何 CORS 头。
+fn cors_headers_for(request: &tiny_http::Request) -> Vec<Header> {
+    let Some(origin) = request_origin(request) else {
+        return Vec::new();
+    };
+    if !is_loopback_origin(origin) {
+        return Vec::new();
+    }
+    vec![
+        Header::from_bytes("Access-Control-Allow-Origin", origin).expect("valid header"),
+        Header::from_bytes("Vary", "Origin").expect("valid header"),
+    ]
 }
 
 fn fetch_and_rewrite_manifest(client: &Client) -> Result<String, String> {
@@ -128,8 +202,34 @@ fn fetch_and_rewrite_manifest(client: &Client) -> Result<String, String> {
         .map_err(|e| format!("读取可信 GitHub 更新清单失败: {e}"))?;
     let mut value: Value =
         serde_json::from_str(&text).map_err(|e| format!("可信 latest.json 无效: {e}"))?;
-    rewrite_platform_urls(&mut value, MIRROR_PREFIXES[0]);
+    if let Some(mirror_prefix) = pick_mirror_prefix(client) {
+        rewrite_platform_urls(&mut value, mirror_prefix);
+    }
+    // 所有镜像均不可用时保持直连 GitHub 地址，作为最后的兜底
     serde_json::to_string(&value).map_err(|e| e.to_string())
+}
+
+/// 按序探测并缓存首个可用的镜像前缀。
+///
+/// 只探测镜像的连通性（连接建立即视为可达，4xx/3xx 不影响下载），
+/// 不探测镜像是否返回了正确内容——镜像故障时由 updater 侧走备用端点。
+/// 结果用 `OnceLock` 缓存，整个进程生命周期内只探测一次。
+fn pick_mirror_prefix(client: &Client) -> Option<&'static str> {
+    if let Some(cached) = WORKING_MIRROR.get() {
+        return *cached;
+    }
+    let picked = MIRROR_PREFIXES.iter().find(|prefix| {
+        let probe_url = format!("{prefix}https://github.com/");
+        client
+            .get(&probe_url)
+            .timeout(Duration::from_secs(5))
+            .send()
+            .is_ok()
+    });
+    let result = picked.copied();
+    // 竞态下多个请求同时探测：OnceLock 保证只写入一次，未写入方直接丢弃
+    let _ = WORKING_MIRROR.set(result);
+    WORKING_MIRROR.get().copied().flatten()
 }
 
 fn rewrite_platform_urls(manifest: &mut Value, mirror_prefix: &str) {
@@ -200,5 +300,47 @@ mod tests {
     fn does_not_double_wrap_mirrored_urls() {
         let already = "https://ghfast.top/https://github.com/waxilo/CodeCliManager/releases/download/v0.1.50/a.tar.gz";
         assert_eq!(rewrite_github_url(already, "https://ghfast.top/"), already);
+    }
+
+    #[test]
+    fn loopback_hosts_are_accepted_but_foreign_hosts_rejected() {
+        assert!(is_loopback_host("127.0.0.1:47865"));
+        assert!(is_loopback_host("localhost:47865"));
+        assert!(is_loopback_host("[::1]:47865"));
+        assert!(!is_loopback_host("evil.example.com"));
+        assert!(!is_loopback_host("evil.example.com:47865"));
+        assert!(!is_loopback_host(""));
+    }
+
+    #[test]
+    fn cors_headers_only_for_loopback_origins() {
+        // 无 Origin（原生客户端）→ 不发 CORS 头
+        // （is_loopback_origin 是核心判断，跨来源头由调用处按结果决定是否回显）
+        assert!(is_loopback_origin("http://localhost:1420"));
+        assert!(is_loopback_origin("http://127.0.0.1:5173"));
+        assert!(is_loopback_origin("tauri://localhost"));
+        assert!(is_loopback_origin("http://tauri.localhost"));
+        assert!(!is_loopback_origin("https://evil.example.com"));
+        assert!(!is_loopback_origin(""));
+    }
+
+    #[test]
+    fn all_mirrors_down_keeps_direct_github_urls() {
+        // 模拟 pick_mirror_prefix 返回 None（无可用镜像）时的兜底：
+        // 传空前缀等同于不改写，保持直连 GitHub 地址
+        let mut manifest = json!({
+            "version": "0.1.50",
+            "platforms": {
+                "darwin-aarch64": {
+                    "signature": "sig",
+                    "url": "https://github.com/waxilo/CodeCliManager/releases/download/v0.1.50/a.tar.gz"
+                }
+            }
+        });
+        rewrite_platform_urls(&mut manifest, "");
+        assert_eq!(
+            manifest["platforms"]["darwin-aarch64"]["url"],
+            "https://github.com/waxilo/CodeCliManager/releases/download/v0.1.50/a.tar.gz"
+        );
     }
 }

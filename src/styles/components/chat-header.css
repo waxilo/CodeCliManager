@@ -130,7 +130,7 @@
   color: var(--color-text-muted);
 }
 
-/* 右下角上下文环形指示器 */
+/* 输入框外下方：上下文环形指示器 */
 .context-indicator-slot {
   display: inline-flex;
   align-items: center;
@@ -140,8 +140,8 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 6px;
-  border-radius: 6px;
+  padding: 2px 0;
+  border-radius: 0;
   font-size: 11px;
   line-height: 1;
   color: var(--color-text-muted);
@@ -172,16 +172,16 @@
 }
 
 .context-warn {
-  color: #e0a300;
+  color: var(--color-warning);
 }
 .context-warn .context-ring-fg {
-  stroke: #e0a300;
+  stroke: var(--color-warning);
 }
 
 .context-danger {
-  color: #e5484d;
+  color: var(--color-danger);
 }
 .context-danger .context-ring-fg {
-  stroke: #e5484d;
+  stroke: var(--color-danger);
 }
 
