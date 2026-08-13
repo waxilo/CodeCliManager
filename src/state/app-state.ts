@@ -9,6 +9,7 @@ import type {
   ClaudeUpdateCheckStatus,
   AppUpdateCheckStatus,
   AppUpdateInfo,
+  QueuedPromptItem,
   SettingsSection,
 } from '../types';
 import { createRequestGuard } from '../utils';
@@ -120,7 +121,7 @@ export const appState = {
   modelRestartingSessions: new Set<string>(),
   isAbortingActiveSession: false,
   sessionProcessModels: new Map<string, string>(),
-  queuedPromptsBySession: new Map<string, number>(),
+  queuedPromptsBySession: new Map<string, QueuedPromptItem[]>(),
   pendingAskQuestions: new Map<string, PendingAskQuestionState>(),
   activeQuestionEnterHandler: null as (() => boolean) | null,
   activeAskQuestionCleanup: null as (() => void) | null,

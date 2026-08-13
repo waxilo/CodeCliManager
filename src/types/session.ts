@@ -77,6 +77,19 @@ export interface StreamingState {
   currentBlockIdx: number;
 }
 
+export interface QueuedPromptItem {
+  id: string;
+  prompt: string;
+  messageContent: string;
+  model?: string | null;
+  queuedAt: number;
+}
+
+export interface ExecutePromptResult {
+  status: 'sent' | 'queued';
+  item?: QueuedPromptItem | null;
+}
+
 /** 待发送指令（发给 CLI 的一轮用户输入） */
 export interface PreparedCommand {
   /** 发给 CLI 的完整 prompt */

@@ -1,8 +1,16 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { PermissionMode } from '../types';
+import type { ExecutePromptResult, PermissionMode } from '../types';
 
-export function executePrompt(args: Record<string, unknown>): Promise<void> {
-  return invoke('execute_prompt', args);
+export function executePrompt(args: Record<string, unknown>): Promise<ExecutePromptResult> {
+  return invoke<ExecutePromptResult>('execute_prompt', args);
+}
+
+export function removeQueuedPrompt(conversationId: string, promptId: string): Promise<boolean> {
+  return invoke<boolean>('remove_queued_prompt_command', { conversationId, promptId });
+}
+
+export function clearQueuedPrompts(conversationId: string): Promise<number> {
+  return invoke<number>('clear_queued_prompts_command', { conversationId });
 }
 
 export function retryMessage(args: {

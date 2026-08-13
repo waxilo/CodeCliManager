@@ -40,6 +40,8 @@ pub fn run() {
             get_conversation,
             update_conversation_title,
             execute_prompt,
+            remove_queued_prompt_command,
+            clear_queued_prompts_command,
             abort_session,
             respond_tool_permission,
             set_permission_mode,

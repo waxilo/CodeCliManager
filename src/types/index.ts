@@ -20,6 +20,8 @@ export type {
   PendingAskQuestionState,
   StreamBlock,
   StreamingState,
+  QueuedPromptItem,
+  ExecutePromptResult,
   PreparedCommand,
   PermissionMode,
 } from './session';

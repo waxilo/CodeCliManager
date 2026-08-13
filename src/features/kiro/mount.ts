@@ -1,6 +1,7 @@
-import { appState } from '../../state';
+import { appState, app } from '../../state';
 import { shellApi } from '../../app/shell/api';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
+import { renderKiroViewHtml } from './view';
 import {
   openKiroModelConfigDialog,
   refreshKiroStatus,
@@ -10,9 +11,39 @@ import {
   toggleKiroProxy,
 } from './panel';
 
+function removeKiroOverlay(): void {
+  document.querySelector('#kiro-overlay')?.remove();
+  document.querySelector('.app-shell')?.classList.remove('has-kiro-overlay');
+}
+
+function mountKiroOverlay(): boolean {
+  if (document.querySelector('#kiro-overlay')) return true;
+  const shell = app.querySelector('.app-shell');
+  if (!shell) return false;
+
+  const overlay = document.createElement('div');
+  overlay.id = 'kiro-overlay';
+  overlay.className = 'kiro-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Kiro 代理');
+  overlay.innerHTML = renderKiroViewHtml();
+  shell.appendChild(overlay);
+  shell.classList.add('has-kiro-overlay');
+  return true;
+}
+
 export function openKiroView() {
-  if (appState.isKiroViewActive) return;
+  if (appState.isKiroViewActive) {
+    if (!document.querySelector('#kiro-overlay') && mountKiroOverlay()) {
+      shellApi.syncTitlebarActions();
+      void mountKiroView();
+    }
+    return;
+  }
   if (!appState.kiroStatus?.available) return;
+  const leavingFullPageView =
+    appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive;
   if (appState.isApiConfigViewActive) {
     shellApi.dismissApiConfigViewState();
   }
@@ -22,19 +53,28 @@ export function openKiroView() {
   if (appState.isMcpViewActive) {
     shellApi.dismissMcpViewState();
   }
+  if (leavingFullPageView) {
+    shellApi.render();
+  }
   appState.isKiroViewActive = true;
-  shellApi.render();
+  if (!mountKiroOverlay()) {
+    appState.isKiroViewActive = false;
+    return;
+  }
+  shellApi.syncTitlebarActions();
+  void mountKiroView();
 }
 
 /** 退出 Kiro 代理页状态（不触发 render，供即将全量重绘的路径使用） */
 export function dismissKiroViewState() {
-  if (!appState.isKiroViewActive && !appState.kiroEscapeHandler) return;
+  if (!appState.isKiroViewActive && !appState.kiroEscapeHandler && !document.querySelector('#kiro-overlay')) return;
   if (appState.kiroEscapeHandler) {
     document.removeEventListener('keydown', appState.kiroEscapeHandler);
     appState.kiroEscapeHandler = null;
   }
   appState.kiroMountToken += 1;
   appState.isKiroViewActive = false;
+  removeKiroOverlay();
 }
 
 export function closeKiroView() {
@@ -43,7 +83,7 @@ export function closeKiroView() {
     return;
   }
   dismissKiroViewState();
-  shellApi.render();
+  shellApi.syncTitlebarActions();
   startMainBalanceBarAutoRefresh();
 }
 

@@ -11,6 +11,7 @@ import { dismissSettingsViewState } from '../settings/mount';
 import { dismissKiroViewState } from '../kiro/mount';
 import { updateConversationListSpinner } from '../sidebar/render-list';
 import { renderChatHeaderHtml } from '../chat/render-chat';
+import { syncQueuedPromptsUI } from '../chat/input-composer';
 import { clearInteractionHostUi, remountActiveInteractionPanel } from '../permissions/interaction-panel';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
 
@@ -18,9 +19,7 @@ let selectGeneration = 0;
 const conversationRequests = new Map<string, Promise<void>>();
 
 function isManagementDomVisible(): boolean {
-  return Boolean(
-    document.querySelector('#api-config-view, #settings-view, #mcp-view, #kiro-view'),
-  );
+  return Boolean(document.querySelector('#api-config-view, #settings-view, #mcp-view'));
 }
 
 /** 仅切换侧栏高亮，避免整表 innerHTML 重建 */
@@ -90,6 +89,7 @@ function syncInteractionPanelForConversation(id: string): void {
 function finishSelectUi(id: string): void {
   const thisSessionRunning = isActiveConversationRunning();
   setSendButtonLoading(thisSessionRunning);
+  syncQueuedPromptsUI();
   updateConversationListSpinner();
   syncInteractionPanelForConversation(id);
 
@@ -140,11 +140,8 @@ function refreshConversationOnce(id: string): Promise<void> {
 }
 
 export function selectConversation(id: string) {
-  const wasManagement =
-    appState.isApiConfigViewActive ||
-    appState.isSettingsViewActive ||
-    appState.isMcpViewActive ||
-    appState.isKiroViewActive;
+  const wasFullPageManagement =
+    appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive;
 
   dismissApiConfigViewState();
   dismissSettingsViewState();
@@ -152,14 +149,14 @@ export function selectConversation(id: string) {
   dismissKiroViewState();
 
   const generation = ++selectGeneration;
-  const alreadyActive = appState.activeConversationId === id && !wasManagement;
+  const alreadyActive = appState.activeConversationId === id && !wasFullPageManagement;
 
   appState.activeConversationId = id;
   invalidateFileCache();
 
   // 先本地切换（缓存消息），不再等后端后整页重绘
   if (!alreadyActive) {
-    paintSelectedConversation(id, wasManagement);
+    paintSelectedConversation(id, wasFullPageManagement);
   }
 
   void refreshConversationOnce(id).then(() => {

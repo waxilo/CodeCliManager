@@ -40,10 +40,14 @@ pub(crate) struct PendingPermission {
     pub(crate) tx: mpsc::Sender<PermissionDecision>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct QueuedPrompt {
+    pub(crate) id: String,
     pub(crate) prompt: String,
+    pub(crate) message_content: String,
     pub(crate) model: Option<String>,
+    pub(crate) queued_at: i64,
 }
 
 pub(crate) static PENDING_PROMPTS: Mutex<Option<HashMap<String, VecDeque<QueuedPrompt>>>> =
@@ -307,10 +311,19 @@ pub(crate) fn clear_graceful_shutdown(registry_key: &str, session_id: &Option<St
     }
 }
 
-pub(crate) fn emit_queued_prompt_count(app: &AppHandle, session_key: &str) {
+pub(crate) fn queued_prompts_snapshot(session_key: &str) -> Vec<QueuedPrompt> {
+    let queues = PENDING_PROMPTS.lock().unwrap();
+    queues
+        .as_ref()
+        .and_then(|map| map.get(session_key))
+        .map(|queue| queue.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+pub(crate) fn emit_queued_prompts(app: &AppHandle, session_key: &str) {
     let payload = serde_json::json!({
         "conversationId": session_key,
-        "count": queued_prompt_count(session_key),
+        "items": queued_prompts_snapshot(session_key),
     });
     let _ = app.emit("queued-prompts-updated", &payload);
 }
@@ -319,12 +332,19 @@ pub(crate) fn dispatch_next_queued_prompt(app: &AppHandle, session_key: &str) ->
     let Some(queued) = take_queued_prompt(session_key) else {
         return false;
     };
-    emit_queued_prompt_count(app, session_key);
+    emit_queued_prompts(app, session_key);
     match try_send_followup_prompt_with_model(session_key, &queued.prompt, queued.model.as_deref()) {
-        Ok(()) => true,
+        Ok(()) => {
+            let payload = serde_json::json!({
+                "conversationId": session_key,
+                "item": queued,
+            });
+            let _ = app.emit("queued-prompt-dispatched", &payload);
+            true
+        }
         Err(error) => {
             let pending = clear_queued_prompts(session_key);
-            emit_queued_prompt_count(app, session_key);
+            emit_queued_prompts(app, session_key);
             emit_session_error(app, Some(session_key), &format!("排队追问发送失败：{error}"));
             eprintln!("[queue] dispatch failed for {session_key}, cleared {pending} prompts");
             false
@@ -359,6 +379,22 @@ pub(crate) fn take_queued_prompt(session_key: &str) -> Option<QueuedPrompt> {
     prompt
 }
 
+pub(crate) fn remove_queued_prompt(session_key: &str, prompt_id: &str) -> bool {
+    let mut queues = PENDING_PROMPTS.lock().unwrap();
+    let Some(map) = queues.as_mut() else {
+        return false;
+    };
+    let Some(queue) = map.get_mut(session_key) else {
+        return false;
+    };
+    let before = queue.len();
+    queue.retain(|item| item.id != prompt_id);
+    let removed = queue.len() != before;
+    if queue.is_empty() {
+        map.remove(session_key);
+    }
+    removed
+}
 pub(crate) fn clear_queued_prompts(session_key: &str) -> usize {
     let mut queues = PENDING_PROMPTS.lock().unwrap();
     queues
@@ -367,6 +403,7 @@ pub(crate) fn clear_queued_prompts(session_key: &str) -> usize {
         .map(|queue| queue.len())
         .unwrap_or(0)
 }
+
 pub(crate) fn write_stdin_json(
     stdin: &Arc<Mutex<std::process::ChildStdin>>,
     value: &serde_json::Value,
@@ -734,8 +771,11 @@ mod tests {
 
     fn prompt(text: &str) -> QueuedPrompt {
         QueuedPrompt {
+            id: format!("id-{text}"),
             prompt: text.to_string(),
+            message_content: text.to_string(),
             model: None,
+            queued_at: 0,
         }
     }
 
@@ -747,8 +787,9 @@ mod tests {
         assert_eq!(enqueue_prompt(&key, prompt("second")), 2);
         assert_eq!(take_queued_prompt(&key).unwrap().prompt, "first");
         assert_eq!(queued_prompt_count(&key), 1);
-        assert_eq!(clear_queued_prompts(&key), 1);
+        assert!(remove_queued_prompt(&key, "id-second"));
         assert_eq!(queued_prompt_count(&key), 0);
+        assert_eq!(clear_queued_prompts(&key), 0);
     }
 }
 pub(crate) fn force_kill_registered_process(key: &str) -> bool {

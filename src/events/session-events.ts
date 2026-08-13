@@ -1,7 +1,7 @@
 import { appState } from '../state';
 import { shellApi } from '../app/shell/api';
 import { listen } from '@tauri-apps/api/event';
-import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPayload } from '../types';
+import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPayload, QueuedPromptItem } from '../types';
 import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent } from '../features/chat/streaming';
 import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages, refreshConversationFromBackend } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
@@ -15,10 +15,16 @@ import { loadData } from '../features/conversations/load';
 import { normalizeMessageForCompare } from '../features/files/index';
 import type { PermissionRequestPayload } from '../types';
 import { showCopyToastMsg } from '../ui';
+import { syncQueuedPromptsUI } from '../features/chat/input-composer';
 
 interface QueuedPromptsUpdatedPayload {
   conversationId: string;
-  count: number;
+  items: QueuedPromptItem[];
+}
+
+interface QueuedPromptDispatchedPayload {
+  conversationId: string;
+  item: QueuedPromptItem;
 }
 
 /** 防止 init 被重复调用时重复注册，导致 text_delta 字字双份 */
@@ -182,16 +188,37 @@ export async function setupEventListeners() {
   });
 
   await listen<QueuedPromptsUpdatedPayload>('queued-prompts-updated', (event) => {
-    const { conversationId, count } = event.payload;
+    const { conversationId, items } = event.payload;
     if (!conversationId) return;
-    if (count > 0) {
-      appState.queuedPromptsBySession.set(conversationId, count);
+    if (items.length > 0) {
+      appState.queuedPromptsBySession.set(conversationId, items);
     } else {
       appState.queuedPromptsBySession.delete(conversationId);
     }
     if (appState.activeConversationId === conversationId) {
+      syncQueuedPromptsUI();
       shellApi.updateSendButtonState();
     }
+  });
+
+  await listen<QueuedPromptDispatchedPayload>('queued-prompt-dispatched', (event) => {
+    const { conversationId, item } = event.payload;
+    const conversation = appState.conversations.find((entry) => entry.id === conversationId);
+    if (conversation && !conversation.messages.some((message) => message.id === `queued-${item.id}`)) {
+      conversation.messages.push({
+        id: `queued-${item.id}`,
+        role: 'user',
+        content: item.messageContent,
+        timestamp: Math.floor(Date.now() / 1000),
+      });
+      conversation.updated_at = Math.floor(Date.now() / 1000);
+    }
+    appState.runningSessions.add(conversationId);
+    if (appState.activeConversationId === conversationId) {
+      shellApi.refreshChatContent();
+      setSendButtonLoading(true);
+    }
+    updateConversationListSpinner();
   });
 
   await listen<string | null>('turn-continued', (event) => {
@@ -217,7 +244,7 @@ export async function setupEventListeners() {
       (sid === appState.activeConversationId && appState.isAbortingActiveSession);
 
     if (sid) {
-      const queuedCount = appState.queuedPromptsBySession.get(sid) || 0;
+      const queuedCount = appState.queuedPromptsBySession.get(sid)?.length || 0;
       if (queuedCount > 0) {
         // Rust 已在 turn-complete 前派发下一条；保留 running/loading，等待下一轮。
         updateConversationListSpinner();
@@ -290,6 +317,7 @@ export async function setupEventListeners() {
     }
 
     if (endedSessionId) {
+      appState.queuedPromptsBySession.delete(endedSessionId);
       appState.runningSessions.delete(endedSessionId);
       appState.abortingSessions.delete(endedSessionId);
       appState.sessionProcessModels.delete(endedSessionId);
@@ -302,6 +330,7 @@ export async function setupEventListeners() {
     const isCurrentSession = !endedSessionId || endedSessionId === appState.activeConversationId;
 
     if (isCurrentSession) {
+      syncQueuedPromptsUI();
       setAbortingUi(false);
       hideSendingState();
       appState.pendingUserMessage = null;

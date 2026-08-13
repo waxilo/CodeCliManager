@@ -9,6 +9,8 @@ export {
 
 export {
   executePrompt,
+  removeQueuedPrompt,
+  clearQueuedPrompts,
   retryMessage,
   abortSession,
   respondToolPermission,

@@ -1,4 +1,29 @@
+use serde::Serialize;
 use tauri::{AppHandle, Emitter};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutePromptResult {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    item: Option<QueuedPrompt>,
+}
+
+impl ExecutePromptResult {
+    fn sent() -> Self {
+        Self {
+            status: "sent",
+            item: None,
+        }
+    }
+
+    fn queued(item: QueuedPrompt) -> Self {
+        Self {
+            status: "queued",
+            item: Some(item),
+        }
+    }
+}
 
 use crate::claude::spawn_claude_stream;
 use crate::claude::stream_events::*;
@@ -12,7 +37,8 @@ pub async fn execute_prompt(
     conversation_id: Option<String>,
     model: Option<String>,
     project_dir: Option<String>,
-) -> Result<(), String> {
+    message_content: Option<String>,
+) -> Result<ExecutePromptResult, String> {
     let active_cid = conversation_id.clone();
     let active_model = model.filter(|value| !value.trim().is_empty());
     let explicit_project_dir = project_dir.filter(|value| !value.trim().is_empty());
@@ -27,19 +53,24 @@ pub async fn execute_prompt(
             let requested_model = normalize_process_model(active_model.as_deref());
             let running_model = get_active_session_model(cid).unwrap_or_default();
             if requested_model == running_model && is_turn_active(cid) {
-                let count = enqueue_prompt(
-                    cid,
-                    QueuedPrompt {
-                        prompt: prompt.clone(),
-                        model: active_model.clone(),
-                    },
-                );
-                emit_queued_prompt_count(&app, cid);
+                let queued = QueuedPrompt {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    prompt: prompt.clone(),
+                    message_content: message_content.clone().unwrap_or_else(|| prompt.clone()),
+                    model: active_model.clone(),
+                    queued_at: chrono::Utc::now().timestamp_millis(),
+                };
+                let count = enqueue_prompt(cid, queued.clone());
+                emit_queued_prompts(&app, cid);
                 eprintln!("[execute_prompt] turn active; queued followup for {} (count={})", cid, count);
-                return Ok(());
+                return Ok(ExecutePromptResult::queued(queued));
             }
 
             if requested_model != running_model {
+                let cleared = clear_queued_prompts(cid);
+                if cleared > 0 {
+                    emit_queued_prompts(&app, cid);
+                }
                 eprintln!(
                     "[execute_prompt] 模型切换 '{}' → '{}'，重启常驻会话 {}",
                     if running_model.is_empty() {
@@ -77,7 +108,7 @@ pub async fn execute_prompt(
                 match try_send_followup_prompt(cid, &prompt) {
                     Ok(()) => {
                         eprintln!("[execute_prompt] followup via stdin for {}", cid);
-                        return Ok(());
+                        return Ok(ExecutePromptResult::sent());
                     }
                     Err(e) => {
                         eprintln!(
@@ -257,7 +288,28 @@ pub async fn execute_prompt(
         }
     });
 
-    Ok(())
+    Ok(ExecutePromptResult::sent())
+}
+
+#[tauri::command]
+pub fn remove_queued_prompt_command(
+    app: AppHandle,
+    conversation_id: String,
+    prompt_id: String,
+) -> Result<bool, String> {
+    let removed = remove_queued_prompt(&conversation_id, &prompt_id);
+    emit_queued_prompts(&app, &conversation_id);
+    Ok(removed)
+}
+
+#[tauri::command]
+pub fn clear_queued_prompts_command(
+    app: AppHandle,
+    conversation_id: String,
+) -> Result<usize, String> {
+    let cleared = clear_queued_prompts(&conversation_id);
+    emit_queued_prompts(&app, &conversation_id);
+    Ok(cleared)
 }
 
 /// 终止正在运行的 Claude 会话（用户主动取消）
@@ -274,7 +326,7 @@ pub async fn abort_session(
     if let Some(ref cid) = conversation_id {
         let cleared = clear_queued_prompts(cid);
         if cleared > 0 {
-            emit_queued_prompt_count(&app, cid);
+            emit_queued_prompts(&app, cid);
             eprintln!("[abort] cleared {} queued prompts for {}", cleared, cid);
         }
     }

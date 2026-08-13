@@ -337,69 +337,15 @@ export async function executePreparedCommand(
   conversationId: string | null,
   command: PreparedCommand,
 ): Promise<void> {
-  // 用展示内容而非原始 prompt 作为 pending 消息，与 push 到会话的 messageContent 保持一致，
-  // 否则含粘贴图片/文件引用时两者不一致，buildDisplayMessages 的去重守卫会误判并多显示一条
-  appState.pendingUserMessage = command.messageContent;
-  appState.pendingUserMessageConvId = conversationId;
-
   const alreadyBusy = !!(
     conversationId && appState.runningSessions.has(conversationId)
   );
 
-  const nextModelKey = normalizeModelKey(command.model);
-  if (conversationId) {
-    const prevModelKey = appState.sessionProcessModels.get(conversationId);
-    if (prevModelKey !== undefined && prevModelKey !== nextModelKey) {
-      showCopyToastMsg('已切换模型，正在重启会话');
-      appState.modelRestartingSessions.add(conversationId);
-      // 新进程开始出字或要权限后解除；兜底超时避免卡死
-      window.setTimeout(() => appState.modelRestartingSessions.delete(conversationId), 60000);
-    }
-    appState.sessionProcessModels.set(conversationId, nextModelKey);
-  } else {
-    appState.sessionProcessModels.set('pending', nextModelKey);
-  }
-
-  if (conversationId) {
-    appState.runningSessions.add(conversationId);
-    const conv = appState.conversations.find((c) => c.id === conversationId);
-    // 切模型 / 新开一轮前先固化当前流式回复，避免 clearStreaming 后丢失
-    commitStreamingAssistantToConversation(conversationId);
-    if (conv) {
-      conv.messages.push({
-        id: `user-${Date.now()}`,
-        role: 'user',
-        content: command.messageContent,
-        refs: command.refs,
-        timestamp: Math.floor(Date.now() / 1000),
-      });
-      conv.updated_at = Math.floor(Date.now() / 1000);
-    }
-    // 忙碌中追问：保留当前流式输出，避免把正在生成的内容清掉
-    if (!alreadyBusy) {
-      clearStreamingState(conversationId);
-    }
-    if (appState.activeConversationId === conversationId) {
-      shellApi.refreshChatContent();
-      if (alreadyBusy && appState.streamingBySession.has(conversationId)) {
-        refreshStreamingUI(conversationId);
-      }
-    }
-    updateConversationListSpinner();
-  } else {
-    // 新会话，session ID 尚未确定，先标记为 pending
-    appState.runningSessions.add('pending');
-    shellApi.render();
-  }
-
-  // shellApi.render() / shellApi.refreshChatContent() 可能重建 DOM，需要在之后设置 loading 状态
-  if (!conversationId || conversationId === appState.activeConversationId) {
-    setSendButtonLoading(true);
-  }
-  updateConversationListSpinner();
-
   try {
-    const args: Record<string, string> = { prompt: command.prompt };
+    const args: Record<string, string> = {
+      prompt: command.prompt,
+      messageContent: command.messageContent,
+    };
     if (conversationId) {
       args.conversationId = conversationId;
     }
@@ -412,7 +358,66 @@ export async function executePreparedCommand(
         args.projectDir = projectDir;
       }
     }
-    await api.executePrompt(args);
+
+    const result = await api.executePrompt(args);
+    if (result.status === 'queued') {
+      if (conversationId && result.item) {
+        const items = appState.queuedPromptsBySession.get(conversationId) || [];
+        if (!items.some((item) => item.id === result.item?.id)) {
+          appState.queuedPromptsBySession.set(conversationId, [...items, result.item]);
+        }
+        shellApi.updateSendButtonState();
+      }
+      showCopyToastMsg('已加入追问队列');
+      return;
+    }
+
+    // 后端确认已实际发送后，才把用户消息加入正式会话气泡。
+    appState.pendingUserMessage = command.messageContent;
+    appState.pendingUserMessageConvId = conversationId;
+
+    const nextModelKey = normalizeModelKey(command.model);
+    if (conversationId) {
+      const prevModelKey = appState.sessionProcessModels.get(conversationId);
+      if (prevModelKey !== undefined && prevModelKey !== nextModelKey) {
+        showCopyToastMsg('已切换模型，正在重启会话');
+        appState.modelRestartingSessions.add(conversationId);
+        window.setTimeout(() => appState.modelRestartingSessions.delete(conversationId), 60000);
+      }
+      appState.sessionProcessModels.set(conversationId, nextModelKey);
+      appState.runningSessions.add(conversationId);
+
+      const conv = appState.conversations.find((c) => c.id === conversationId);
+      commitStreamingAssistantToConversation(conversationId);
+      if (conv) {
+        conv.messages.push({
+          id: `user-${Date.now()}`,
+          role: 'user',
+          content: command.messageContent,
+          refs: command.refs,
+          timestamp: Math.floor(Date.now() / 1000),
+        });
+        conv.updated_at = Math.floor(Date.now() / 1000);
+      }
+      if (!alreadyBusy) {
+        clearStreamingState(conversationId);
+      }
+      if (appState.activeConversationId === conversationId) {
+        shellApi.refreshChatContent();
+        if (alreadyBusy && appState.streamingBySession.has(conversationId)) {
+          refreshStreamingUI(conversationId);
+        }
+      }
+    } else {
+      appState.sessionProcessModels.set('pending', nextModelKey);
+      appState.runningSessions.add('pending');
+      shellApi.render();
+    }
+
+    if (!conversationId || conversationId === appState.activeConversationId) {
+      setSendButtonLoading(true);
+    }
+    updateConversationListSpinner();
   } catch (e) {
     console.error('Failed to send message:', e);
     alert('Failed to send message: ' + String(e));
@@ -448,7 +453,8 @@ export async function abortSession() {
     const killed = await api.abortSession(args);
     console.log('[abort] result:', killed, 'sessionId:', abortSessionId);
 
-    // 点击停止后立即从运行集合中移除转圈；保留 aborting 标记直到 session-ended
+    // 点击停止后立即从运行集合中移除转圈，并清掉本地队列快照；后端也会同步空队列事件。
+    appState.queuedPromptsBySession.delete(abortSessionId);
     appState.runningSessions.delete(abortSessionId);
     updateConversationListSpinner();
 

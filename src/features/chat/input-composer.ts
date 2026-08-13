@@ -112,11 +112,75 @@ export function renderBalanceStatusBarHtml(): string {
   `;
 }
 
+export function renderQueuedPromptsHtml(): string {
+  const conversationId = appState.activeConversationId;
+  const items = conversationId ? appState.queuedPromptsBySession.get(conversationId) || [] : [];
+  if (items.length === 0) return '';
+  return `
+    <div class="queued-prompts" id="queued-prompts" aria-label="等待发送的追问">
+      <div class="queued-prompts-header">
+        <span>等待发送 · ${items.length}</span>
+        <button type="button" class="queued-prompts-clear" data-queue-clear>清空</button>
+      </div>
+      <div class="queued-prompts-list">
+        ${items.map((item) => `
+          <div class="queued-prompt-item" data-queue-id="${escapeHtml(item.id)}">
+            <span class="queued-prompt-index" aria-hidden="true">${items.indexOf(item) + 1}</span>
+            <span class="queued-prompt-content" title="${escapeHtml(item.messageContent)}">${escapeHtml(item.messageContent)}</span>
+            ${item.model ? `<span class="queued-prompt-model">${escapeHtml(item.model)}</span>` : ''}
+            <button type="button" class="queued-prompt-remove" data-queue-remove="${escapeHtml(item.id)}" aria-label="删除排队消息">×</button>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+  `;
+}
+
+export function syncQueuedPromptsUI(): void {
+  const inputArea = document.querySelector('.input-area');
+  if (!inputArea) return;
+  document.querySelector('#queued-prompts')?.remove();
+  const html = renderQueuedPromptsHtml();
+  if (!html) return;
+  const interactionHost = inputArea.querySelector('#interaction-host');
+  interactionHost?.insertAdjacentHTML('afterend', html);
+  bindQueuedPromptEvents();
+}
+
+export function bindQueuedPromptEvents(): void {
+  const panel = document.querySelector<HTMLElement>('#queued-prompts');
+  if (!panel || panel.dataset.bound === 'true') return;
+  panel.dataset.bound = 'true';
+  panel.addEventListener('click', (event) => {
+    const target = event.target as HTMLElement;
+    const conversationId = appState.activeConversationId;
+    if (!conversationId) return;
+    const remove = target.closest<HTMLButtonElement>('[data-queue-remove]');
+    if (remove?.dataset.queueRemove) {
+      remove.disabled = true;
+      void api.removeQueuedPrompt(conversationId, remove.dataset.queueRemove).catch((error) => {
+        console.error('删除排队消息失败:', error);
+        remove.disabled = false;
+      });
+      return;
+    }
+    const clear = target.closest<HTMLButtonElement>('[data-queue-clear]');
+    if (clear) {
+      clear.disabled = true;
+      void api.clearQueuedPrompts(conversationId).catch((error) => {
+        console.error('清空排队消息失败:', error);
+        clear.disabled = false;
+      });
+    }
+  });
+}
+
 export function renderInputComposerHtml(): string {
   const mode = getPermissionMode();
   return `
     <div class="input-area">
       <div id="interaction-host" class="interaction-host" hidden></div>
+      ${renderQueuedPromptsHtml()}
       <div id="paste-attachments-bar" class="paste-attachments-bar" style="display:none"></div>
       <div id="imported-file-bar" class="imported-file-bar" style="display:none"></div>
       <div class="input-composer">

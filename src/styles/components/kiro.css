@@ -1,4 +1,28 @@
 /* Kiro 代理独立页 */
+.kiro-overlay {
+  position: absolute;
+  inset: var(--app-titlebar-height, 38px) 0 0;
+  z-index: 80;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--color-bg-base);
+  contain: layout paint;
+}
+
+.platform-macos .kiro-overlay {
+  inset-block-start: 28px;
+}
+
+.platform-windows .kiro-overlay {
+  inset-block-start: 32px;
+}
+
+.kiro-overlay > .kiro-view {
+  flex: 1;
+  min-width: 0;
+}
+
 .kiro-view {
   display: flex;
   flex-direction: column;

@@ -71,10 +71,10 @@ function syncKiroToolbarEntry(
   nextRunning: boolean,
 ) {
   if (prevAvailable === nextAvailable && prevRunning === nextRunning) return;
-  // 凭据不可用且正停留在 Kiro 页：需要退出全屏页，只能全量 render
+  // 凭据不可用且正停留在 Kiro 页：局部移除覆盖层，不重建底层聊天 DOM。
   if (!nextAvailable && appState.isKiroViewActive) {
     shellApi.dismissKiroViewState();
-    shellApi.render();
+    shellApi.syncTitlebarActions();
     return;
   }
   // 仅入口显隐 / 运行绿点变化：局部刷新标题栏，避免 Win 端全页重绘卡死

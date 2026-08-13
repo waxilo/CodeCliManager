@@ -94,7 +94,7 @@ export function updateSendButtonState() {
     // 运行中：有内容 → 会话中追问；无内容 → 停止本轮
     const followupMode = hasContent;
     const queuedCount = appState.activeConversationId
-      ? appState.queuedPromptsBySession.get(appState.activeConversationId) || 0
+      ? appState.queuedPromptsBySession.get(appState.activeConversationId)?.length || 0
       : 0;
     sendBtn.disabled = false;
     sendBtn.classList.toggle('is-loading', !followupMode);
@@ -130,7 +130,7 @@ export function getDefaultMessagePlaceholder(loading = isSendButtonLoading()): s
   }
   if (loading) {
     const queuedCount = appState.activeConversationId
-      ? appState.queuedPromptsBySession.get(appState.activeConversationId) || 0
+      ? appState.queuedPromptsBySession.get(appState.activeConversationId)?.length || 0
       : 0;
     const suffix = queuedCount > 0 ? `（已排队 ${queuedCount} 条）` : '';
     return `AI 正在回答中，可继续输入后 Enter 发送追问${suffix}…`;
