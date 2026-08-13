@@ -1,7 +1,7 @@
 import * as api from '../../api';
 import type { ClaudeCodeApiConfig } from '../../types';
 import { renderSettingsProfileList } from './profile-list';
-import { setProviderBalanceVisible } from './kiro-panel';
+import { setProviderBalanceVisible } from './provider-balance';
 import { OFFICIAL_PROFILE_ID } from './profile-list';
 import { getSettingsProfileListEl } from '../settings/view';
 export function setSettingsFormEditable(overlay: HTMLElement, editable: boolean) {

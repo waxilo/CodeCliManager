@@ -12,6 +12,9 @@ export function openApiConfigView() {
   if (appState.isMcpViewActive) {
     shellApi.dismissMcpViewState();
   }
+  if (appState.isKiroViewActive) {
+    shellApi.dismissKiroViewState();
+  }
   if (appState.isSettingsViewActive) {
     shellApi.dismissSettingsViewState();
   }

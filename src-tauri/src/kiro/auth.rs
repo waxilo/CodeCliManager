@@ -525,7 +525,10 @@ impl Auth {
                     .and_then(|v| v.as_str())
                     .map(|s| format!("，过期 {s}"))
                     .unwrap_or_default();
-                return format!("Kiro IDE SSO 缓存（{}）{expires}", self.sso_token_path().display());
+                return format!(
+                    "Kiro SSO 共享缓存（IDE/CLI 共用，{}）{expires}",
+                    self.sso_token_path().display()
+                );
             }
         }
         "未找到 Kiro 凭据".to_string()

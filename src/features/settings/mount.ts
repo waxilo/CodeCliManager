@@ -12,6 +12,9 @@ export function openSettingsView() {
   if (appState.isMcpViewActive) {
     shellApi.dismissMcpViewState();
   }
+  if (appState.isKiroViewActive) {
+    shellApi.dismissKiroViewState();
+  }
   if (getIsSidebarCollapsed()) {
     setSidebarCollapsed(false);
   }

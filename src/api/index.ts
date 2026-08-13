@@ -47,8 +47,14 @@ export {
 export {
   kiroStatus,
   kiroUsage,
+  kiroRefreshToken,
   kiroStart,
   kiroStop,
+  kiroModelsState,
+  kiroSyncModels,
+  kiroSaveModelsConfig,
+  kiroSetDefaultModel,
+  kiroPrepareSend,
 } from './kiro';
 
 export {

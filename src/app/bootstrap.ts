@@ -53,8 +53,17 @@ import {
   mountSettingsView,
 } from '../features/settings';
 import { openMcpView, closeMcpView, dismissMcpViewState, mountMcpView } from '../features/mcp';
+import {
+  openKiroView,
+  closeKiroView,
+  dismissKiroViewState,
+  mountKiroView,
+  renderKiroCard,
+  refreshKiroStatus,
+  scheduleKiroUsage,
+} from '../features/kiro';
 import { newChat } from '../features/chat/send';
-import { renderKiroCard, refreshKiroStatus, refreshSettingsModal } from '../features/api-config';
+import { refreshSettingsModal } from '../features/api-config';
 import { refreshModelInfo } from '../features/chat/render-chat';
 import { checkClaudeCodeUpdate, initAppUpdate } from '../features/updates';
 import { setupEventListeners } from '../events/session-events';
@@ -89,15 +98,19 @@ function wireShellApi(): void {
   shellApi.openApiConfigView = openApiConfigView;
   shellApi.openSettingsView = openSettingsView;
   shellApi.openMcpView = openMcpView;
+  shellApi.openKiroView = openKiroView;
   shellApi.closeApiConfigView = closeApiConfigView;
   shellApi.closeSettingsView = closeSettingsView;
   shellApi.closeMcpView = closeMcpView;
+  shellApi.closeKiroView = closeKiroView;
   shellApi.dismissApiConfigViewState = dismissApiConfigViewState;
   shellApi.dismissSettingsViewState = dismissSettingsViewState;
   shellApi.dismissMcpViewState = dismissMcpViewState;
+  shellApi.dismissKiroViewState = dismissKiroViewState;
   shellApi.mountApiConfigView = mountApiConfigView;
   shellApi.mountSettingsView = mountSettingsView;
   shellApi.mountMcpView = mountMcpView;
+  shellApi.mountKiroView = mountKiroView;
   shellApi.newChat = newChat;
   shellApi.renderKiroCard = renderKiroCard as (status: unknown) => void;
   shellApi.refreshKiroStatus = refreshKiroStatus;
@@ -117,28 +130,31 @@ async function setupKiroAutostartListener(): Promise<void> {
       } catch (e) {
         console.error('[kiro] 自动启动后刷新模型失败:', e);
       }
-      // 若 API 配置页正开着，顺带刷新表单里的模型与 Kiro 卡片
-      const overlay = document.querySelector('#api-config-view') as HTMLElement | null;
-      if (overlay && appState.isApiConfigViewActive) {
+      if (appState.isKiroViewActive) {
         try {
           await refreshKiroStatus();
-          const state = await api.getApiProfilesState();
-          const kiroId =
-            state.profiles.find((p) => p.name === 'Kiro')?.id || state.activeProfileId || null;
-          await refreshSettingsModal(overlay, kiroId);
         } catch (e) {
-          console.error('[kiro] 自动启动后刷新设置页失败:', e);
+          console.error('[kiro] 自动启动后刷新代理页失败:', e);
         }
       } else {
         scheduleMainBalanceBar();
       }
     });
+    await listen<KiroStatusData>('kiro-token-refreshed', (event) => {
+      renderKiroCard(event.payload);
+      if (appState.isKiroViewActive) {
+        scheduleKiroUsage();
+      }
+      scheduleMainBalanceBar();
+    });
     // 若自动启动已先于监听完成，补一次刷新
     try {
       const status = await api.kiroStatus();
-      if (status.running) {
+      if (status.running || status.available) {
         renderKiroCard(status);
-        await loadChatModelOptions();
+        if (status.running) {
+          await loadChatModelOptions();
+        }
       }
     } catch {
       // ignore
@@ -165,6 +181,12 @@ export async function init(): Promise<void> {
   await syncPermissionModeToBackend();
   await loadData();
   await loadChatModelOptions();
+  // 首屏前探测本地是否有 Kiro，决定是否显示「Kiro 代理」入口
+  try {
+    appState.kiroStatus = await api.kiroStatus();
+  } catch {
+    appState.kiroStatus = null;
+  }
   render();
   if (!appState.activeConversationId) {
     void refreshModelInfo();

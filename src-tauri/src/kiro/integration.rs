@@ -1,14 +1,16 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use crate::config::{
-    apply_save_config_to_settings, build_api_profiles_state, env_string, load_api_profiles_store,
-    profile_to_save_config, read_claude_settings_json, save_api_profiles_store, ApiProfile,
-    ApiProfilesState,
+    apply_save_config_to_settings, env_string, load_api_profiles_store, load_kiro_proxy_prefs,
+    purge_kiro_named_profiles, read_claude_settings_json, restore_api_profile_or_official,
+    save_api_profiles_store, save_kiro_proxy_prefs, set_env_string, write_claude_settings_json,
+    SaveClaudeCodeApiConfig,
 };
 
 // ── Kiro 反代代理：内置本地代理，把 Kiro 额度翻译成 Anthropic API ──────────
@@ -26,10 +28,19 @@ pub(crate) const KIRO_MANAGEMENT_URL: &str = "https://management.us-east-1.kiro.
 /// Kiro 默认模型：仅在无法查询账户可用模型时兜底（部分账户套餐不含 Claude 模型）。
 pub(crate) const KIRO_DEFAULT_MODEL: &str = "claude-opus-5";
 
+/// 定时刷新默认间隔（access token 通常约 1 小时）。
+const KIRO_REFRESH_DEFAULT_SECS: u64 = 25 * 60;
+/// 最短刷新间隔，避免过于频繁打 OIDC。
+const KIRO_REFRESH_MIN_SECS: u64 = 5 * 60;
+/// 过期前多久触发刷新。
+const KIRO_REFRESH_SKEW_SECS: i64 = 5 * 60;
+
 pub struct KiroProxyState {
     pub(crate) inner: Arc<Mutex<Option<super::server::ProxyHandle>>>,
     pub(crate) key: Arc<Mutex<Option<String>>>,
     pub(crate) port: Arc<Mutex<Option<u16>>>,
+    /// 递增后旧刷新循环会退出；代理启动时再开新循环。
+    pub(crate) refresh_generation: Arc<AtomicU64>,
 }
 
 impl Clone for KiroProxyState {
@@ -38,6 +49,7 @@ impl Clone for KiroProxyState {
             inner: Arc::clone(&self.inner),
             key: Arc::clone(&self.key),
             port: Arc::clone(&self.port),
+            refresh_generation: Arc::clone(&self.refresh_generation),
         }
     }
 }
@@ -48,14 +60,31 @@ impl Default for KiroProxyState {
             inner: Arc::new(Mutex::new(None)),
             key: Arc::new(Mutex::new(None)),
             port: Arc::new(Mutex::new(None)),
+            refresh_generation: Arc::new(AtomicU64::new(0)),
         }
     }
+}
+
+fn is_proxy_running(state: &KiroProxyState) -> bool {
+    state
+        .inner
+        .lock()
+        .map(|inner| {
+            inner
+                .as_ref()
+                .and_then(|handle| handle.thread.as_ref())
+                .map(|thread| !thread.is_finished())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct KiroStatus {
     pub(crate) running: bool,
+    /// 本地是否具备 Kiro（凭据文件 / 环境变量 / 代理已在跑），供前端决定是否展示入口
+    pub(crate) available: bool,
     pub(crate) port: Option<u16>,
     pub(crate) has_key: bool,
     pub(crate) auth_source: String,
@@ -63,8 +92,23 @@ pub(crate) struct KiroStatus {
     pub(crate) profile_arn: Option<String>,
 }
 
+/// 本地是否存在可用的 Kiro 凭据（文件或环境变量），不发起网络请求。
+pub(crate) fn is_kiro_locally_available() -> bool {
+    if has_kiro_credential_file() {
+        return true;
+    }
+    ["KIRO_AUTHORIZATION", "KIRO_ACCESS_TOKEN"]
+        .iter()
+        .any(|key| {
+            std::env::var(key)
+                .ok()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+        })
+}
+
 pub(crate) fn build_kiro_status_from(state: &KiroProxyState) -> KiroStatus {
-    let running = state.inner.lock().map(|inner| inner.is_some()).unwrap_or(false);
+    let running = is_proxy_running(state);
     let port = state.port.lock().ok().and_then(|p| *p);
     let has_key = state.key.lock().map(|k| k.is_some()).unwrap_or(false);
     let auth = super::auth::Auth::new(
@@ -75,6 +119,7 @@ pub(crate) fn build_kiro_status_from(state: &KiroProxyState) -> KiroStatus {
     );
     KiroStatus {
         running,
+        available: is_kiro_locally_available() || running,
         port,
         has_key,
         auth_source: auth.describe_auth_source(),
@@ -87,49 +132,71 @@ pub(crate) fn build_kiro_status(state: &tauri::State<'_, KiroProxyState>) -> Kir
     build_kiro_status_from(state)
 }
 
-/// 创建或更新名为「Kiro」的 API profile 并激活它。
-pub(crate) fn ensure_kiro_profile(port: u16, api_key: &str, default_model: &str) -> Result<ApiProfilesState, String> {
+/// 开启 Kiro 时：记住原 API 配置、清理列表里遗留的「Kiro」项，并静默写入 Claude settings。
+/// 不在 API 代理列表中新增/展示 Kiro。
+pub(crate) fn activate_kiro_runtime(
+    port: u16,
+    api_key: &str,
+    default_model: &str,
+) -> Result<(), String> {
     let mut store = load_api_profiles_store();
-    let base_url = format!("http://127.0.0.1:{port}");
-    let now = chrono::Utc::now().timestamp();
+    let _ = purge_kiro_named_profiles(&mut store);
 
-    let profile = match store.profiles.iter_mut().find(|p| p.name == "Kiro") {
-        Some(existing) => {
-            existing.base_url = base_url;
-            existing.api_key = api_key.to_string();
-            existing.default_model = default_model.to_string();
-            existing.haiku_model = default_model.to_string();
-            existing.sonnet_model = default_model.to_string();
-            existing.opus_model = default_model.to_string();
-            // 用账户实际可用模型覆盖旧的 Claude 展示项，避免 Claude Code 继续请求无额度模型
-            existing.display_models = vec![default_model.to_string()];
-            existing.updated_at = now;
-            existing.clone()
-        }
-        None => {
-            let profile = ApiProfile {
-                id: uuid::Uuid::new_v4().to_string(),
-                name: "Kiro".to_string(),
-                base_url,
-                api_key: api_key.to_string(),
-                default_model: default_model.to_string(),
-                haiku_model: default_model.to_string(),
-                sonnet_model: default_model.to_string(),
-                opus_model: default_model.to_string(),
-                display_models: vec![default_model.to_string()],
-                custom_models: Vec::new(),
-                created_at: now,
-                updated_at: now,
-            };
-            store.profiles.push(profile.clone());
-            profile
+    let mut prefs = load_kiro_proxy_prefs();
+    // 仅首次进入「用户开启」时快照；已开启时（如重启自动拉起）保留原 previous
+    if !prefs.enabled {
+        prefs.previous_profile_id = store
+            .active_profile_id
+            .clone()
+            .filter(|id| store.profiles.iter().any(|profile| &profile.id == id));
+    }
+    prefs.enabled = true;
+    // 优先沿用用户上次在 Kiro 页选中的模型
+    let model = {
+        let preferred = prefs.default_model.trim();
+        let incoming = default_model.trim();
+        if !preferred.is_empty() {
+            preferred.to_string()
+        } else if !incoming.is_empty() {
+            incoming.to_string()
+        } else {
+            KIRO_DEFAULT_MODEL.to_string()
         }
     };
+    if prefs.default_model.trim().is_empty() {
+        prefs.default_model = model.clone();
+    }
+    if prefs.display_models.is_empty() {
+        prefs.display_models = vec![model.clone()];
+    }
+    save_kiro_proxy_prefs(&prefs)?;
 
-    apply_save_config_to_settings(&profile_to_save_config(&profile))?;
-    store.active_profile_id = Some(profile.id.clone());
+    // 列表不展示 Kiro；运行期间也不把任何列表项标为「正在使用」
+    store.active_profile_id = None;
     save_api_profiles_store(&store)?;
-    Ok(build_api_profiles_state(&store))
+
+    let config = SaveClaudeCodeApiConfig {
+        base_url: format!("http://127.0.0.1:{port}"),
+        api_key: Some(api_key.to_string()),
+        default_model: model.clone(),
+        haiku_model: model.clone(),
+        sonnet_model: model.clone(),
+        opus_model: model,
+        display_models: prefs.display_models.clone(),
+        custom_models: Vec::new(),
+    };
+    apply_save_config_to_settings(&config)?;
+    Ok(())
+}
+
+/// 停止 Kiro 后还原开启前的 API 配置（或官方默认），并关闭「重启自动启动」。
+pub(crate) fn deactivate_kiro_runtime() -> Result<(), String> {
+    let mut prefs = load_kiro_proxy_prefs();
+    let previous = prefs.previous_profile_id.take();
+    prefs.enabled = false;
+    save_kiro_proxy_prefs(&prefs)?;
+    restore_api_profile_or_official(previous)?;
+    Ok(())
 }
 
 /// 本地是否已有 Kiro SSO 凭据文件（快速判断，不发起网络请求）。
@@ -137,10 +204,19 @@ pub(crate) fn has_kiro_credential_file() -> bool {
     kiro_sso_cache_dir().join("kiro-auth-token.json").is_file()
 }
 
+// `is_kiro_locally_available` 定义在上方，与 KiroStatus 相邻便于阅读。
+
 /// 启动 Kiro 反代核心逻辑（命令与自动启动共用）。
-pub(crate) fn start_kiro_proxy(state: &KiroProxyState, port: Option<u16>) -> Result<KiroStatus, String> {
-    // 已在运行则直接返回当前状态
-    if state.inner.lock().map(|inner| inner.is_some()).unwrap_or(false) {
+pub(crate) fn start_kiro_proxy(
+    app: Option<&AppHandle>,
+    state: &KiroProxyState,
+    port: Option<u16>,
+) -> Result<KiroStatus, String> {
+    // 已在运行则直接返回当前状态（并确保刷新循环活着）
+    if is_proxy_running(state) {
+        if let Some(app) = app {
+            spawn_credential_refresh_loop(app.clone(), state.clone());
+        }
         return Ok(build_kiro_status_from(state));
     }
 
@@ -163,7 +239,7 @@ pub(crate) fn start_kiro_proxy(state: &KiroProxyState, port: Option<u16>) -> Res
     };
     if !auth_ok {
         return Err(
-            "未找到 Kiro 凭据：请先安装并登录 Kiro IDE，确认 ~/.aws/sso/cache/kiro-auth-token.json 存在后再试。"
+            "未找到 Kiro 凭据：请先执行 `kiro-cli login`（或登录 Kiro IDE），确认 ~/.aws/sso/cache/kiro-auth-token.json 存在后再试。"
                 .to_string(),
         );
     }
@@ -192,14 +268,13 @@ pub(crate) fn start_kiro_proxy(state: &KiroProxyState, port: Option<u16>) -> Res
     *state.port.lock().map_err(|_| "lock failed".to_string())? = Some(actual_port);
     *state.inner.lock().map_err(|_| "lock failed".to_string())? = Some(handle);
 
-    // 自动创建并激活 Kiro profile
-    let profile_result = ensure_kiro_profile(actual_port, &key, &default_model);
-    if let Err(e) = profile_result {
-        eprintln!("[kiro] profile setup failed: {e}");
+    // 静默套用 Kiro 到 Claude settings（不写入 API 配置列表）
+    if let Err(e) = activate_kiro_runtime(actual_port, &key, &default_model) {
+        eprintln!("[kiro] apply runtime config failed: {e}");
     }
 
-    // 启动后从反代 /v1/models 拉取可用模型，写入 Kiro profile 展示列表
-    match sync_kiro_profile_models(actual_port, &key) {
+    // 启动后从反代 /v1/models 拉取可用模型，写回 Claude settings
+    match sync_kiro_runtime_models(actual_port, &key) {
         Ok(ids) => {
             eprintln!("[kiro] synced {} models after start", ids.len());
         }
@@ -208,7 +283,160 @@ pub(crate) fn start_kiro_proxy(state: &KiroProxyState, port: Option<u16>) -> Res
         }
     }
 
+    if let Some(app) = app {
+        spawn_credential_refresh_loop(app.clone(), state.clone());
+    }
+
     Ok(build_kiro_status_from(state))
+}
+
+/// 停止后台凭据刷新循环（使当前 generation 失效）。
+pub(crate) fn stop_credential_refresh_loop(state: &KiroProxyState) {
+    state.refresh_generation.fetch_add(1, Ordering::SeqCst);
+}
+
+/// 计算下次刷新等待时长：优先在 expiresAt 前 skew 秒刷新，并夹在 [MIN, DEFAULT]。
+fn next_credential_refresh_delay(expires_at: Option<&str>) -> Duration {
+    let default = Duration::from_secs(KIRO_REFRESH_DEFAULT_SECS);
+    let min = Duration::from_secs(KIRO_REFRESH_MIN_SECS);
+    let Some(raw) = expires_at else {
+        return default;
+    };
+    let Ok(exp) = chrono::DateTime::parse_from_rfc3339(raw) else {
+        // 兼容毫秒 ISO：2026-08-13T02:25:41.685Z
+        let trimmed = raw.trim().trim_end_matches('Z');
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S%.f") {
+            let exp = naive.and_utc();
+            return delay_until_expiry(exp.timestamp_millis());
+        }
+        if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+            let exp = naive.and_utc();
+            return delay_until_expiry(exp.timestamp_millis());
+        }
+        return default;
+    };
+    delay_until_expiry(exp.timestamp_millis())
+}
+
+fn delay_until_expiry(expires_at_ms: i64) -> Duration {
+    let default = Duration::from_secs(KIRO_REFRESH_DEFAULT_SECS);
+    let min = Duration::from_secs(KIRO_REFRESH_MIN_SECS);
+    let now = chrono::Utc::now().timestamp_millis();
+    let target = expires_at_ms - KIRO_REFRESH_SKEW_SECS * 1000;
+    if target <= now {
+        return min;
+    }
+    let wait_ms = (target - now) as u64;
+    Duration::from_millis(wait_ms).clamp(min, default)
+}
+
+fn sleep_interruptible(total: Duration, generation: u64, state: &KiroProxyState) -> bool {
+    let step = Duration::from_secs(2);
+    let mut remaining = total;
+    while remaining > Duration::ZERO {
+        if state.refresh_generation.load(Ordering::SeqCst) != generation {
+            return false;
+        }
+        if !is_proxy_running(state) {
+            return false;
+        }
+        let chunk = remaining.min(step);
+        thread::sleep(chunk);
+        remaining = remaining.saturating_sub(chunk);
+    }
+    state.refresh_generation.load(Ordering::SeqCst) == generation
+}
+
+/// 强制刷新共享 SSO 凭据（IDE / CLI 同一文件），写回 ~/.aws/sso/cache。
+pub(crate) fn refresh_shared_sso_credentials() -> Result<bool, String> {
+    let auth = super::auth::Auth::new(
+        kiro_sso_cache_dir(),
+        None,
+        KIRO_RUNTIME_URL.to_string(),
+        KIRO_MANAGEMENT_URL.to_string(),
+    );
+    // 优先尝试 kiro-cli（若已安装）：whoami 会触发 CLI 侧会话校验，失败不阻断内置刷新
+    try_kiro_cli_touch();
+    auth.force_refresh()
+}
+
+/// 若本机有 kiro-cli，轻触一次以保持 CLI 侧会话活跃（不依赖其输出）。
+fn try_kiro_cli_touch() {
+    let candidates = [
+        "kiro-cli",
+        "kiro",
+    ];
+    for bin in candidates {
+        let status = std::process::Command::new(bin)
+            .arg("whoami")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                eprintln!("[kiro] touched {bin} whoami before credential refresh");
+                return;
+            }
+            Ok(_) => continue,
+            Err(_) => continue,
+        }
+    }
+}
+
+/// 代理运行期间定时刷新共享 SSO 凭据，供 CLI 与 IDE 共用。
+pub(crate) fn spawn_credential_refresh_loop(app: AppHandle, state: KiroProxyState) {
+    let generation = state.refresh_generation.fetch_add(1, Ordering::SeqCst) + 1;
+    thread::spawn(move || {
+        eprintln!("[kiro] credential refresh loop start (gen={generation})");
+        // 启动后先等一小段，再按 expiresAt 调度
+        if !sleep_interruptible(Duration::from_secs(30), generation, &state) {
+            eprintln!("[kiro] credential refresh loop stopped early (gen={generation})");
+            return;
+        }
+        loop {
+            if state.refresh_generation.load(Ordering::SeqCst) != generation {
+                break;
+            }
+            if !is_proxy_running(&state) {
+                break;
+            }
+
+            match refresh_shared_sso_credentials() {
+                Ok(true) => {
+                    eprintln!("[kiro] shared SSO credentials refreshed");
+                    let status = build_kiro_status_from(&state);
+                    let _ = app.emit("kiro-token-refreshed", &status);
+                }
+                Ok(false) => {
+                    eprintln!("[kiro] credential refresh skipped: no refreshToken / env auth");
+                }
+                Err(e) => {
+                    eprintln!("[kiro] credential refresh failed: {e}");
+                    let status = build_kiro_status_from(&state);
+                    let _ = app.emit("kiro-token-refresh-failed", &json_refresh_error(&e, &status));
+                }
+            }
+
+            let delay = next_credential_refresh_delay(
+                build_kiro_status_from(&state).expires_at.as_deref(),
+            );
+            eprintln!(
+                "[kiro] next credential refresh in {}s (gen={generation})",
+                delay.as_secs()
+            );
+            if !sleep_interruptible(delay, generation, &state) {
+                break;
+            }
+        }
+        eprintln!("[kiro] credential refresh loop exit (gen={generation})");
+    });
+}
+
+fn json_refresh_error(message: &str, status: &KiroStatus) -> serde_json::Value {
+    serde_json::json!({
+        "message": message,
+        "status": status,
+    })
 }
 
 /// 从本地 Kiro 反代拉取模型 ID 列表。
@@ -269,50 +497,141 @@ pub(crate) fn fetch_kiro_proxy_model_ids(port: u16, api_key: &str) -> Result<Vec
     Err(format!("拉取 Kiro 模型失败: {last_err}"))
 }
 
-/// 把反代返回的模型写入名为「Kiro」的 profile.display_models。
-pub(crate) fn sync_kiro_profile_models(port: u16, api_key: &str) -> Result<Vec<String>, String> {
+/// 把反代返回的模型写回 Claude settings + Kiro 偏好（不维护 API 列表中的 Kiro 项）。
+pub(crate) fn sync_kiro_runtime_models(port: u16, api_key: &str) -> Result<Vec<String>, String> {
     let ids = fetch_kiro_proxy_model_ids(port, api_key)?;
-    let mut store = load_api_profiles_store();
-    let Some(profile) = store.profiles.iter_mut().find(|p| p.name == "Kiro") else {
-        return Err("未找到 Kiro profile".to_string());
-    };
-    profile.display_models = ids.clone();
-    // 若当前默认模型不在新列表里，才回退到列表首项；否则保留用户已选模型
+    let mut prefs = load_kiro_proxy_prefs();
     let settings = read_claude_settings_json();
     let env_model = settings
         .get("env")
         .and_then(|value| value.as_object())
         .map(|env| env_string(env, "ANTHROPIC_MODEL"))
         .unwrap_or_default();
-    let preferred = [profile.default_model.as_str(), env_model.as_str()]
+    let preferred = [prefs.default_model.as_str(), env_model.as_str()]
         .into_iter()
         .map(str::trim)
         .find(|model| !model.is_empty() && ids.iter().any(|id| id == model))
-        .map(str::to_string);
-    if let Some(model) = preferred {
-        profile.default_model = model;
-    } else if !ids.is_empty() {
-        let first = ids[0].clone();
-        profile.default_model = first.clone();
-        profile.haiku_model = first.clone();
-        profile.sonnet_model = first.clone();
-        profile.opus_model = first;
-    }
-    profile.updated_at = chrono::Utc::now().timestamp();
-    let profile_snapshot = profile.clone();
-    apply_save_config_to_settings(&profile_to_save_config(&profile_snapshot))?;
-    save_api_profiles_store(&store)?;
+        .map(str::to_string)
+        .or_else(|| ids.first().cloned())
+        .unwrap_or_else(|| KIRO_DEFAULT_MODEL.to_string());
+
+    prefs.display_models = ids.clone();
+    prefs.default_model = preferred.clone();
+    // 同步只更新 API 展示列表，保留用户自定义模型
+    save_kiro_proxy_prefs(&prefs)?;
+
+    let config = SaveClaudeCodeApiConfig {
+        base_url: format!("http://127.0.0.1:{port}"),
+        api_key: Some(api_key.to_string()),
+        default_model: preferred.clone(),
+        haiku_model: preferred.clone(),
+        sonnet_model: preferred.clone(),
+        opus_model: preferred,
+        display_models: ids.clone(),
+        custom_models: prefs.custom_models.clone(),
+    };
+    apply_save_config_to_settings(&config)?;
     Ok(ids)
 }
 
-/// 后台检测本地 Kiro 凭据，存在则自动启动反代（不阻塞 UI）。
+fn require_running_proxy(state: &KiroProxyState) -> Result<(u16, String), String> {
+    let running = is_proxy_running(state);
+    if !running {
+        return Err("请先启动 Kiro 代理".to_string());
+    }
+    let port = state
+        .port
+        .lock()
+        .map_err(|_| "lock failed".to_string())?
+        .ok_or_else(|| "Kiro 代理端口未知".to_string())?;
+    let key = state
+        .key
+        .lock()
+        .map_err(|_| "lock failed".to_string())?
+        .clone()
+        .ok_or_else(|| "Kiro 代理密钥未知".to_string())?;
+    Ok((port, key))
+}
+
+fn normalize_model_list(models: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut normalized = Vec::new();
+    for model in models {
+        let trimmed = model.trim();
+        if trimmed.is_empty() || !seen.insert(trimmed.to_string()) {
+            continue;
+        }
+        normalized.push(trimmed.to_string());
+    }
+    normalized
+}
+
+fn build_kiro_models_state(running: bool) -> KiroModelsState {
+    let prefs = load_kiro_proxy_prefs();
+    let settings = read_claude_settings_json();
+    let env_model = settings
+        .get("env")
+        .and_then(|value| value.as_object())
+        .map(|env| env_string(env, "ANTHROPIC_MODEL"))
+        .unwrap_or_default();
+    let default_model = if !prefs.default_model.trim().is_empty() {
+        prefs.default_model.clone()
+    } else {
+        env_model
+    };
+    let mut merged = prefs.display_models.clone();
+    for model in &prefs.custom_models {
+        if !merged.iter().any(|existing| existing == model) {
+            merged.push(model.clone());
+        }
+    }
+    KiroModelsState {
+        running,
+        display_models: prefs.display_models,
+        custom_models: prefs.custom_models,
+        // 兼容旧前端：展示 + 自定义合并
+        models: merged,
+        default_model,
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KiroModelsState {
+    pub(crate) running: bool,
+    #[serde(default)]
+    pub(crate) display_models: Vec<String>,
+    #[serde(default)]
+    pub(crate) custom_models: Vec<String>,
+    /// 合并后的候选列表（兼容旧字段名 models）
+    pub(crate) models: Vec<String>,
+    pub(crate) default_model: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SaveKiroModelsConfig {
+    #[serde(default)]
+    pub(crate) display_models: Vec<String>,
+    #[serde(default)]
+    pub(crate) custom_models: Vec<String>,
+    #[serde(default)]
+    pub(crate) default_model: Option<String>,
+}
+
+/// 仅当用户上次开启过 Kiro（prefs.enabled）且本地有凭据时，重启后自动拉起。
 pub(crate) fn spawn_kiro_autostart(app: AppHandle, state: KiroProxyState) {
     thread::spawn(move || {
+        let prefs = load_kiro_proxy_prefs();
+        if !prefs.enabled {
+            eprintln!("[kiro] autostart skipped: proxy was left off");
+            return;
+        }
         if !has_kiro_credential_file() {
             eprintln!("[kiro] autostart skipped: no credential file");
             return;
         }
-        match start_kiro_proxy(&state, None) {
+        match start_kiro_proxy(Some(&app), &state, None) {
             Ok(status) => {
                 eprintln!(
                     "[kiro] autostart ok: running={} port={:?}",
@@ -349,22 +668,224 @@ pub async fn kiro_usage() -> Result<super::auth::KiroUsageInfo, String> {
     .map_err(|e| format!("额度查询任务失败: {e}"))?
 }
 
+/// 手动刷新共享 SSO 凭据（写回 ~/.aws/sso/cache，IDE/CLI 共用）。
+#[tauri::command]
+pub async fn kiro_refresh_token(
+    app: AppHandle,
+    state: tauri::State<'_, KiroProxyState>,
+) -> Result<KiroStatus, String> {
+    let state_clone = (*state).clone();
+    tauri::async_runtime::spawn_blocking(move || refresh_shared_sso_credentials())
+        .await
+        .map_err(|e| format!("凭据刷新任务失败: {e}"))??;
+    let status = build_kiro_status_from(&state_clone);
+    let _ = app.emit("kiro-token-refreshed", &status);
+    Ok(status)
+}
+
+fn validate_kiro_credentials() -> Result<(), String> {
+    let auth = super::auth::Auth::new(
+        kiro_sso_cache_dir(),
+        None,
+        KIRO_RUNTIME_URL.to_string(),
+        KIRO_MANAGEMENT_URL.to_string(),
+    );
+    match auth.list_available_models() {
+        Ok(models) if !models.is_empty() => return Ok(()),
+        Ok(_) => {}
+        Err(error) => {
+            eprintln!("[kiro] send preflight initial validation failed: {error}");
+        }
+    }
+
+    let refreshed = refresh_shared_sso_credentials()
+        .map_err(|error| format!("Kiro 凭据续期失败：{error}"))?;
+    if !refreshed {
+        return Err("Kiro 凭据已失效且无法自动续期，请重新登录 Kiro IDE 或执行 kiro-cli login".to_string());
+    }
+
+    let retry_auth = super::auth::Auth::new(
+        kiro_sso_cache_dir(),
+        None,
+        KIRO_RUNTIME_URL.to_string(),
+        KIRO_MANAGEMENT_URL.to_string(),
+    );
+    let models = retry_auth
+        .list_available_models()
+        .map_err(|error| format!("Kiro 凭据续期后验证失败：{error}"))?;
+    if models.is_empty() {
+        return Err("Kiro 凭据续期后仍无法获取可用模型，请重新登录 Kiro".to_string());
+    }
+    Ok(())
+}
+
+/// 发送消息前检查 Kiro：仅当用户启用了代理时执行。
+/// 代理意外停止则自动拉起；凭据失效则自动续期并重试一次。
+#[tauri::command]
+pub async fn kiro_prepare_send(
+    app: AppHandle,
+    state: tauri::State<'_, KiroProxyState>,
+) -> Result<KiroStatus, String> {
+    if !load_kiro_proxy_prefs().enabled {
+        return Ok(build_kiro_status(&state));
+    }
+
+    let state_clone = (*state).clone();
+    let app_clone = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if !is_proxy_running(&state_clone) {
+            start_kiro_proxy(Some(&app_clone), &state_clone, None)
+                .map_err(|error| format!("Kiro 代理自动恢复失败：{error}"))?;
+        }
+
+        validate_kiro_credentials()?;
+        let status = build_kiro_status_from(&state_clone);
+        if !status.running {
+            return Err("Kiro 代理未运行，请在 Kiro 代理页重新启动".to_string());
+        }
+        Ok(status)
+    })
+    .await
+    .map_err(|error| format!("Kiro 发送前检查任务失败：{error}"))?
+}
+
 /// 启动 Kiro 反代代理并自动接入 Claude Code。
 #[tauri::command]
 pub fn kiro_start(
+    app: AppHandle,
     state: tauri::State<'_, KiroProxyState>,
     port: Option<u16>,
 ) -> Result<KiroStatus, String> {
-    start_kiro_proxy(&state, port)
+    start_kiro_proxy(Some(&app), &state, port)
 }
 
-/// 停止 Kiro 反代代理。
+/// 停止 Kiro 反代代理，并还原开启前的 API 配置。
 #[tauri::command]
 pub fn kiro_stop(state: tauri::State<'_, KiroProxyState>) -> Result<KiroStatus, String> {
+    stop_credential_refresh_loop(&state);
     if let Some(mut handle) = state.inner.lock().map_err(|_| "lock failed".to_string())?.take() {
         handle.stop();
     }
     *state.port.lock().map_err(|_| "lock failed".to_string())? = None;
     *state.key.lock().map_err(|_| "lock failed".to_string())? = None;
+    if let Err(e) = deactivate_kiro_runtime() {
+        eprintln!("[kiro] restore api config after stop failed: {e}");
+    }
     Ok(build_kiro_status(&state))
+}
+
+/// 读取 Kiro 模型列表与当前默认模型（来自偏好 / settings）。
+#[tauri::command]
+pub fn kiro_models_state(state: tauri::State<'_, KiroProxyState>) -> KiroModelsState {
+    let running = is_proxy_running(&state);
+    build_kiro_models_state(running)
+}
+
+/// 从运行中的本地代理同步可用模型，并写入 Claude settings。
+#[tauri::command]
+pub fn kiro_sync_models(state: tauri::State<'_, KiroProxyState>) -> Result<KiroModelsState, String> {
+    let (port, key) = require_running_proxy(&state)?;
+    sync_kiro_runtime_models(port, &key)?;
+    Ok(build_kiro_models_state(true))
+}
+
+/// 保存 Kiro 展示/自定义模型列表（与 API 配置页行为一致）。
+#[tauri::command]
+pub fn kiro_save_models_config(
+    state: tauri::State<'_, KiroProxyState>,
+    config: SaveKiroModelsConfig,
+) -> Result<KiroModelsState, String> {
+    let mut prefs = load_kiro_proxy_prefs();
+    prefs.display_models = normalize_model_list(&config.display_models);
+    prefs.custom_models = normalize_model_list(&config.custom_models);
+
+    let preferred = config
+        .default_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            let current = prefs.default_model.trim();
+            if !current.is_empty()
+                && (prefs.display_models.iter().any(|id| id == current)
+                    || prefs.custom_models.iter().any(|id| id == current))
+            {
+                Some(current.to_string())
+            } else {
+                None
+            }
+        })
+        .or_else(|| prefs.display_models.first().cloned())
+        .or_else(|| prefs.custom_models.first().cloned())
+        .unwrap_or_default();
+    prefs.default_model = preferred.clone();
+    save_kiro_proxy_prefs(&prefs)?;
+
+    // 代理运行中时同步写回 Claude settings，供输入框快捷选择
+    if let Ok((port, key)) = require_running_proxy(&state) {
+        let save = SaveClaudeCodeApiConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            api_key: Some(key),
+            default_model: preferred.clone(),
+            haiku_model: preferred.clone(),
+            sonnet_model: preferred.clone(),
+            opus_model: preferred,
+            display_models: prefs.display_models.clone(),
+            custom_models: prefs.custom_models.clone(),
+        };
+        apply_save_config_to_settings(&save)?;
+    }
+
+    Ok(build_kiro_models_state(is_proxy_running(&state)))
+}
+
+/// 设置 Kiro 默认模型（写入 Claude settings + 偏好）。
+#[tauri::command]
+pub fn kiro_set_default_model(
+    state: tauri::State<'_, KiroProxyState>,
+    model: String,
+) -> Result<KiroModelsState, String> {
+    let trimmed = model.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("模型名称不能为空".to_string());
+    }
+
+    let mut prefs = load_kiro_proxy_prefs();
+    let known = prefs
+        .display_models
+        .iter()
+        .chain(prefs.custom_models.iter())
+        .any(|id| id == &trimmed);
+    if !known {
+        prefs.custom_models.push(trimmed.clone());
+    }
+    prefs.default_model = trimmed.clone();
+    save_kiro_proxy_prefs(&prefs)?;
+
+    if let Ok((port, key)) = require_running_proxy(&state) {
+        let config = SaveClaudeCodeApiConfig {
+            base_url: format!("http://127.0.0.1:{port}"),
+            api_key: Some(key),
+            default_model: trimmed.clone(),
+            haiku_model: trimmed.clone(),
+            sonnet_model: trimmed.clone(),
+            opus_model: trimmed,
+            display_models: prefs.display_models.clone(),
+            custom_models: prefs.custom_models.clone(),
+        };
+        apply_save_config_to_settings(&config)?;
+    } else if prefs.enabled {
+        // 已启用但代理暂未运行：仍更新 settings 中的模型字段
+        let mut settings = read_claude_settings_json();
+        if let Some(env) = settings
+            .get_mut("env")
+            .and_then(|value| value.as_object_mut())
+        {
+            set_env_string(env, "ANTHROPIC_MODEL", &prefs.default_model);
+        }
+        write_claude_settings_json(&settings)?;
+    }
+
+    Ok(build_kiro_models_state(is_proxy_running(&state)))
 }

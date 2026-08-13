@@ -30,13 +30,37 @@ export function renderSettingsIcon(): string {
   `;
 }
 
+export function renderKiroIcon(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 3v3"/>
+      <path d="M12 18v3"/>
+      <path d="M3 12h3"/>
+      <path d="M18 12h3"/>
+      <circle cx="12" cy="12" r="4"/>
+      <path d="M5.6 5.6 7.7 7.7"/>
+      <path d="M16.3 16.3 18.4 18.4"/>
+      <path d="M16.3 7.7 18.4 5.6"/>
+      <path d="M5.6 18.4 7.7 16.3"/>
+    </svg>
+  `;
+}
+
 export function renderTitlebarActions(): string {
   const settingsTitle = shouldShowSettingsUpdateBadge() ? '设置（有可用更新）' : '设置';
+  const showKiro = Boolean(appState.kiroStatus?.available);
   return `
     <button type="button" class="toolbar-settings-btn settings-btn${appState.isApiConfigViewActive ? ' is-active' : ''}" id="api-config-btn" title="管理 Claude Code API 配置" aria-label="API 配置" aria-pressed="${appState.isApiConfigViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderApiConfigIcon()}</span>
       <span class="toolbar-settings-btn-label">API 配置</span>
     </button>
+    ${showKiro ? `
+    <button type="button" class="toolbar-settings-btn settings-btn${appState.isKiroViewActive ? ' is-active' : ''}" id="kiro-proxy-btn" title="${appState.kiroStatus?.running ? 'Kiro 代理运行中' : '管理本机 Kiro 代理'}" aria-label="${appState.kiroStatus?.running ? 'Kiro 代理（运行中）' : 'Kiro 代理'}" aria-pressed="${appState.isKiroViewActive}">
+      <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderKiroIcon()}</span>
+      <span class="toolbar-settings-btn-label">Kiro 代理</span>
+      ${appState.kiroStatus?.running ? '<span class="toolbar-kiro-running-dot" title="运行中" aria-hidden="true"></span>' : ''}
+    </button>
+    ` : ''}
     <button type="button" class="toolbar-settings-btn settings-btn${appState.isSettingsViewActive ? ' is-active' : ''}" id="settings-btn" title="${escapeHtml(settingsTitle)}" aria-label="${escapeHtml(settingsTitle)}" aria-pressed="${appState.isSettingsViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderSettingsIcon()}</span>
       <span class="toolbar-settings-btn-label">设置</span>

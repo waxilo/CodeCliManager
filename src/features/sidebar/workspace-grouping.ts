@@ -7,6 +7,7 @@ import { refreshModelInfo } from '../chat/render-chat';
 import { invalidateFileCache } from '../files/index';
 import { dismissMcpViewState } from '../mcp/mount';
 import { dismissSettingsViewState } from '../settings/mount';
+import { dismissKiroViewState } from '../kiro/mount';
 export function getWorkspaceDisplayName(path: string): string {
   const normalized = path.replace(/[\\/]+$/, '');
   const parts = normalized.split(/[\\/]/);
@@ -120,6 +121,7 @@ export function newChatInWorkspace(workspacePath: string): void {
   dismissApiConfigViewState();
   dismissSettingsViewState();
   dismissMcpViewState();
+  dismissKiroViewState();
   appState.activeConversationId = '';
   invalidateFileCache();
   appState.pendingUserMessage = null;

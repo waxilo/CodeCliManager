@@ -8,11 +8,13 @@ import { refreshStreamingUI } from '../chat/streaming';
 import { refreshConversationFromBackend } from './load';
 import { dismissMcpViewState } from '../mcp/mount';
 import { dismissSettingsViewState } from '../settings/mount';
+import { dismissKiroViewState } from '../kiro/mount';
 import { updateConversationListSpinner } from '../sidebar/render-list';
 export function selectConversation(id: string) {
   dismissApiConfigViewState();
   dismissSettingsViewState();
   dismissMcpViewState();
+  dismissKiroViewState();
   appState.activeConversationId = id;
   invalidateFileCache();
 

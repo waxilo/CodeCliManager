@@ -291,6 +291,92 @@ pub(crate) struct ApiProfilesStore {
     pub(crate) profiles: Vec<ApiProfile>,
 }
 
+/// Kiro 代理用户偏好：是否启用（用于重启恢复），以及关闭时要还原的 API 配置。
+/// Kiro 不写入 api-profiles 列表，仅静默套用到 Claude settings。
+#[derive(Debug, Serialize, Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KiroProxyPrefs {
+    /// 用户上次是否开启了 Kiro 代理；重启后仅在此为 true 时自动启动。
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// 开启 Kiro 前的 active profile；None 表示当时是官方默认。
+    #[serde(default)]
+    pub(crate) previous_profile_id: Option<String>,
+    /// 最近一次同步到的可用模型列表（供聊天页选择器使用）。
+    #[serde(default)]
+    pub(crate) display_models: Vec<String>,
+    /// 用户自定义补充的模型 ID（与 API 配置页一致）。
+    #[serde(default)]
+    pub(crate) custom_models: Vec<String>,
+    /// 用户在 Kiro 页选中的默认模型。
+    #[serde(default)]
+    pub(crate) default_model: String,
+}
+
+pub(crate) fn get_kiro_proxy_prefs_path() -> PathBuf {
+    get_data_path().join("kiro-proxy.json")
+}
+
+pub(crate) fn load_kiro_proxy_prefs() -> KiroProxyPrefs {
+    let path = get_kiro_proxy_prefs_path();
+    if !path.exists() {
+        return KiroProxyPrefs::default();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| serde_json::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn save_kiro_proxy_prefs(prefs: &KiroProxyPrefs) -> Result<(), String> {
+    let data_path = get_data_path();
+    if !data_path.exists() {
+        fs::create_dir_all(&data_path).map_err(|e| format!("Failed to create data dir: {e}"))?;
+    }
+    let content = serde_json::to_string_pretty(prefs)
+        .map_err(|e| format!("Failed to encode kiro proxy prefs: {e}"))?;
+    fs::write(get_kiro_proxy_prefs_path(), content)
+        .map_err(|e| format!("Failed to write kiro proxy prefs: {e}"))
+}
+
+/// 用户改用其它 API 配置时放弃「重启后自动开 Kiro」。
+pub(crate) fn abandon_kiro_proxy_preference() {
+    let mut prefs = load_kiro_proxy_prefs();
+    if !prefs.enabled && prefs.previous_profile_id.is_none() {
+        return;
+    }
+    prefs.enabled = false;
+    prefs.previous_profile_id = None;
+    let _ = save_kiro_proxy_prefs(&prefs);
+}
+
+/// 从 store 中移除历史遗留的名为「Kiro」的列表项（不再作为 API 配置展示）。
+pub(crate) fn purge_kiro_named_profiles(store: &mut ApiProfilesStore) -> bool {
+    let removed_ids: Vec<String> = store
+        .profiles
+        .iter()
+        .filter(|profile| profile.name == "Kiro")
+        .map(|profile| profile.id.clone())
+        .collect();
+    if removed_ids.is_empty() {
+        return false;
+    }
+    store.profiles.retain(|profile| profile.name != "Kiro");
+    if store
+        .active_profile_id
+        .as_ref()
+        .map(|id| removed_ids.iter().any(|removed| removed == id))
+        .unwrap_or(false)
+    {
+        store.active_profile_id = None;
+    }
+    true
+}
+
+pub(crate) fn is_kiro_named_profile(name: &str) -> bool {
+    name.trim() == "Kiro"
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ApiProfileItem {
@@ -475,6 +561,7 @@ pub(crate) fn build_api_profiles_state(store: &ApiProfilesStore) -> ApiProfilesS
         profiles: store
             .profiles
             .iter()
+            .filter(|profile| !is_kiro_named_profile(&profile.name))
             .map(|profile| ApiProfileItem {
                 id: profile.id.clone(),
                 name: profile.name.clone(),
@@ -493,6 +580,11 @@ pub(crate) fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) {
         return;
     }
 
+    // Kiro 运行时配置不写入 API 列表，避免把本地代理地址当成「默认配置」
+    if load_kiro_proxy_prefs().enabled {
+        return;
+    }
+
     let settings = read_claude_settings_json();
     let env = settings
         .get("env")
@@ -501,6 +593,10 @@ pub(crate) fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) {
         .unwrap_or_default();
     let config = config_from_env(&env);
     if config.base_url.is_empty() && !config.has_api_key && config.default_model.is_empty() {
+        return;
+    }
+    let base = config.base_url.trim().to_lowercase();
+    if base.starts_with("http://127.0.0.1:") || base.starts_with("http://localhost:") {
         return;
     }
 
@@ -526,6 +622,9 @@ pub(crate) fn ensure_default_profile_from_live(store: &mut ApiProfilesStore) {
 
 pub(crate) fn load_api_profiles_state() -> ApiProfilesState {
     let mut store = load_api_profiles_store();
+    if purge_kiro_named_profiles(&mut store) {
+        let _ = save_api_profiles_store(&store);
+    }
     ensure_default_profile_from_live(&mut store);
     build_api_profiles_state(&store)
 }
@@ -541,9 +640,12 @@ pub fn switch_api_profile(profile_id: String) -> Result<ApiProfilesState, String
     let profile = store
         .profiles
         .iter()
-        .find(|profile| profile.id == profile_id)
+        .find(|profile| profile.id == profile_id && !is_kiro_named_profile(&profile.name))
         .cloned()
         .ok_or_else(|| "API profile not found".to_string())?;
+
+    // 改用普通 API 配置后，不再在重启时自动拉起 Kiro
+    abandon_kiro_proxy_preference();
 
     apply_save_config_to_settings(&profile_to_save_config(&profile))?;
     store.active_profile_id = Some(profile_id);
@@ -555,6 +657,12 @@ pub fn switch_api_profile(profile_id: String) -> Result<ApiProfilesState, String
 /// 让 Claude Code 回退到官方订阅（OAuth 登录），并取消激活的自定义配置。
 #[tauri::command]
 pub fn use_official_api() -> Result<ApiProfilesState, String> {
+    abandon_kiro_proxy_preference();
+    apply_official_api_settings()
+}
+
+/// 清除 Claude settings 中的自定义 Anthropic env，并取消激活的 API 配置。
+pub(crate) fn apply_official_api_settings() -> Result<ApiProfilesState, String> {
     const KEYS: &[&str] = &[
         "ANTHROPIC_BASE_URL",
         "ANTHROPIC_AUTH_TOKEN",
@@ -585,6 +693,28 @@ pub fn use_official_api() -> Result<ApiProfilesState, String> {
     Ok(build_api_profiles_state(&store))
 }
 
+/// 按 id 恢复某条 API 配置；找不到则回退官方默认。供 Kiro 停止时还原使用。
+pub(crate) fn restore_api_profile_or_official(
+    profile_id: Option<String>,
+) -> Result<ApiProfilesState, String> {
+    let Some(profile_id) = profile_id.filter(|id| !id.trim().is_empty()) else {
+        return apply_official_api_settings();
+    };
+    let mut store = load_api_profiles_store();
+    let Some(profile) = store
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id && !is_kiro_named_profile(&profile.name))
+        .cloned()
+    else {
+        return apply_official_api_settings();
+    };
+    apply_save_config_to_settings(&profile_to_save_config(&profile))?;
+    store.active_profile_id = Some(profile_id);
+    save_api_profiles_store(&store)?;
+    Ok(build_api_profiles_state(&store))
+}
+
 #[tauri::command]
 pub fn upsert_api_profile(
     profile_id: Option<String>,
@@ -595,6 +725,9 @@ pub fn upsert_api_profile(
     let trimmed_name = name.trim();
     if trimmed_name.is_empty() {
         return Err("Profile name cannot be empty".to_string());
+    }
+    if is_kiro_named_profile(trimmed_name) {
+        return Err("Kiro 由「Kiro 代理」页管理，不能作为 API 配置保存".to_string());
     }
 
     let mut store = load_api_profiles_store();
@@ -671,6 +804,7 @@ pub fn upsert_api_profile(
     };
 
     if apply {
+        abandon_kiro_proxy_preference();
         let profile = store
             .profiles
             .iter()
@@ -910,6 +1044,13 @@ pub fn set_active_default_model(model: String) -> Result<ClaudeCodeApiConfig, St
         }
     }
 
+    // 3) Kiro 启用时同步偏好里的默认模型
+    let mut kiro_prefs = load_kiro_proxy_prefs();
+    if kiro_prefs.enabled {
+        kiro_prefs.default_model = trimmed;
+        let _ = save_kiro_proxy_prefs(&kiro_prefs);
+    }
+
     Ok(get_claude_api_config())
 }
 
@@ -993,6 +1134,16 @@ pub fn get_claude_api_config() -> ClaudeCodeApiConfig {
         .cloned()
         .unwrap_or_default();
     let mut config = config_from_env(&env);
+
+    let kiro_prefs = load_kiro_proxy_prefs();
+    if kiro_prefs.enabled {
+        config.display_models = kiro_prefs.display_models;
+        config.custom_models = kiro_prefs.custom_models;
+        if config.default_model.trim().is_empty() && !kiro_prefs.default_model.trim().is_empty() {
+            config.default_model = kiro_prefs.default_model;
+        }
+        return config;
+    }
 
     let store = load_api_profiles_store();
     if let Some(profile) = active_api_profile(&store) {

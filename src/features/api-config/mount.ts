@@ -5,7 +5,7 @@ import { showConfirmDialog, showCopyToastMsg } from '../../ui';
 import type { ClaudeCodeApiConfig, FetchedModel } from '../../types';
 import { fillSettingsForm, refreshSettingsModal, setApiKeyBoxMode, fillOfficialView } from './profile-form';
 import { renderSettingsProfileList, showProfileContextMenu, closeProfileContextMenu } from './profile-list';
-import { refreshKiroStatus, toggleKiroProxy, scheduleDeepSeekBalance, scheduleKiroUsage } from './kiro-panel';
+import { scheduleDeepSeekBalance } from './provider-balance';
 import { loadChatModelOptions, updateChatModelPicker } from '../chat/model-picker';
 import { clearMainBalanceBarCache } from '../status-bar';
 import { OFFICIAL_PROFILE_ID } from './profile-list';
@@ -112,17 +112,17 @@ export async function mountApiConfigView() {
 
   const splitDraftModels = (draft: string[]) => {
     const fetchedIds = getFetchedModelIds();
-    // 未手动同步时没有 fetched 缓存，按已保存的自定义列表区分，避免把 API 模型误存成自定义
-    if (fetchedIds.size === 0) {
-      const customSet = new Set(customModels);
+    // 已同步：按 API 列表划分；未同步：已保存展示模型保持展示，其余（含新添加）进自定义
+    if (fetchedIds.size > 0) {
       return {
-        apiModels: draft.filter((modelId) => !customSet.has(modelId)),
-        customInDraft: draft.filter((modelId) => customSet.has(modelId)),
+        apiModels: draft.filter((modelId) => fetchedIds.has(modelId)),
+        customInDraft: draft.filter((modelId) => !fetchedIds.has(modelId)),
       };
     }
+    const displaySet = new Set(displayModels);
     return {
-      apiModels: draft.filter((modelId) => fetchedIds.has(modelId)),
-      customInDraft: draft.filter((modelId) => !fetchedIds.has(modelId)),
+      apiModels: draft.filter((modelId) => displaySet.has(modelId)),
+      customInDraft: draft.filter((modelId) => !displaySet.has(modelId)),
     };
   };
 
@@ -310,19 +310,8 @@ export async function mountApiConfigView() {
     };
 
     const getDraftModelGroups = () => {
-      const fetchedIds = getFetchedModelIds();
-      if (fetchedIds.size > 0) {
-        return {
-          api: draftModels.filter((modelId) => fetchedIds.has(modelId)),
-          custom: draftModels.filter((modelId) => !fetchedIds.has(modelId)),
-        };
-      }
-      // 未同步时按已保存分类展示，避免把 API 模型误放到自定义区
-      const customSet = new Set(customModels);
-      return {
-        api: draftModels.filter((modelId) => !customSet.has(modelId)),
-        custom: draftModels.filter((modelId) => customSet.has(modelId)),
-      };
+      const { apiModels, customInDraft } = splitDraftModels(draftModels);
+      return { api: apiModels, custom: customInDraft };
     };
 
     const getFilteredModelGroups = () => {
@@ -550,7 +539,16 @@ export async function mountApiConfigView() {
       const modelsToAdd = parsed.models.filter((modelId) => !existing.has(modelId));
       const skippedCount = parsed.duplicateCount + parsed.models.length - modelsToAdd.length;
       if (modelsToAdd.length === 0) {
-        customAddFeedback = `没有新增模型，已跳过 ${skippedCount} 个重复项`;
+        const groups = getDraftModelGroups();
+        const inDisplay = parsed.models.some((id) => groups.api.includes(id));
+        const inCustom = parsed.models.some((id) => groups.custom.includes(id));
+        if (inDisplay && !inCustom) {
+          customAddFeedback = '该模型已在「展示模型」中，无需重复添加';
+        } else if (inCustom) {
+          customAddFeedback = '该模型已在「自定义模型」中';
+        } else {
+          customAddFeedback = `没有新增模型，已跳过 ${skippedCount} 个重复项`;
+        }
         isCustomAddFeedbackError = true;
         renderCustomAddFeedback();
         addInput?.focus();
@@ -558,7 +556,8 @@ export async function mountApiConfigView() {
       }
 
       draftModels = [...draftModels, ...modelsToAdd];
-      customAddFeedback = `已新增 ${modelsToAdd.length} 个模型${skippedCount > 0 ? `，跳过 ${skippedCount} 个重复项` : ''}`;
+      customModels = [...new Set([...customModels, ...modelsToAdd])];
+      customAddFeedback = `已新增 ${modelsToAdd.length} 个自定义模型${skippedCount > 0 ? `，跳过 ${skippedCount} 个重复项` : ''}`;
       isCustomAddFeedbackError = false;
       renderDialog();
       const saved = await persistDraft();
@@ -734,8 +733,18 @@ export async function mountApiConfigView() {
     }
     list.dataset.bound = 'true';
 
+    const stopKiroProxyIfRunning = async () => {
+      if (!appState.kiroStatus?.running) return;
+      try {
+        appState.kiroStatus = await api.kiroStop();
+      } catch (e) {
+        console.error('停止 Kiro 代理失败:', e);
+      }
+    };
+
     const applyProfile = async (profileId: string) => {
       try {
+        await stopKiroProxyIfRunning();
         await api.switchApiProfile(profileId);
         clearMainBalanceBarCache();
         await refreshSettingsModal(overlay, profileId, handleProfileConfigLoaded);
@@ -771,6 +780,7 @@ export async function mountApiConfigView() {
 
     const applyOfficial = async () => {
       try {
+        await stopKiroProxyIfRunning();
         await api.useOfficialApi();
         clearMainBalanceBarCache();
         await refreshSettingsModal(overlay, null, handleProfileConfigLoaded);
@@ -1007,10 +1017,16 @@ export async function mountApiConfigView() {
     }
     try {
       if (profileId === OFFICIAL_PROFILE_ID) {
+        if (appState.kiroStatus?.running) {
+          appState.kiroStatus = await api.kiroStop();
+        }
         await api.useOfficialApi();
         clearMainBalanceBarCache();
         await refreshSettingsModal(overlay, null, handleProfileConfigLoaded);
       } else {
+        if (appState.kiroStatus?.running) {
+          appState.kiroStatus = await api.kiroStop();
+        }
         await api.switchApiProfile(profileId);
         clearMainBalanceBarCache();
         await refreshSettingsModal(overlay, profileId, handleProfileConfigLoaded);
@@ -1100,14 +1116,6 @@ export async function mountApiConfigView() {
     }
   });
 
-  overlay.querySelector('.kiro-toggle-btn')?.addEventListener('click', () => {
-    void toggleKiroProxy(overlay);
-  });
-
-  overlay.querySelector('.kiro-usage-refresh')?.addEventListener('click', () => {
-    scheduleKiroUsage();
-  });
-
   overlay.querySelector('.provider-balance-refresh')?.addEventListener('click', () => {
     scheduleDeepSeekBalance(overlay);
   });
@@ -1125,8 +1133,6 @@ export async function mountApiConfigView() {
     }
     bindProfileListEvents();
     bindModelConfigEvents();
-    // 状态 / 额度后台刷新，不阻塞配置页首屏
-    void refreshKiroStatus();
   } catch (e) {
     if (!isMountCurrent()) return;
     alert('加载 API 配置失败: ' + String(e));

@@ -31,15 +31,19 @@ export const shellApi: {
   openApiConfigView: VoidFn;
   openSettingsView: VoidFn;
   openMcpView: VoidFn;
+  openKiroView: VoidFn;
   closeApiConfigView: VoidFn;
   closeSettingsView: VoidFn;
   closeMcpView: VoidFn;
+  closeKiroView: VoidFn;
   dismissApiConfigViewState: VoidFn;
   dismissSettingsViewState: VoidFn;
   dismissMcpViewState: VoidFn;
+  dismissKiroViewState: VoidFn;
   mountApiConfigView: AsyncVoidFn;
   mountSettingsView: VoidFn;
   mountMcpView: AsyncVoidFn;
+  mountKiroView: AsyncVoidFn;
   newChat: VoidFn;
   renderKiroCard: (status: unknown) => void;
   refreshKiroStatus: AsyncVoidFn;
@@ -74,15 +78,19 @@ export const shellApi: {
   openApiConfigView: () => {},
   openSettingsView: () => {},
   openMcpView: () => {},
+  openKiroView: () => {},
   closeApiConfigView: () => {},
   closeSettingsView: () => {},
   closeMcpView: () => {},
+  closeKiroView: () => {},
   dismissApiConfigViewState: () => {},
   dismissSettingsViewState: () => {},
   dismissMcpViewState: () => {},
+  dismissKiroViewState: () => {},
   mountApiConfigView: async () => {},
   mountSettingsView: () => {},
   mountMcpView: async () => {},
+  mountKiroView: async () => {},
   newChat: () => {},
   renderKiroCard: () => {},
   refreshKiroStatus: async () => {},

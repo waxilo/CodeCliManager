@@ -41,6 +41,7 @@ import {
   renderSettingsSidebarHtml,
 } from '../../features/settings';
 import { openMcpView, closeMcpView, mountMcpView, renderMcpViewHtml } from '../../features/mcp';
+import { openKiroView, closeKiroView, mountKiroView, renderKiroViewHtml } from '../../features/kiro';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { loadData } from '../../features/conversations';
 import { newChat } from '../../features/chat/send';
@@ -82,9 +83,9 @@ export function render() {
           ${renderTitlebarActions()}
         </div>
       </header>
-      <div class="app-container${getIsSidebarCollapsed() ? ' is-sidebar-collapsed' : ''}${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
+      <div class="app-container${getIsSidebarCollapsed() ? ' is-sidebar-collapsed' : ''}${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive || appState.isKiroViewActive ? ' is-mcp' : ''}">
       <div class="sidebar${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : ''}">
-        ${appState.isApiConfigViewActive ? renderApiConfigSidebarHtml() : appState.isSettingsViewActive ? renderSettingsSidebarHtml() : appState.isMcpViewActive ? '' : `
+        ${appState.isApiConfigViewActive ? renderApiConfigSidebarHtml() : appState.isSettingsViewActive ? renderSettingsSidebarHtml() : appState.isMcpViewActive || appState.isKiroViewActive ? '' : `
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
             <div class="new-chat-btn-wrapper">
@@ -132,8 +133,8 @@ export function render() {
         aria-orientation="vertical"
         aria-label="调整侧边栏宽度"
       ></div>
-      <div class="main-content${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
-        ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isMcpViewActive ? renderMcpViewHtml() : `
+      <div class="main-content${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive || appState.isKiroViewActive ? ' is-mcp' : ''}">
+        ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isMcpViewActive ? renderMcpViewHtml() : appState.isKiroViewActive ? renderKiroViewHtml() : `
         <div class="drop-zone-overlay" id="drop-zone-overlay">
           <div class="drop-zone-content">
             <div class="drop-zone-icon" aria-hidden="true">
@@ -159,13 +160,13 @@ export function render() {
         `}
       </div>
       </div>
-      ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderBalanceStatusBarHtml() : ''}
+      ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive && !appState.isKiroViewActive ? renderBalanceStatusBarHtml() : ''}
     </div>
   `;
   
   attachEventListeners();
   // render 重建了发送按钮 DOM，按 appState.runningSessions（与左侧同一逻辑）恢复 loading
-  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive) {
+  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive && !appState.isKiroViewActive) {
     setSendButtonLoading(isActiveConversationRunning());
   }
   remountActiveInteractionPanel();
@@ -266,6 +267,13 @@ export function attachEventListeners() {
       openApiConfigView();
     }
   });
+  document.querySelector('#kiro-proxy-btn')?.addEventListener('click', () => {
+    if (appState.isKiroViewActive) {
+      closeKiroView();
+    } else {
+      openKiroView();
+    }
+  });
   document.querySelector('#settings-btn')?.addEventListener('click', () => {
     if (appState.isSettingsViewActive) {
       closeSettingsView();
@@ -307,8 +315,12 @@ export function attachEventListeners() {
     void mountMcpView();
   }
 
+  if (appState.isKiroViewActive) {
+    void mountKiroView();
+  }
+
   // 拖拽文件自动引用（全屏管理页无输入区，跳过）
-  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive) {
+  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive && !appState.isKiroViewActive) {
     bindDragDropFileRefs();
     bindPermissionModeBarEvents();
     startMainBalanceBarAutoRefresh();

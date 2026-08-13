@@ -63,3 +63,18 @@ export function isKiroProfile(profile: ApiProfileItem | undefined): boolean {
   return Boolean(profile && profile.name === 'Kiro');
 }
 
+/** 当前是否走 Kiro 本地代理（不依赖 API 列表里的「Kiro」项） */
+export function isKiroRuntimeActive(
+  baseUrl: string,
+  kiroRunning: boolean | undefined,
+  kiroPort: number | null | undefined,
+): boolean {
+  if (kiroRunning) return true;
+  const url = baseUrl.trim().toLowerCase();
+  if (!url) return false;
+  if (kiroPort != null && (url.includes(`127.0.0.1:${kiroPort}`) || url.includes(`localhost:${kiroPort}`))) {
+    return true;
+  }
+  return false;
+}
+

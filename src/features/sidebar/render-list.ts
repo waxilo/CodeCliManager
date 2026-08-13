@@ -232,7 +232,7 @@ export function renderConversationList(): string {
 
 /** 局部重渲染侧边栏会话列表 */
 export function refreshConversationListDom(): void {
-  if (appState.isApiConfigViewActive || appState.isSettingsViewActive) return;
+  if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive || appState.isKiroViewActive) return;
   const list = document.querySelector('#conversation-list');
   if (list) list.innerHTML = renderConversationList();
 }

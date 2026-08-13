@@ -330,7 +330,7 @@ export function handleSessionError(payload: SessionErrorPayload) {
 
 export function ensureChatViewVisible() {
   // 全屏管理页占用主区域时，不因后台流式事件强制切回聊天视图
-  if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive) return;
+  if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive || appState.isKiroViewActive) return;
   const mainContent = document.querySelector('.main-content');
   if (!mainContent) return;
   if (!document.querySelector('#message-list')) {

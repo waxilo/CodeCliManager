@@ -19,8 +19,44 @@ import { isImageFile, stripFileRefTags, stripFileRefsFromDisplay, unwrapFileRef 
 import { dismissMcpViewState } from '../mcp/mount';
 import { normalizeModelKey } from '../permissions/permission-mode';
 import { dismissSettingsViewState } from '../settings/mount';
+import { dismissKiroViewState } from '../kiro/mount';
 import { updateConversationListSpinner } from '../sidebar/render-list';
 import { newChatInWorkspace } from '../sidebar/workspace-grouping';
+
+let isPreparingKiroSend = false;
+
+/**
+ * 消息发送前确认 Kiro 可用。检查期间不读取或清空输入内容/附件，
+ * 因此自动恢复失败时用户草稿会完整留在输入框。
+ */
+async function prepareKiroBeforeSend(
+  input: HTMLTextAreaElement,
+  sendBtn: HTMLButtonElement | null,
+): Promise<boolean> {
+  if (isPreparingKiroSend) return false;
+  isPreparingKiroSend = true;
+
+  if (sendBtn) {
+    sendBtn.disabled = true;
+    sendBtn.title = '正在检查 Kiro 代理…';
+    sendBtn.setAttribute('aria-label', '正在检查 Kiro 代理');
+  }
+
+  try {
+    const status = await api.kiroPrepareSend();
+    appState.kiroStatus = status;
+    return true;
+  } catch (error) {
+    console.error('[kiro] 发送前检查失败:', error);
+    alert(`Kiro 代理不可用，消息未发送：${String(error)}`);
+    input.focus();
+    return false;
+  } finally {
+    isPreparingKiroSend = false;
+    updateSendButtonState();
+  }
+}
+
 export function newChat() {
   toggleNewChatDropdown();
 }
@@ -109,6 +145,7 @@ export async function pickNewWorkspaceDirectory(): Promise<void> {
   dismissApiConfigViewState();
   dismissSettingsViewState();
   dismissMcpViewState();
+  dismissKiroViewState();
   appState.activeConversationId = '';
   invalidateFileCache();
   appState.pendingUserMessage = null;
@@ -160,12 +197,24 @@ export async function sendMessage() {
 
   if (!input) return;
 
-  const hasPastedImages = appState.pasteAttachments.length > 0;
-  const hasImportedFiles = appState.importedFileRefs.length > 0;
+  let hasPastedImages = appState.pasteAttachments.length > 0;
+  let hasImportedFiles = appState.importedFileRefs.length > 0;
   if (!input.value.trim() && !hasPastedImages && !hasImportedFiles) return;
   if (sendBtn?.disabled) return;
 
   if (isNewChatSession() && !hasRequiredProjectDir()) {
+    return;
+  }
+
+  // 必须在清空输入框、附件和创建 pending 消息之前完成 Kiro 预检。
+  if (!(await prepareKiroBeforeSend(input, sendBtn))) {
+    return;
+  }
+
+  // 检查期间用户仍可编辑草稿；以检查完成时的输入与附件为准。
+  hasPastedImages = appState.pasteAttachments.length > 0;
+  hasImportedFiles = appState.importedFileRefs.length > 0;
+  if (!input.value.trim() && !hasPastedImages && !hasImportedFiles) {
     return;
   }
 

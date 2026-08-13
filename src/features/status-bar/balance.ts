@@ -1,6 +1,6 @@
 import { appState } from '../../state';
 import * as api from '../../api';
-import { isDeepSeekBaseUrl, isKiroProfile, formatDeepSeekBalanceText, formatKiroUsageText } from '../api-config/balance-helpers';
+import { isDeepSeekBaseUrl, isKiroRuntimeActive, formatDeepSeekBalanceText, formatKiroUsageText } from '../api-config/balance-helpers';
 import { refreshGitBranch } from './git-branch';
 export function getMainBalanceBarEl(): HTMLElement | null {
   return document.querySelector('#balance-status-bar');
@@ -49,22 +49,24 @@ export async function refreshMainBalanceBar(): Promise<void> {
     const baseUrl = (activeProfile?.baseUrl || state.current?.baseUrl || '').trim();
     const profileName = activeProfile?.name || '官方默认';
     const profileId = activeProfile?.id ?? '';
+    const kiroRunning = Boolean(appState.kiroStatus?.running);
+    const kiroPort = appState.kiroStatus?.port ?? null;
 
     // 配置已切换时，不要继续展示上一套配置的余额
-    if (appState.mainBalanceCache && appState.mainBalanceCache.profileId !== profileId) {
+    const balanceKey = kiroRunning ? '__kiro__' : profileId;
+    if (appState.mainBalanceCache && appState.mainBalanceCache.profileId !== balanceKey) {
       clearMainBalanceBarCache();
     }
 
-    if (isKiroProfile(activeProfile)) {
+    if (isKiroRuntimeActive(baseUrl, kiroRunning, kiroPort)) {
       try {
         const usage = await api.kiroUsage();
         if (!(appState.mainBalanceGuard.isCurrent(requestId))) return;
-        setMainBalanceBarContent(profileId, `${profileName} · 额度`, formatKiroUsageText(usage));
+        setMainBalanceBarContent(balanceKey, 'Kiro · 额度', formatKiroUsageText(usage));
       } catch (e) {
         if (!(appState.mainBalanceGuard.isCurrent(requestId))) return;
-        // 已有上次内容时保留；仅首次失败才写错误
-        if (!appState.mainBalanceCache || appState.mainBalanceCache.profileId !== profileId) {
-          setMainBalanceBarContent(profileId, `${profileName} · 额度`, `查询失败：${String(e)}`);
+        if (!appState.mainBalanceCache || appState.mainBalanceCache.profileId !== balanceKey) {
+          setMainBalanceBarContent(balanceKey, 'Kiro · 额度', `查询失败：${String(e)}`);
         }
       }
       return;
@@ -97,7 +99,7 @@ export async function refreshMainBalanceBar(): Promise<void> {
 
 export function scheduleMainBalanceBar(): void {
   window.setTimeout(() => {
-    if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive) return;
+    if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive || appState.isKiroViewActive) return;
     void refreshGitBranch();
     void refreshMainBalanceBar();
   }, 0);

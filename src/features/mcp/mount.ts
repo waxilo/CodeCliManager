@@ -12,6 +12,9 @@ export function openMcpView() {
   if (appState.isSettingsViewActive) {
     shellApi.dismissSettingsViewState();
   }
+  if (appState.isKiroViewActive) {
+    shellApi.dismissKiroViewState();
+  }
   appState.isMcpViewActive = true;
   shellApi.render();
 }

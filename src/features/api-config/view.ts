@@ -51,27 +51,6 @@ export function renderApiConfigViewHtml(): string {
         <p class="settings-model-config-hint">配置展示模型与自定义模型列表，点击输入框管理</p>
         <p class="settings-path settings-live-path"></p>
       </form>
-      <section class="kiro-card" id="kiro-card">
-        <div class="kiro-card-head">
-          <div class="kiro-card-title-wrap">
-            <span class="kiro-card-badge">Kiro</span>
-            <span class="kiro-card-status" data-kiro-status="unknown">检测中…</span>
-          </div>
-          <button type="button" class="settings-btn-primary kiro-toggle-btn" data-kiro-running="false" disabled>启动</button>
-        </div>
-        <div class="kiro-card-body">
-          <div class="kiro-card-row"><span class="kiro-card-label">代理地址</span><code class="kiro-card-value" data-kiro-port>未运行</code></div>
-          <div class="kiro-card-row"><span class="kiro-card-label">凭据来源</span><span class="kiro-card-value" data-kiro-auth>—</span></div>
-          <div class="kiro-card-row"><span class="kiro-card-label">Token 过期</span><span class="kiro-card-value" data-kiro-expires>—</span></div>
-          <div class="kiro-card-row kiro-card-row-profile"><span class="kiro-card-label">Profile ARN</span><span class="kiro-card-value kiro-card-value-arn" data-kiro-arn>—</span></div>
-          <div class="kiro-card-row">
-            <span class="kiro-card-label">账户额度</span>
-            <span class="kiro-card-value" data-kiro-usage>—</span>
-            <button type="button" class="settings-apikey-btn kiro-usage-refresh" title="刷新额度">刷新</button>
-          </div>
-        </div>
-        <p class="kiro-card-hint">将本地代理暴露为 Anthropic API，配合 Kiro IDE 免费额度的 Claude 使用；开关仅影响本机代理，不影响上方 API 配置。</p>
-      </section>
       <div class="settings-footer">
         <div class="settings-footer-actions">
           <button type="button" class="settings-btn-secondary settings-apply-profile">应用</button>
