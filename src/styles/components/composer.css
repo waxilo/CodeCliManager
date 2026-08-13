@@ -418,10 +418,68 @@
   cursor: wait;
 }
 
+.send-btn.is-checking {
+  opacity: 1;
+  cursor: wait;
+  background: var(--color-accent, #4f8cff);
+  color: #fff;
+}
+
+.send-btn.is-checking:hover {
+  background: var(--color-accent, #4f8cff);
+}
+
+.send-check-spinner {
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.35);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: conv-spin 0.7s linear infinite;
+}
+
+.send-check-spinner[hidden] {
+  display: none !important;
+}
+
 /* 流式输出时输入框禁用状态 */
 .input-composer.is-loading {
   border-color: var(--color-accent, #4f8cff);
   opacity: 0.85;
+}
+
+/* 发送前检查 Kiro：输入区可见反馈，避免误判为卡死 */
+.input-composer.is-checking-kiro {
+  border-color: var(--color-accent, #4f8cff);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent, #4f8cff) 35%, transparent);
+}
+
+.input-composer.is-checking-kiro .input-composer-textarea::placeholder {
+  color: var(--color-accent, #4f8cff);
+  opacity: 0.9;
+}
+
+.kiro-prepare-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+  font-size: 12px;
+  line-height: 1.2;
+  color: var(--color-accent, #4f8cff);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.kiro-prepare-hint::before {
+  content: '';
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid color-mix(in srgb, var(--color-accent, #4f8cff) 35%, transparent);
+  border-top-color: var(--color-accent, #4f8cff);
+  border-radius: 50%;
+  animation: conv-spin 0.7s linear infinite;
 }
 
 .input-composer-textarea:disabled {

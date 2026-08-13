@@ -18,24 +18,52 @@ export function shouldShowSettingsUpdateBadge(): boolean {
   return shouldShowAppUpdateBadge() || shouldShowClaudeUpdateBadge();
 }
 
+/** 同步设置侧栏「CCM / Claude Code」分区小红点（不依赖全量 render） */
+export function syncSettingsSectionBadgeDots(): void {
+  if (!appState.isSettingsViewActive) return;
+  const nav = document.querySelector('.settings-section-nav');
+  if (!nav) return;
+
+  const entries: Array<{ section: 'app-update' | 'claude-update'; show: boolean }> = [
+    { section: 'app-update', show: shouldShowAppUpdateBadge() },
+    { section: 'claude-update', show: shouldShowClaudeUpdateBadge() },
+  ];
+
+  for (const { section, show } of entries) {
+    const item = nav.querySelector(`[data-settings-section="${section}"]`);
+    if (!item) continue;
+    let dot = item.querySelector('.settings-section-item-dot');
+    if (show && !dot) {
+      dot = document.createElement('span');
+      dot.className = 'settings-section-item-dot';
+      dot.setAttribute('aria-label', '有更新');
+      item.appendChild(dot);
+    } else if (!show && dot) {
+      dot.remove();
+    }
+  }
+}
+
 export function syncSettingsUpdateBadgeUI(): void {
   const btn = document.querySelector('#settings-btn') as HTMLButtonElement | null;
-  if (!btn) return;
+  if (btn) {
+    const showBadge = shouldShowSettingsUpdateBadge();
+    let dot = btn.querySelector('.toolbar-settings-update-dot');
+    if (showBadge && !dot) {
+      dot = document.createElement('span');
+      dot.className = 'toolbar-settings-update-dot';
+      dot.setAttribute('aria-hidden', 'true');
+      btn.appendChild(dot);
+    } else if (!showBadge && dot) {
+      dot.remove();
+    }
 
-  const showBadge = shouldShowSettingsUpdateBadge();
-  let dot = btn.querySelector('.toolbar-settings-update-dot');
-  if (showBadge && !dot) {
-    dot = document.createElement('span');
-    dot.className = 'toolbar-settings-update-dot';
-    dot.setAttribute('aria-hidden', 'true');
-    btn.appendChild(dot);
-  } else if (!showBadge && dot) {
-    dot.remove();
+    const title = showBadge ? '设置（有可用更新）' : '设置';
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
   }
 
-  const title = showBadge ? '设置（有可用更新）' : '设置';
-  btn.title = title;
-  btn.setAttribute('aria-label', title);
+  syncSettingsSectionBadgeDots();
 }
 
 export function getAppUpdateButtonTitle(): string {

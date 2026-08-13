@@ -4,6 +4,8 @@ type AsyncVoidFn = () => Promise<void>;
 
 export const shellApi: {
   render: VoidFn;
+  /** 仅重建标题栏 actions 并重新绑定，供 Kiro 运行状态点等轻量刷新 */
+  syncTitlebarActions: VoidFn;
   refreshChatContent: VoidFn;
   refreshConversationListDom: VoidFn;
   loadData: AsyncVoidFn;
@@ -51,6 +53,7 @@ export const shellApi: {
   refreshModelInfo: AsyncVoidFn;
 } = {
   render: () => {},
+  syncTitlebarActions: () => {},
   refreshChatContent: () => {},
   refreshConversationListDom: () => {},
   loadData: async () => {},

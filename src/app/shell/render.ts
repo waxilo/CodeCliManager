@@ -12,7 +12,7 @@ import {
   toggleTheme,
 } from '../../ui';
 import { shellApi } from './api';
-import { renderTitlebarActions } from './titlebar';
+import { patchTitlebarActions, renderTitlebarActions } from './titlebar';
 import {
   renderConversationList,
   bindSidebarSearch,
@@ -61,7 +61,27 @@ import { handleEditKeydown } from '../../features/conversations/edit-export';
 import { checkAppUpdate, bindAppUpdatePopoverEvents } from '../../features/updates/app-update';
 import { bindClaudeUpdatePopoverEvents } from '../../features/updates/claude-update';
 
+/** 合并连点/并发触发的全量重绘，避免 Win WebView2 上堆积卡死 */
+let isShellRendering = false;
+let hasPendingShellRender = false;
+
 export function render() {
+  if (isShellRendering) {
+    hasPendingShellRender = true;
+    return;
+  }
+  isShellRendering = true;
+  try {
+    do {
+      hasPendingShellRender = false;
+      performRender();
+    } while (hasPendingShellRender);
+  } finally {
+    isShellRendering = false;
+  }
+}
+
+function performRender() {
   app.innerHTML = `
     <div class="app-shell">
       <header class="app-titlebar">
@@ -172,6 +192,44 @@ export function render() {
   remountActiveInteractionPanel();
 }
 
+/** 轻量刷新标题栏（Kiro 绿点/入口显隐），不触发全页重绘 */
+export function syncTitlebarActions(): void {
+  if (!patchTitlebarActions()) return;
+  bindTitlebarActionEvents();
+}
+
+function bindTitlebarActionEvents(): void {
+  document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
+  document.querySelector('#api-config-btn')?.addEventListener('click', () => {
+    if (appState.isApiConfigViewActive) {
+      closeApiConfigView();
+    } else {
+      openApiConfigView();
+    }
+  });
+  document.querySelector('#kiro-proxy-btn')?.addEventListener('click', () => {
+    if (appState.isKiroViewActive) {
+      closeKiroView();
+    } else {
+      openKiroView();
+    }
+  });
+  document.querySelector('#settings-btn')?.addEventListener('click', () => {
+    if (appState.isSettingsViewActive) {
+      closeSettingsView();
+    } else {
+      openSettingsView();
+    }
+  });
+  document.querySelector('#mcp-btn')?.addEventListener('click', () => {
+    if (appState.isMcpViewActive) {
+      closeMcpView();
+    } else {
+      openMcpView();
+    }
+  });
+}
+
 export function attachEventListeners() {
   document.querySelector('#new-chat-btn')?.addEventListener('click', newChat);
 
@@ -241,7 +299,6 @@ export function attachEventListeners() {
   });
   syncSidebarResponsiveState();
   syncSidebarCollapsedUI();
-  document.querySelector('#theme-toggle-btn')?.addEventListener('click', toggleTheme);
   document.querySelectorAll<HTMLButtonElement>('[data-settings-section]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const section = btn.dataset.settingsSection as SettingsSection | undefined;
@@ -260,34 +317,7 @@ export function attachEventListeners() {
       }
     });
   });
-  document.querySelector('#api-config-btn')?.addEventListener('click', () => {
-    if (appState.isApiConfigViewActive) {
-      closeApiConfigView();
-    } else {
-      openApiConfigView();
-    }
-  });
-  document.querySelector('#kiro-proxy-btn')?.addEventListener('click', () => {
-    if (appState.isKiroViewActive) {
-      closeKiroView();
-    } else {
-      openKiroView();
-    }
-  });
-  document.querySelector('#settings-btn')?.addEventListener('click', () => {
-    if (appState.isSettingsViewActive) {
-      closeSettingsView();
-    } else {
-      openSettingsView();
-    }
-  });
-  document.querySelector('#mcp-btn')?.addEventListener('click', () => {
-    if (appState.isMcpViewActive) {
-      closeMcpView();
-    } else {
-      openMcpView();
-    }
-  });
+  bindTitlebarActionEvents();
 
   if (appState.isApiConfigViewActive) {
     void mountApiConfigView();

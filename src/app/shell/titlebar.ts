@@ -76,3 +76,11 @@ export function renderTitlebarActions(): string {
   `;
 }
 
+/** 仅刷新标题栏按钮区（避免 Kiro 状态变化时全页 innerHTML 重绘导致 Win 端卡死） */
+export function patchTitlebarActions(): boolean {
+  const el = document.querySelector('.app-titlebar-actions');
+  if (!el) return false;
+  el.innerHTML = renderTitlebarActions();
+  return true;
+}
+

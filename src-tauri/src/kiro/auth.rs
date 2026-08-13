@@ -6,6 +6,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use reqwest::blocking::Client;
@@ -13,6 +14,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 const TOKEN_REFRESH_SKEW_SECS: i64 = 120;
+/// 避免 Windows 网络异常时无超时阻塞导致 UI/IPC 卡死
+const KIRO_HTTP_TIMEOUT_SECS: u64 = 30;
 const PROFILE_ARN_RE: &str = r"^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:profile/[A-Za-z0-9_-]+$";
 
 #[derive(Default)]
@@ -54,12 +57,16 @@ impl Auth {
         runtime_url: String,
         management_url: String,
     ) -> Self {
+        let http = Client::builder()
+            .timeout(Duration::from_secs(KIRO_HTTP_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
             sso_cache_dir,
             profile_arn_override,
             runtime_url,
             management_url,
-            http: Client::new(),
+            http,
             cache: Mutex::new(AuthCache::default()),
         }
     }
@@ -89,17 +96,12 @@ impl Auth {
             .and_then(|content| serde_json::from_str(&content).ok())
     }
 
-    fn write_sso_token(&self, token: &Value) -> Result<(), String> {
-        let cache_path = token
-            .get("cachePath")
-            .and_then(|v| v.as_str())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| self.sso_token_path());
-        let mut clean = token.clone();
-        if let Some(obj) = clean.as_object_mut() {
-            obj.remove("cachePath");
+    fn write_sso_token_to(&self, path: &PathBuf, clean: &Value) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create SSO cache dir: {e}"))?;
         }
-        let tmp_path = cache_path.with_extension(format!("tmp.{}", std::process::id()));
+        let tmp_path = path.with_extension(format!("tmp.{}", std::process::id()));
         let mut file = fs::File::create(&tmp_path)
             .map_err(|e| format!("Failed to create token temp file: {e}"))?;
         #[cfg(unix)]
@@ -112,10 +114,33 @@ impl Auth {
             perms.set_mode(0o600);
             let _ = file.set_permissions(perms);
         }
-        writeln!(file, "{}", serde_json::to_string_pretty(&clean).map_err(|e| e.to_string())?)
+        writeln!(file, "{}", serde_json::to_string_pretty(clean).map_err(|e| e.to_string())?)
             .map_err(|e| format!("Failed to write token file: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("Failed to sync token file: {e}"))?;
         drop(file);
-        fs::rename(&tmp_path, &cache_path).map_err(|e| format!("Failed to rename token file: {e}"))
+        fs::rename(&tmp_path, path).map_err(|e| format!("Failed to rename token file: {e}"))
+    }
+
+    fn write_sso_token(&self, token: &Value) -> Result<(), String> {
+        let mut clean = token.clone();
+        if let Some(obj) = clean.as_object_mut() {
+            obj.remove("cachePath");
+        }
+        // 始终写入规范路径，保证 get_sso_token_expiry / kiro_status 读到最新 expiresAt
+        let canonical = self.sso_token_path();
+        self.write_sso_token_to(&canonical, &clean)?;
+        // 若 token 自带 cachePath 且与规范路径不同，同步一份给 IDE/CLI
+        if let Some(extra) = token
+            .get("cachePath")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+        {
+            if extra != canonical {
+                let _ = self.write_sso_token_to(&extra, &clean);
+            }
+        }
+        Ok(())
     }
 
     fn is_fresh_expires_at(expires_at: Option<&str>) -> bool {
@@ -502,14 +527,19 @@ impl Auth {
         Ok(false)
     }
 
-    pub fn force_refresh(&self) -> Result<bool, String> {
+    /// 强制刷新 SSO。成功时返回 `(true, 新的 expiresAt)`，便于调用方直接回传 UI。
+    pub fn force_refresh(&self) -> Result<(bool, Option<String>), String> {
         if let Some(token) = self.read_sso_token() {
             if token.get("refreshToken").and_then(|v| v.as_str()).is_some() {
-                self.refresh_sso_token(&token)?;
-                return Ok(true);
+                let refreshed = self.refresh_sso_token(&token)?;
+                let expires = refreshed
+                    .get("expiresAt")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                return Ok((true, expires));
             }
         }
-        Ok(false)
+        Ok((false, self.get_sso_token_expiry()))
     }
 
     pub fn describe_auth_source(&self) -> String {

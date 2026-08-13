@@ -6,7 +6,7 @@ import { escapeHtml } from '../../utils';
 import { showCopyToastMsg } from '../../ui';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getActiveChatModel } from './model-picker';
-import { getEffectiveProjectDir, hasRequiredProjectDir, isNewChatSession, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading } from './session-context';
+import { getEffectiveProjectDir, hasRequiredProjectDir, isNewChatSession, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading, syncMessageInputPlaceholder } from './session-context';
 import { resolveFileReferences, clearPasteAttachments, clearImportedFileRefs, invalidateFileCache } from '../files';
 import { closePermissionDialogs } from '../permissions';
 import { groupConversationsByWorkspace } from '../sidebar';
@@ -25,6 +25,46 @@ import { newChatInWorkspace } from '../sidebar/workspace-grouping';
 
 let isPreparingKiroSend = false;
 
+/** 发送前 Kiro 预检的可见反馈，避免用户误以为卡死 */
+function setKiroPrepareUi(active: boolean, input: HTMLTextAreaElement, sendBtn: HTMLButtonElement | null): void {
+  const composer = document.querySelector('.input-composer');
+  composer?.classList.toggle('is-checking-kiro', active);
+
+  const toolbarStart = document.querySelector('.input-composer-toolbar-start');
+  let hint = document.querySelector('#kiro-prepare-hint') as HTMLElement | null;
+  if (active) {
+    if (!hint && toolbarStart) {
+      hint = document.createElement('span');
+      hint.id = 'kiro-prepare-hint';
+      hint.className = 'kiro-prepare-hint';
+      hint.setAttribute('role', 'status');
+      hint.setAttribute('aria-live', 'polite');
+      hint.textContent = '正在检查 Kiro 代理…';
+      toolbarStart.appendChild(hint);
+    } else if (hint) {
+      hint.hidden = false;
+    }
+  } else {
+    hint?.remove();
+  }
+
+  if (sendBtn) {
+    if (active) {
+      sendBtn.dataset.checkingKiro = 'true';
+    } else {
+      delete sendBtn.dataset.checkingKiro;
+    }
+  }
+
+  if (active) {
+    input.placeholder = '正在检查 Kiro 代理，请稍候…';
+  } else {
+    syncMessageInputPlaceholder();
+  }
+
+  updateSendButtonState();
+}
+
 /**
  * 消息发送前确认 Kiro 可用。检查期间不读取或清空输入内容/附件，
  * 因此自动恢复失败时用户草稿会完整留在输入框。
@@ -35,12 +75,7 @@ async function prepareKiroBeforeSend(
 ): Promise<boolean> {
   if (isPreparingKiroSend) return false;
   isPreparingKiroSend = true;
-
-  if (sendBtn) {
-    sendBtn.disabled = true;
-    sendBtn.title = '正在检查 Kiro 代理…';
-    sendBtn.setAttribute('aria-label', '正在检查 Kiro 代理');
-  }
+  setKiroPrepareUi(true, input, sendBtn);
 
   try {
     const status = await api.kiroPrepareSend();
@@ -53,7 +88,7 @@ async function prepareKiroBeforeSend(
     return false;
   } finally {
     isPreparingKiroSend = false;
-    updateSendButtonState();
+    setKiroPrepareUi(false, input, sendBtn);
   }
 }
 

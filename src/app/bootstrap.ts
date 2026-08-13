@@ -10,7 +10,7 @@ import {
   bindSidebarResponsive,
 } from '../ui';
 import { shellApi } from './shell/api';
-import { render } from './shell/render';
+import { render, syncTitlebarActions } from './shell/render';
 import { refreshChatContent } from '../features/chat/refresh';
 import { initPlatformClass, setupExternalLinkInterceptor } from './shell/platform';
 import { syncPermissionModeToBackend } from '../features/permissions/permission-mode';
@@ -71,6 +71,7 @@ import { setupEventListeners } from '../events/session-events';
 /** 将各 feature 实现注册到 shellApi，打破循环依赖。 */
 function wireShellApi(): void {
   shellApi.render = render;
+  shellApi.syncTitlebarActions = syncTitlebarActions;
   shellApi.refreshChatContent = refreshChatContent;
   shellApi.refreshConversationListDom = refreshConversationListDom;
   shellApi.loadData = loadData;

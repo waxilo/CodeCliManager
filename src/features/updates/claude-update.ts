@@ -65,12 +65,15 @@ export function syncClaudeUpdateButtonUI() {
   renderSettingsUpdateSectionIfOpen();
 }
 
-export async function checkClaudeCodeUpdate(_force = false): Promise<void> {
+export async function checkClaudeCodeUpdate(force = false): Promise<void> {
   // 手动重查与启动检查共享同一个任务，避免并发结果相互覆盖。
   if (appState.claudeUpdateCheckPromise) {
-    return appState.claudeUpdateCheckPromise;
+    if (!force) return appState.claudeUpdateCheckPromise;
+    // 更新完成后的强制复查：等当前任务结束后再查一次，确保小红点状态刷新
+    await appState.claudeUpdateCheckPromise;
   }
-  if (appState.claudeUpdateCheckStatus === 'updating') {
+  // 安装/更新进行中不启动新检查（调用方应在结束后再 force 复查）
+  if (appState.claudeUpdateCheckStatus === 'updating' || appState.claudeUpdateCheckStatus === 'installing') {
     return;
   }
 
@@ -139,7 +142,20 @@ export async function runClaudeCodeInstall(): Promise<void> {
   try {
     const result = await api.runClaudeCodeInstall();
     showCopyToastMsg(`Claude Code ${result.installed || ''} 安装成功`);
+    // 先乐观清掉「有更新」，避免复查完成前小红点残留
+    if (appState.claudeUpdateInfo) {
+      const installed = result.installed || appState.claudeUpdateInfo.installed;
+      appState.claudeUpdateInfo = {
+        ...appState.claudeUpdateInfo,
+        installed,
+        latest: installed || appState.claudeUpdateInfo.latest,
+        updateAvailable: false,
+        error: null,
+      };
+    }
     appState.claudeUpdateCheckStatus = 'ready';
+    syncClaudeUpdateButtonUI();
+    refreshClaudeUpdatePopoverIfOpen();
     await checkClaudeCodeUpdate(true);
   } catch (e) {
     appState.claudeUpdateError = String(e);
@@ -162,7 +178,21 @@ export async function runClaudeCodeSilentUpdate(): Promise<void> {
     showCopyToastMsg(
       result.usedElevation ? '已通过系统授权完成更新' : 'Claude Code 已静默更新'
     );
+    // 先乐观清掉「有更新」，并立即同步侧栏/标题栏小红点（不必等切换分区）
+    if (appState.claudeUpdateInfo) {
+      const installed = result.installed || appState.claudeUpdateInfo.installed;
+      const latest = result.latest || installed || appState.claudeUpdateInfo.latest;
+      appState.claudeUpdateInfo = {
+        ...appState.claudeUpdateInfo,
+        installed,
+        latest,
+        updateAvailable: false,
+        error: null,
+      };
+    }
     appState.claudeUpdateCheckStatus = 'ready';
+    syncClaudeUpdateButtonUI();
+    refreshClaudeUpdatePopoverIfOpen();
     await checkClaudeCodeUpdate(true);
   } catch (e) {
     appState.claudeUpdateError = String(e);

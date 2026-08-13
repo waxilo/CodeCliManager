@@ -15,6 +15,7 @@ export {
   shouldShowAppUpdateBadge,
   shouldShowSettingsUpdateBadge,
   syncSettingsUpdateBadgeUI,
+  syncSettingsSectionBadgeDots,
   getAppUpdateButtonTitle,
   renderAppUpdateIcon,
   syncAppUpdateButtonUI,

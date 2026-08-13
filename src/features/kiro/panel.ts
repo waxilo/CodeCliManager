@@ -8,6 +8,12 @@ import { openDisplayModelsPicker } from '../models/display-models-picker';
 import { scheduleMainBalanceBar } from '../status-bar';
 
 let cachedKiroModels: KiroModelsStateData | null = null;
+/** 模块级互斥：防止连点启动/停止与 render 重绘后按钮重新可点导致并发 invoke */
+let isTogglingKiroProxy = false;
+
+export function isKiroProxyToggling(): boolean {
+  return isTogglingKiroProxy;
+}
 
 export function setKiroUsageText(text: string) {
   const el = document.querySelector('#kiro-card [data-kiro-usage]') as HTMLElement | null;
@@ -48,10 +54,14 @@ function syncKiroToolbarEntry(
   nextRunning: boolean,
 ) {
   if (prevAvailable === nextAvailable && prevRunning === nextRunning) return;
+  // 凭据不可用且正停留在 Kiro 页：需要退出全屏页，只能全量 render
   if (!nextAvailable && appState.isKiroViewActive) {
     shellApi.dismissKiroViewState();
+    shellApi.render();
+    return;
   }
-  shellApi.render();
+  // 仅入口显隐 / 运行绿点变化：局部刷新标题栏，避免 Win 端全页重绘卡死
+  shellApi.syncTitlebarActions();
 }
 
 function shortenAuthSource(raw: string): { label: string; title: string } {
@@ -256,10 +266,15 @@ export function renderKiroCard(status: KiroStatusData | null) {
 
   if (toggleBtn) {
     toggleBtn.dataset.kiroRunning = status.running ? 'true' : 'false';
-    toggleBtn.textContent = status.running ? '停止' : '启动';
-    toggleBtn.classList.toggle('settings-btn-primary', !status.running);
-    toggleBtn.classList.toggle('settings-btn-danger', status.running);
-    toggleBtn.disabled = false;
+    toggleBtn.classList.toggle('settings-btn-primary', !status.running && !isTogglingKiroProxy);
+    toggleBtn.classList.toggle('settings-btn-danger', status.running && !isTogglingKiroProxy);
+    if (isTogglingKiroProxy) {
+      toggleBtn.disabled = true;
+      toggleBtn.textContent = '处理中…';
+    } else {
+      toggleBtn.disabled = false;
+      toggleBtn.textContent = status.running ? '停止' : '启动';
+    }
   }
 
   if (portEl) {
@@ -272,6 +287,7 @@ export function renderKiroCard(status: KiroStatusData | null) {
   }
   if (expiresEl) {
     expiresEl.textContent = formatKiroExpiry(status.expiresAt);
+    expiresEl.title = status.expiresAt?.trim() || '';
   }
   if (arnEl && arnRow) {
     const arn = (status.profileArn || '').trim();
@@ -312,6 +328,8 @@ export async function refreshKiroToken(): Promise<void> {
   try {
     const status = await api.kiroRefreshToken();
     renderKiroCard(status);
+    // 再拉一次状态，确保 Token 时长与凭据行立即反映最新 expiresAt
+    await refreshKiroStatus();
     scheduleKiroUsage();
     scheduleMainBalanceBar();
   } catch (e) {
@@ -322,12 +340,14 @@ export async function refreshKiroToken(): Promise<void> {
     const current = document.querySelector('#kiro-card .kiro-token-refresh') as HTMLButtonElement | null;
     if (current) {
       current.disabled = false;
-      current.textContent = '刷新凭据';
+      current.textContent = '刷新';
     }
   }
 }
 
 export async function toggleKiroProxy(): Promise<void> {
+  if (isTogglingKiroProxy) return;
+  isTogglingKiroProxy = true;
   const btn = document.querySelector('#kiro-card .kiro-toggle-btn') as HTMLButtonElement | null;
   if (btn) {
     btn.disabled = true;
@@ -347,9 +367,14 @@ export async function toggleKiroProxy(): Promise<void> {
     alert('Kiro 代理操作失败: ' + String(e));
     await refreshKiroStatus();
   } finally {
+    isTogglingKiroProxy = false;
     const currentBtn = document.querySelector('#kiro-card .kiro-toggle-btn') as HTMLButtonElement | null;
     if (currentBtn) {
+      const running = Boolean(appState.kiroStatus?.running);
       currentBtn.disabled = false;
+      currentBtn.textContent = running ? '停止' : '启动';
+      currentBtn.classList.toggle('settings-btn-primary', !running);
+      currentBtn.classList.toggle('settings-btn-danger', running);
     }
   }
 }

@@ -50,6 +50,25 @@ export function updateSendButtonState() {
     return;
   }
 
+  const sendIcon = sendBtn.querySelector('.send-icon') as SVGElement | null;
+  const stopIcon = sendBtn.querySelector('.stop-icon') as SVGElement | null;
+  const checkSpinner = sendBtn.querySelector('.send-check-spinner') as HTMLElement | null;
+
+  // 发送前 Kiro 预检：保持检查中 UI，避免被后续状态同步冲掉
+  if (sendBtn.dataset.checkingKiro === 'true') {
+    sendBtn.disabled = true;
+    sendBtn.classList.remove('is-loading', 'is-aborting');
+    sendBtn.classList.add('is-checking');
+    sendBtn.setAttribute('aria-label', '正在检查 Kiro 代理');
+    sendBtn.title = '正在检查 Kiro 代理…';
+    if (sendIcon) sendIcon.style.display = 'none';
+    if (stopIcon) stopIcon.style.display = 'none';
+    if (checkSpinner) checkSpinner.hidden = false;
+    return;
+  }
+  sendBtn.classList.remove('is-checking');
+  if (checkSpinner) checkSpinner.hidden = true;
+
   // 与左侧一致：运行中以 appState.runningSessions 为准；若 DOM 状态落后则完整同步（含输入区）
   const sessionRunning = isActiveConversationRunning();
   if (sessionRunning && sendBtn.dataset.loading !== 'true') {
@@ -57,8 +76,6 @@ export function updateSendButtonState() {
     return;
   }
   const loading = sessionRunning || sendBtn.dataset.loading === 'true';
-  const sendIcon = sendBtn.querySelector('.send-icon') as SVGElement | null;
-  const stopIcon = sendBtn.querySelector('.stop-icon') as SVGElement | null;
   const hasContent = canSendMessage();
 
   if (appState.isAbortingActiveSession) {

@@ -83,6 +83,7 @@ export function renderSendButtonHtml(): string {
       <svg class="stop-icon" viewBox="0 0 24 24" aria-hidden="true" style="display:none">
         <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/>
       </svg>
+      <span class="send-check-spinner" aria-hidden="true" hidden></span>
     </button>
   `;
 }

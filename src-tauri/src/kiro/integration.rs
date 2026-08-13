@@ -41,6 +41,8 @@ pub struct KiroProxyState {
     pub(crate) port: Arc<Mutex<Option<u16>>>,
     /// 递增后旧刷新循环会退出；代理启动时再开新循环。
     pub(crate) refresh_generation: Arc<AtomicU64>,
+    /// 串行化 start/stop/prepare，避免连点并发启停导致孤儿代理或卡死。
+    pub(crate) op_lock: Arc<Mutex<()>>,
 }
 
 impl Clone for KiroProxyState {
@@ -50,6 +52,7 @@ impl Clone for KiroProxyState {
             key: Arc::clone(&self.key),
             port: Arc::clone(&self.port),
             refresh_generation: Arc::clone(&self.refresh_generation),
+            op_lock: Arc::clone(&self.op_lock),
         }
     }
 }
@@ -61,6 +64,7 @@ impl Default for KiroProxyState {
             key: Arc::new(Mutex::new(None)),
             port: Arc::new(Mutex::new(None)),
             refresh_generation: Arc::new(AtomicU64::new(0)),
+            op_lock: Arc::new(Mutex::new(())),
         }
     }
 }
@@ -207,6 +211,7 @@ pub(crate) fn has_kiro_credential_file() -> bool {
 // `is_kiro_locally_available` 定义在上方，与 KiroStatus 相邻便于阅读。
 
 /// 启动 Kiro 反代核心逻辑（命令与自动启动共用）。
+/// 调用方须已持有 `state.op_lock`（或确认不会并发）。
 pub(crate) fn start_kiro_proxy(
     app: Option<&AppHandle>,
     state: &KiroProxyState,
@@ -348,7 +353,8 @@ fn sleep_interruptible(total: Duration, generation: u64, state: &KiroProxyState)
 }
 
 /// 强制刷新共享 SSO 凭据（IDE / CLI 同一文件），写回 ~/.aws/sso/cache。
-pub(crate) fn refresh_shared_sso_credentials() -> Result<bool, String> {
+/// 返回 `(是否执行了刷新, 最新 expiresAt)`。
+pub(crate) fn refresh_shared_sso_credentials() -> Result<(bool, Option<String>), String> {
     let auth = super::auth::Auth::new(
         kiro_sso_cache_dir(),
         None,
@@ -402,12 +408,15 @@ pub(crate) fn spawn_credential_refresh_loop(app: AppHandle, state: KiroProxyStat
             }
 
             match refresh_shared_sso_credentials() {
-                Ok(true) => {
+                Ok((true, expires_at)) => {
                     eprintln!("[kiro] shared SSO credentials refreshed");
-                    let status = build_kiro_status_from(&state);
+                    let mut status = build_kiro_status_from(&state);
+                    if expires_at.is_some() {
+                        status.expires_at = expires_at;
+                    }
                     let _ = app.emit("kiro-token-refreshed", &status);
                 }
-                Ok(false) => {
+                Ok((false, _)) => {
                     eprintln!("[kiro] credential refresh skipped: no refreshToken / env auth");
                 }
                 Err(e) => {
@@ -631,6 +640,13 @@ pub(crate) fn spawn_kiro_autostart(app: AppHandle, state: KiroProxyState) {
             eprintln!("[kiro] autostart skipped: no credential file");
             return;
         }
+        let _op = match state.op_lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                eprintln!("[kiro] autostart skipped: op_lock poisoned");
+                return;
+            }
+        };
         match start_kiro_proxy(Some(&app), &state, None) {
             Ok(status) => {
                 eprintln!(
@@ -675,10 +691,23 @@ pub async fn kiro_refresh_token(
     state: tauri::State<'_, KiroProxyState>,
 ) -> Result<KiroStatus, String> {
     let state_clone = (*state).clone();
-    tauri::async_runtime::spawn_blocking(move || refresh_shared_sso_credentials())
+    let (refreshed, expires_at) = tauri::async_runtime::spawn_blocking(refresh_shared_sso_credentials)
         .await
         .map_err(|e| format!("凭据刷新任务失败: {e}"))??;
-    let status = build_kiro_status_from(&state_clone);
+    if !refreshed {
+        return Err("未找到可刷新的 Kiro refreshToken，请先登录 Kiro IDE 或执行 kiro-cli login".to_string());
+    }
+    let mut status = build_kiro_status_from(&state_clone);
+    // 优先使用刷新结果里的 expiresAt，避免刚写入文件后读到旧值导致 UI 不更新
+    if let Some(exp) = expires_at {
+        status.expires_at = Some(exp.clone());
+        if status.auth_source.contains("SSO") || status.auth_source.contains("共享缓存") {
+            status.auth_source = format!(
+                "Kiro SSO 共享缓存（IDE/CLI 共用，{}），过期 {exp}",
+                kiro_sso_cache_dir().join("kiro-auth-token.json").display()
+            );
+        }
+    }
     let _ = app.emit("kiro-token-refreshed", &status);
     Ok(status)
 }
@@ -698,7 +727,7 @@ fn validate_kiro_credentials() -> Result<(), String> {
         }
     }
 
-    let refreshed = refresh_shared_sso_credentials()
+    let (refreshed, _) = refresh_shared_sso_credentials()
         .map_err(|error| format!("Kiro 凭据续期失败：{error}"))?;
     if !refreshed {
         return Err("Kiro 凭据已失效且无法自动续期，请重新登录 Kiro IDE 或执行 kiro-cli login".to_string());
@@ -733,6 +762,10 @@ pub async fn kiro_prepare_send(
     let state_clone = (*state).clone();
     let app_clone = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _op = state_clone
+            .op_lock
+            .lock()
+            .map_err(|_| "Kiro 操作锁获取失败".to_string())?;
         if !is_proxy_running(&state_clone) {
             start_kiro_proxy(Some(&app_clone), &state_clone, None)
                 .map_err(|error| format!("Kiro 代理自动恢复失败：{error}"))?;
@@ -756,12 +789,20 @@ pub fn kiro_start(
     state: tauri::State<'_, KiroProxyState>,
     port: Option<u16>,
 ) -> Result<KiroStatus, String> {
+    let _op = state
+        .op_lock
+        .lock()
+        .map_err(|_| "Kiro 操作锁获取失败".to_string())?;
     start_kiro_proxy(Some(&app), &state, port)
 }
 
 /// 停止 Kiro 反代代理，并还原开启前的 API 配置。
 #[tauri::command]
 pub fn kiro_stop(state: tauri::State<'_, KiroProxyState>) -> Result<KiroStatus, String> {
+    let _op = state
+        .op_lock
+        .lock()
+        .map_err(|_| "Kiro 操作锁获取失败".to_string())?;
     stop_credential_refresh_loop(&state);
     if let Some(mut handle) = state.inner.lock().map_err(|_| "lock failed".to_string())?.take() {
         handle.stop();

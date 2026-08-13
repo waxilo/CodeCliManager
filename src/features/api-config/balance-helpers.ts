@@ -6,10 +6,17 @@ export function formatKiroExpiry(expiresAt: string | null): string {
   const remaining = ms - Date.now();
   if (remaining <= 0) return '已过期';
   const minutes = Math.floor(remaining / 60000);
-  if (minutes < 60) return `${minutes} 分钟后`;
+  const absolute = new Date(ms).toLocaleString('zh-CN', {
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+  if (minutes < 60) return `${minutes} 分钟后 · ${absolute}`;
   const hours = Math.floor(minutes / 60);
   const leftMin = minutes % 60;
-  return `${hours} 小时${leftMin > 0 ? ` ${leftMin} 分` : ''}后`;
+  return `${hours} 小时${leftMin > 0 ? ` ${leftMin} 分` : ''}后 · ${absolute}`;
 }
 
 export function isDeepSeekBaseUrl(baseUrl: string): boolean {
