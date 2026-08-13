@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::kiro::models::{
     estimate_tokens, get_requested_effort, normalize_effort_for_kiro_model,
 };
+use crate::protocol_guard::normalize_stop_reason;
 
 /// Anthropic content 块 → Kiro 的 {text, images}。
 pub struct KiroContent {
@@ -342,9 +343,10 @@ pub fn normalize_assistant_content(text: &str, stop_reason: &str) -> (Vec<Value>
     if let Some(tool_use_blocks) = parse_tool_use_blocks_from_text(text) {
         return (tool_use_blocks, "tool_use".to_string());
     }
+    // 文本里解析不出 tool 时，不能沿用上游声称的 tool_use
     (
         vec![json!({ "type": "text", "text": text })],
-        stop_reason.to_string(),
+        normalize_stop_reason(stop_reason, false, false).to_string(),
     )
 }
 
@@ -1008,13 +1010,14 @@ pub fn anthropic_message_response_with_tools(
         }
     }
     content.extend(native_tool_uses.iter().cloned());
-    let stop_reason = if !native_tool_uses.is_empty() {
-        "tool_use".to_string()
-    } else {
-        stop_reason.to_string()
-    };
+    // 只有真正带上 tool_use 块时才能声明 tool_use；否则 Claude Code 会 ede_diagnostic
+    let stop_reason =
+        normalize_stop_reason(stop_reason, !native_tool_uses.is_empty(), false).to_string();
     if content.is_empty() {
-        content.push(json!({ "type": "text", "text": "" }));
+        content.push(json!({
+            "type": "text",
+            "text": "API Error: empty assistant response"
+        }));
     }
     json!({
         "id": id,
@@ -1309,5 +1312,42 @@ mod tests {
         assert_eq!(content[0]["signature"], "sig_xyz");
         assert_eq!(content[1]["type"], "text");
         assert_eq!(content[1]["text"], "最终答案");
+    }
+
+    #[test]
+    fn response_downgrades_tool_use_without_tool_blocks() {
+        let response = anthropic_message_response_with_tools(
+            "msg_2",
+            "claude-opus-4.8",
+            "只有文本",
+            "",
+            None,
+            &[],
+            "tool_use",
+        );
+        assert_eq!(response["stop_reason"], "end_turn");
+        assert_eq!(response["content"][0]["type"], "text");
+        assert_eq!(response["content"][0]["text"], "只有文本");
+    }
+
+    #[test]
+    fn response_fills_empty_content_with_fallback_text() {
+        let response = anthropic_message_response_with_tools(
+            "msg_3",
+            "claude-opus-4.8",
+            "",
+            "",
+            None,
+            &[],
+            "tool_use",
+        );
+        assert_eq!(response["stop_reason"], "end_turn");
+        assert_eq!(response["content"][0]["type"], "text");
+        assert!(
+            response["content"][0]["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("empty assistant response")
+        );
     }
 }

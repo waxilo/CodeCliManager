@@ -11,7 +11,10 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 use crate::claude::{conversation_to_payload, emit_session_error};
-use crate::history::{find_claude_session_file, invalidate_session_cache, load_claude_history, rewrite_session_model};
+use crate::history::{
+    find_claude_session_file, invalidate_session_cache, load_claude_conversation,
+    rewrite_session_model,
+};
 
 pub(crate) static ACTIVE_PROCESSES: Mutex<Option<HashMap<String, Arc<Mutex<Child>>>>> = Mutex::new(None);
 
@@ -538,32 +541,75 @@ pub(crate) fn emit_turn_continued(app: &AppHandle, session_id: &str) {
     let _ = app.emit("turn-continued", Some(session_id.to_string()));
 }
 
+static TURN_COMPLETE_GENERATIONS: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+
+fn next_turn_complete_generation(session_id: &str) -> u64 {
+    let mut generations = TURN_COMPLETE_GENERATIONS.lock().unwrap();
+    let map = generations.get_or_insert_with(HashMap::new);
+    let generation = map.entry(session_id.to_string()).or_insert(0);
+    *generation += 1;
+    *generation
+}
+
+fn is_latest_turn_complete_generation(session_id: &str, generation: u64) -> bool {
+    let generations = TURN_COMPLETE_GENERATIONS.lock().unwrap();
+    generations
+        .as_ref()
+        .and_then(|map| map.get(session_id))
+        .is_some_and(|current| *current == generation)
+}
+
+fn clear_turn_complete_generation_if_latest(session_id: &str, generation: u64) {
+    let mut generations = TURN_COMPLETE_GENERATIONS.lock().unwrap();
+    if let Some(map) = generations.as_mut() {
+        if map.get(session_id).is_some_and(|current| *current == generation) {
+            map.remove(session_id);
+        }
+    }
+}
+
 pub(crate) fn emit_turn_complete(app: &AppHandle, session_id: &str) {
     clear_turn_active(session_id);
+    let generation = next_turn_complete_generation(session_id);
+    let app = app.clone();
+    let session_id = session_id.to_string();
+    thread::spawn(move || finish_turn_complete(&app, &session_id, generation));
+}
 
+fn finish_turn_complete(app: &AppHandle, session_id: &str, generation: u64) {
     // Claude 落盘 JSONL 可能略晚于 result；且 SESSION_CACHE 按秒级 mtime，
     // 需主动失效缓存并短重试，避免前端清掉流式后又读到旧消息。
-    if let Some(path) = find_claude_session_file(session_id) {
-        invalidate_session_cache(&path);
-    }
+    let mut session_path = find_claude_session_file(session_id);
 
     let mut emitted_messages = false;
     for attempt in 0..10 {
         if attempt > 0 {
             thread::sleep(Duration::from_millis(80));
-            if let Some(path) = find_claude_session_file(session_id) {
-                invalidate_session_cache(&path);
-            }
         }
-        let conversations = load_claude_history();
-        if let Some(conv) = conversations.iter().find(|c| c.id == session_id) {
+        if session_path.is_none() {
+            session_path = find_claude_session_file(session_id);
+        }
+        if let Some(path) = session_path.as_ref() {
+            invalidate_session_cache(path);
+        }
+        if let Some(conv) = session_path.as_ref().and_then(load_claude_conversation) {
             let last_is_assistant = conv
                 .messages
                 .last()
                 .map(|m| m.role == "assistant")
                 .unwrap_or(false);
             if last_is_assistant || attempt == 9 {
-                let payload = conversation_to_payload(conv);
+                if !is_latest_turn_complete_generation(session_id, generation)
+                    || is_turn_active(session_id)
+                {
+                    eprintln!(
+                        "[claude] 忽略过期 turn-complete 刷新: {} generation={}",
+                        session_id, generation
+                    );
+                    clear_turn_complete_generation_if_latest(session_id, generation);
+                    return;
+                }
+                let payload = conversation_to_payload(&conv);
                 let _ = app.emit("messages-updated", &payload);
                 emitted_messages = true;
                 if last_is_assistant {
@@ -585,12 +631,22 @@ pub(crate) fn emit_turn_complete(app: &AppHandle, session_id: &str) {
     if !emitted_messages {
         eprintln!("[claude] turn-complete 未找到会话历史: {}", session_id);
     }
+    if !is_latest_turn_complete_generation(session_id, generation) || is_turn_active(session_id) {
+        eprintln!(
+            "[claude] 忽略过期 turn-complete 事件: {} generation={}",
+            session_id, generation
+        );
+        clear_turn_complete_generation_if_latest(session_id, generation);
+        return;
+    }
     let has_next = queued_prompt_count(session_id) > 0;
     if has_next && dispatch_next_queued_prompt(app, session_id) {
+        clear_turn_complete_generation_if_latest(session_id, generation);
         emit_turn_continued(app, session_id);
         eprintln!("[queue] dispatched next prompt for {session_id}");
         return;
     }
+    clear_turn_complete_generation_if_latest(session_id, generation);
     let _ = app.emit("turn-complete", Some(session_id.to_string()));
     eprintln!("[claude] turn-complete: {}", session_id);
 }

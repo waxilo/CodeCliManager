@@ -2,8 +2,8 @@ import { appState } from '../state';
 import { shellApi } from '../app/shell/api';
 import { listen } from '@tauri-apps/api/event';
 import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPayload, QueuedPromptItem } from '../types';
-import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent } from '../features/chat/streaming';
-import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages, refreshConversationFromBackend } from '../features/conversations';
+import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent, refreshStreamingUI } from '../features/chat/streaming';
+import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
 import { setAbortingUi, setSendButtonLoading, isSendButtonLoading } from '../features/chat/session-context';
 import { hideSendingState } from '../features/chat/retry';
@@ -29,6 +29,20 @@ interface QueuedPromptDispatchedPayload {
 
 /** 防止 init 被重复调用时重复注册，导致 text_delta 字字双份 */
 let eventListenersReady = false;
+const chatRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** 合并同一轮 messages-updated / turn-complete / queue 触发的重复全列表重建。 */
+function scheduleChatRefresh(sessionId: string, delay = 32): void {
+  const existing = chatRefreshTimers.get(sessionId);
+  if (existing) clearTimeout(existing);
+  chatRefreshTimers.set(sessionId, setTimeout(() => {
+    chatRefreshTimers.delete(sessionId);
+    if (appState.activeConversationId === sessionId) {
+      shellApi.refreshChatContent();
+      updateContextIndicator();
+    }
+  }, delay));
+}
 
 export async function setupEventListeners() {
   if (eventListenersReady) return;
@@ -175,8 +189,7 @@ export async function setupEventListeners() {
       if (!appState.runningSessions.has(payload.conversation_id)) {
         hideSendingState();
       }
-      shellApi.refreshChatContent();
-      updateContextIndicator();
+      scheduleChatRefresh(payload.conversation_id);
     } else {
       updateConversationListSpinner();
     }
@@ -215,7 +228,7 @@ export async function setupEventListeners() {
     }
     appState.runningSessions.add(conversationId);
     if (appState.activeConversationId === conversationId) {
-      shellApi.refreshChatContent();
+      scheduleChatRefresh(conversationId);
       setSendButtonLoading(true);
     }
     updateConversationListSpinner();
@@ -229,7 +242,12 @@ export async function setupEventListeners() {
     appState.pendingUserMessageConvId = null;
     setSendButtonLoading(true);
     updateConversationListSpinner();
-    shellApi.refreshChatContent();
+    // 自动续跑时仍有流式缓冲：保留 streaming UI，避免全量重建闪断
+    if (appState.streamingBySession.has(sid)) {
+      refreshStreamingUI(sid);
+    } else {
+      scheduleChatRefresh(sid);
+    }
   });
   await listen<string | null>('turn-complete', (event) => {
     const sid = event.payload;
@@ -269,28 +287,15 @@ export async function setupEventListeners() {
       appState.pendingUserMessage = null;
       appState.pendingUserMessageConvId = null;
       updateConversationListSpinner();
-      updateContextIndicator();
-      shellApi.refreshChatContent();
+      const refreshSessionId = sid || appState.activeConversationId;
+      if (refreshSessionId) {
+        scheduleChatRefresh(refreshSessionId);
+      } else {
+        shellApi.refreshChatContent();
+        updateContextIndicator();
+      }
       if (wasUserAbort) {
         showCopyToastMsg('已停止');
-      }
-      // 再拉一次后端，覆盖「result 早于 JSONL 落盘」的竞态
-      if (sid) {
-        void (async () => {
-          for (let i = 0; i < 4; i++) {
-            await new Promise((r) => setTimeout(r, 120 + i * 80));
-            await refreshConversationFromBackend(sid);
-            const conv = appState.conversations.find((c) => c.id === sid);
-            const last = conv?.messages[conv.messages.length - 1];
-            if (last?.role === 'assistant') {
-              if (appState.activeConversationId === sid) {
-                shellApi.refreshChatContent();
-                updateContextIndicator();
-              }
-              break;
-            }
-          }
-        })();
       }
     } else {
       updateConversationListSpinner();

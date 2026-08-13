@@ -33,6 +33,7 @@ use crate::kiro::models::{
 use crate::kiro::transform::{
     anthropic_message_response_with_tools, build_kiro_request, parse_tool_use_blocks_from_text,
 };
+use crate::protocol_guard::{normalize_stop_reason, sanitize_protocol_text, ProtocolTextGuard};
 
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
@@ -515,6 +516,29 @@ fn emit_tool_use_stop_sse(index: usize, mut send: impl FnMut(String)) {
     ));
 }
 
+fn emit_fallback_text_block_sse(
+    block_counter: &mut usize,
+    text: &str,
+    mut send: impl FnMut(String),
+) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let mut started = false;
+    let index = *block_counter;
+    *block_counter += 1;
+    let mut out = String::new();
+    emit_text_block_sse(&mut started, index, text, &mut out);
+    if out.is_empty() {
+        return;
+    }
+    send(out);
+    send(sse_event(
+        "content_block_stop",
+        &json!({ "type": "content_block_stop", "index": index }),
+    ));
+}
+
 /// 解析上游 Event Stream，边收边推 Anthropic SSE。
 ///
 /// 原生 `toolUseEvent` 是主路径：文本增量不再为 tools 整包缓冲。
@@ -536,10 +560,12 @@ fn pipe_kiro_body_to_anthropic_sse(
     let mut thinking_block_index: Option<usize> = None;
     let mut thinking_signature: Option<String> = None;
     let mut saw_native_tool = false;
+    let mut emitted_tool_use = false;
     let mut block_counter = 0usize;
-    // toolUseId -> (name, index, started)
+    // toolUseId -> (name, index, open)
     let mut native_tool_blocks: HashMap<String, (String, usize, bool)> = HashMap::new();
     let mut stop_reason = "end_turn".to_string();
+    let mut protocol_guard = ProtocolTextGuard::default();
 
     loop {
         let n = match reader.read(&mut read_buf) {
@@ -556,7 +582,7 @@ fn pipe_kiro_body_to_anthropic_sse(
                     }),
                 ));
                 let had_assistant_content =
-                    text_started || thinking_started || saw_native_tool || !full_text.is_empty();
+                    text_started || thinking_started || emitted_tool_use || !full_text.is_empty();
                 close_thinking_block_sse(
                     &mut thinking_started,
                     thinking_block_index,
@@ -570,20 +596,19 @@ fn pipe_kiro_body_to_anthropic_sse(
                         &json!({ "type": "content_block_stop", "index": index }),
                     ));
                 }
+                for (_id, (_name, index, open)) in native_tool_blocks.iter_mut() {
+                    if *open {
+                        emit_tool_use_stop_sse(*index, &mut send);
+                        *open = false;
+                    }
+                }
                 // 若本轮尚未产出任何助手内容，补一条 API Error 文本，避免 result_type=user
                 if !had_assistant_content {
-                    let error_text = format!("API Error: {msg}");
-                    let mut started = false;
-                    let index = block_counter;
-                    let mut out = String::new();
-                    emit_text_block_sse(&mut started, index, &error_text, &mut out);
-                    if !out.is_empty() {
-                        send(out);
-                        send(sse_event(
-                            "content_block_stop",
-                            &json!({ "type": "content_block_stop", "index": index }),
-                        ));
-                    }
+                    emit_fallback_text_block_sse(
+                        &mut block_counter,
+                        &format!("API Error: {msg}"),
+                        &mut send,
+                    );
                 }
                 emit_sse_message_delta_stop(&mut send, "end_turn", estimate_tokens(&full_text));
                 return;
@@ -611,17 +636,21 @@ fn pipe_kiro_body_to_anthropic_sse(
                     emit_thinking_delta_sse(index, &text, &mut send);
                 }
                 "assistantResponseEvent" => {
-                    let Some(chunk) = event.payload.get("content").and_then(|v| v.as_str()) else {
+                    let Some(raw_chunk) = event.payload.get("content").and_then(|v| v.as_str()) else {
                         continue;
                     };
-                    if chunk.is_empty() || saw_native_tool {
+                    if raw_chunk.is_empty() || saw_native_tool {
                         continue;
                     }
-                    full_text.push_str(chunk);
+                    let chunk = protocol_guard.push(raw_chunk);
+                    if chunk.is_empty() {
+                        continue;
+                    }
+                    full_text.push_str(&chunk);
 
                     // 已判定为文本 JSON 工具：继续缓冲到结束再一次性转换
                     if tool_mode == Some(true) {
-                        pending_flush.push_str(chunk);
+                        pending_flush.push_str(&chunk);
                         continue;
                     }
 
@@ -637,12 +666,12 @@ fn pipe_kiro_body_to_anthropic_sse(
                     if tool_mode == Some(false) {
                         let index =
                             ensure_text_block_index(&mut text_block_index, &mut block_counter);
-                        send_text_immediate(&mut text_started, index, chunk, &mut send);
+                        send_text_immediate(&mut text_started, index, &chunk, &mut send);
                         continue;
                     }
 
                     // 未判定：只对疑似 tool JSON 前缀短缓冲，普通文本马上推
-                    pending_flush.push_str(chunk);
+                    pending_flush.push_str(&chunk);
                     tool_mode = classify_stream_content(&full_text);
                     if tool_mode == Some(false) {
                         let flush = std::mem::take(&mut pending_flush);
@@ -684,6 +713,7 @@ fn pipe_kiro_body_to_anthropic_sse(
                                 "content_block_stop",
                                 &json!({ "type": "content_block_stop", "index": index }),
                             ));
+                            text_block_index = None;
                             text_started = false;
                         }
                         let index = block_counter;
@@ -691,6 +721,7 @@ fn pipe_kiro_body_to_anthropic_sse(
                         emit_tool_use_start_sse(index, &tool_id, &name, &mut send);
                         native_tool_blocks.insert(tool_id.clone(), (name.clone(), index, true));
                         saw_native_tool = true;
+                        emitted_tool_use = true;
                         tool_mode = Some(true);
                         stop_reason = "tool_use".to_string();
                     } else if let Some(entry) = native_tool_blocks.get_mut(&tool_id) {
@@ -716,6 +747,9 @@ fn pipe_kiro_body_to_anthropic_sse(
                         .unwrap_or(false);
                     if is_stop {
                         emit_tool_use_stop_sse(index, &mut send);
+                        if let Some(entry) = native_tool_blocks.get_mut(&tool_id) {
+                            entry.2 = false;
+                        }
                     }
                 }
                 "metadataEvent" => {
@@ -728,6 +762,12 @@ fn pipe_kiro_body_to_anthropic_sse(
         }
     }
 
+    let trailing_text = protocol_guard.finish();
+    if !trailing_text.is_empty() {
+        full_text.push_str(&trailing_text);
+        pending_flush.push_str(&trailing_text);
+    }
+
     if !saw_native_tool {
         // 仅在尚未向客户端吐出文本时，才把缓冲内容改判为文本 JSON tool
         let parsed_tool_blocks = if !text_started {
@@ -736,10 +776,6 @@ fn pipe_kiro_body_to_anthropic_sse(
             None
         };
 
-        if tool_mode.is_none() {
-            tool_mode = Some(parsed_tool_blocks.is_some());
-        }
-
         if !text_started && parsed_tool_blocks.is_some() {
             close_thinking_block_sse(
                 &mut thinking_started,
@@ -747,13 +783,13 @@ fn pipe_kiro_body_to_anthropic_sse(
                 &thinking_signature,
                 &mut send,
             );
-            tool_mode = Some(true);
             if let Some(blocks) = parsed_tool_blocks {
                 let mut out = String::new();
                 emit_tool_blocks_sse(&blocks, &mut out);
-                stop_reason = "tool_use".to_string();
                 if !out.is_empty() {
                     send(out);
+                    emitted_tool_use = true;
+                    stop_reason = "tool_use".to_string();
                 }
             }
         } else if !pending_flush.is_empty() {
@@ -793,16 +829,37 @@ fn pipe_kiro_body_to_anthropic_sse(
         ));
     }
 
-    // 原生/解析出的 tool_use 必须以 tool_use 结束；metadata 的 end_turn 不能覆盖
-    if saw_native_tool || (!text_started && tool_mode == Some(true)) {
-        stop_reason = "tool_use".to_string();
+    // 上游可能省略 toolUseEvent.stop；收尾时补 content_block_stop
+    for (_id, (_name, index, open)) in native_tool_blocks.iter_mut() {
+        if *open {
+            emit_tool_use_stop_sse(*index, &mut send);
+            *open = false;
+        }
+    }
+
+    let had_assistant_content =
+        emitted_tool_use || text_started || text_block_index.is_some() || thinking_block_index.is_some();
+
+    let final_stop =
+        normalize_stop_reason(&stop_reason, emitted_tool_use, protocol_guard.detected());
+
+    // 无任何助手内容时必须补文本块，否则 Claude Code 会以 result_type=user 报 ede_diagnostic
+    if !had_assistant_content {
+        let fallback = if stop_reason == "tool_use" {
+            "API Error: upstream claimed tool_use but returned no tool call"
+        } else if protocol_guard.detected() {
+            "API Error: response interrupted by protocol leak"
+        } else {
+            "API Error: empty assistant response"
+        };
+        emit_fallback_text_block_sse(&mut block_counter, fallback, &mut send);
     }
 
     send(sse_event(
         "message_delta",
         &json!({
             "type": "message_delta",
-            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+            "delta": { "stop_reason": final_stop, "stop_sequence": null },
             "usage": { "output_tokens": estimate_tokens(&full_text) },
         }),
     ));
@@ -1167,7 +1224,15 @@ fn handle_messages(mut request: Request, config: &ProxyConfig, auth: &Arc<Auth>)
         Ok(events) => events,
         Err(e) => return error_response(request, 502, &e, "api_error"),
     };
-    let collected = collect_kiro_text(&events);
+    let mut collected = collect_kiro_text(&events);
+    let (visible_text, protocol_leak_detected) = sanitize_protocol_text(&collected.text);
+    collected.text = visible_text;
+    collected.stop_reason = normalize_stop_reason(
+        &collected.stop_reason,
+        !collected.tool_uses.is_empty(),
+        protocol_leak_detected,
+    )
+    .to_string();
     let response = anthropic_message_response_with_tools(
         &id,
         &response_model,
@@ -1208,6 +1273,36 @@ mod tests {
             classify_stream_content("{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{}}"),
             Some(true)
         );
+    }
+
+    #[test]
+    fn protocol_guard_blocks_marker_split_across_chunks() {
+        let mut guard = ProtocolTextGuard::default();
+        let mut visible = guard.push("正常结论。\nassistant to=func");
+        visible.push_str(&guard.push("tions.Bash (commentary)\nNo."));
+        visible.push_str(&guard.finish());
+
+        assert_eq!(visible, "正常结论。\n");
+        assert!(guard.detected());
+    }
+
+    #[test]
+    fn protocol_guard_preserves_normal_text() {
+        let mut guard = ProtocolTextGuard::default();
+        let mut visible = guard.push("正常的 assistant 工具说明");
+        visible.push_str(&guard.finish());
+
+        assert_eq!(visible, "正常的 assistant 工具说明");
+        assert!(!guard.detected());
+    }
+
+    #[test]
+    fn non_stream_protocol_text_is_sanitized() {
+        let (visible, detected) =
+            sanitize_protocol_text("正常结论。\nassistant to=functions.Bash (commentary)\nNo.");
+
+        assert_eq!(visible, "正常结论。\n");
+        assert!(detected);
     }
 
     #[test]

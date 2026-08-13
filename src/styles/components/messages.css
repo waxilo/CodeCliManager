@@ -178,6 +178,11 @@
   line-height: 1.65;
 }
 
+.message.assistant .message-content .markdown-body.streaming-plain-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .message-content pre {
   font-family: inherit;
   font-size: 14px;

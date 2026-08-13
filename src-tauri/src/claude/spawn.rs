@@ -10,7 +10,12 @@ use crate::claude::runtime::{apply_cli_runtime_env, resolve_claude_executable};
 use crate::claude::stream_events::*;
 use crate::config::{apply_model_override_env, has_custom_api_base};
 use crate::fs::resolve_or_create_dir;
+use crate::history::INTERNAL_RECOVERY_PROMPT;
 use crate::session::*;
+
+fn should_auto_recover(was_aborted: bool, recovery_needed: bool, recovery_attempts: u8) -> bool {
+    !was_aborted && recovery_needed && recovery_attempts < 1
+}
 
 /// 使用 stream-json 模式启动 claude，实时推送 thinking / answer 增量
 pub(crate) fn spawn_claude_stream(
@@ -133,6 +138,8 @@ pub(crate) fn spawn_claude_stream(
     let mut captured_session_id = conversation_id.filter(|c| !c.is_empty()).cloned();
     let mut captured_registry_key = registry_key.clone();
     let mut block_types: HashMap<usize, String> = HashMap::new();
+    let mut protocol_guard = ProtocolLeakGuard::default();
+    let mut recovery_attempts = 0u8;
     let mut stream_error: Option<String> = None;
 
     let stderr_buffer = Arc::new(Mutex::new(String::new()));
@@ -333,6 +340,7 @@ pub(crate) fn spawn_claude_stream(
                     &app,
                     &mut captured_session_id,
                     &mut block_types,
+                    &mut protocol_guard,
                     &mut stream_error,
                 );
                 // 首次捕获到 session_id 时，用 session_id 重新注册进程（方便按 session_id abort）
@@ -398,11 +406,48 @@ pub(crate) fn spawn_claude_stream(
                         continue;
                     }
 
-                    if is_stream_aborted(&captured_registry_key, &captured_session_id) {
+                    let was_aborted =
+                        is_stream_aborted(&captured_registry_key, &captured_session_id);
+                    if was_aborted {
                         clear_stream_aborted(&captured_registry_key, &captured_session_id);
-                        eprintln!("[claude] 本轮被用户 interrupt，保留常驻进程");
+                        eprintln!("[claude] 本轮被用户 interrupt，跳过自动恢复");
                     }
+                    let recovery_needed = protocol_guard.recovery_needed();
+                    if should_auto_recover(was_aborted, recovery_needed, recovery_attempts) {
+                        if let Some(ref sid) = captured_session_id {
+                            match try_send_followup_prompt(sid, INTERNAL_RECOVERY_PROMPT) {
+                                Ok(()) => {
+                                    let _ = protocol_guard.take_recovery_needed();
+                                    recovery_attempts += 1;
+                                    turn_active = true;
+                                    // 不发 complete：前端保持 streaming，等待续跑增量
+                                    emit_turn_continued(&app, sid);
+                                    eprintln!(
+                                        "[claude] 检测到可恢复中断，已自动续跑一次: {}",
+                                        sid
+                                    );
+                                    last_activity = Instant::now();
+                                    continue;
+                                }
+                                Err(error) => {
+                                    let _ = protocol_guard.take_recovery_needed();
+                                    eprintln!("[claude] 自动恢复失败: {error}");
+                                    emit_session_error(
+                                        &app,
+                                        Some(sid),
+                                        &format!("自动续写失败：{error}"),
+                                    );
+                                }
+                            }
+                        } else {
+                            let _ = protocol_guard.take_recovery_needed();
+                        }
+                    } else {
+                        let _ = protocol_guard.take_recovery_needed();
+                    }
+                    recovery_attempts = 0;
                     if let Some(ref sid) = captured_session_id {
+                        emit_message_chunk(&app, sid, "complete", "");
                         emit_turn_complete(&app, sid);
                     } else {
                         clear_turn_active(&captured_registry_key);
@@ -543,6 +588,7 @@ pub(crate) fn spawn_claude_stream(
             &app,
             &mut captured_session_id,
             &mut block_types,
+            &mut protocol_guard,
             &mut stream_error,
         );
     }
@@ -629,4 +675,21 @@ pub(crate) fn spawn_claude_stream(
     clear_stream_aborted(&captured_registry_key, &captured_session_id);
     clear_graceful_shutdown(&captured_registry_key, &captured_session_id);
     Ok(StreamOutcome::Success(captured_session_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_auto_recover;
+
+    #[test]
+    fn user_abort_always_prevents_auto_recovery() {
+        assert!(!should_auto_recover(true, true, 0));
+    }
+
+    #[test]
+    fn recovery_runs_only_once_when_needed() {
+        assert!(should_auto_recover(false, true, 0));
+        assert!(!should_auto_recover(false, true, 1));
+        assert!(!should_auto_recover(false, false, 0));
+    }
 }

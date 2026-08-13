@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use tauri::{AppHandle, Emitter};
 
 use crate::history::{Conversation, Message};
+use crate::protocol_guard::ProtocolTextGuard;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct SessionEventPayload {
@@ -23,6 +24,44 @@ pub(crate) struct MessageChunkPayload {
     pub(crate) conversation_id: String,
     pub(crate) kind: String,
     pub(crate) content: String,
+}
+
+/// 对 Claude stream-json 再做一层保护，避免异常协议文本直接灌入 WebView。
+#[derive(Default)]
+pub(crate) struct ProtocolLeakGuard {
+    text: ProtocolTextGuard,
+    recovery_needed: bool,
+}
+
+impl ProtocolLeakGuard {
+    fn filter_text_delta(&mut self, text: &str) -> String {
+        let visible = self.text.push(text);
+        if self.text.detected() {
+            self.recovery_needed = true;
+        }
+        visible
+    }
+
+    fn finish_text_block(&mut self) -> String {
+        self.text.finish()
+    }
+
+    fn mark_stop_reason(&mut self, stop_reason: &str) {
+        if stop_reason == "max_tokens" {
+            self.recovery_needed = true;
+        }
+    }
+
+    pub(crate) fn recovery_needed(&self) -> bool {
+        self.recovery_needed
+    }
+
+    pub(crate) fn take_recovery_needed(&mut self) -> bool {
+        let needed = self.recovery_needed;
+        self.text.reset();
+        self.recovery_needed = false;
+        needed
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -228,6 +267,7 @@ pub(crate) fn process_claude_stream_line(
     app: &AppHandle,
     captured_session_id: &mut Option<String>,
     block_types: &mut HashMap<usize, String>,
+    protocol_guard: &mut ProtocolLeakGuard,
     stream_error: &mut Option<String>,
 ) {
     let value: serde_json::Value = match serde_json::from_str(line) {
@@ -349,7 +389,10 @@ pub(crate) fn process_claude_stream_line(
                                             text.trim().to_string(),
                                         );
                                     } else {
-                                        emit_message_chunk(app, &sid, "text_delta", text);
+                                        let visible = protocol_guard.filter_text_delta(text);
+                                        if !visible.is_empty() {
+                                            emit_message_chunk(app, &sid, "text_delta", &visible);
+                                        }
                                     }
                                 }
                             }
@@ -361,7 +404,13 @@ pub(crate) fn process_claude_stream_line(
                     let index = event.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                     let kind = match block_types.get(&index).map(|s| s.as_str()) {
                         Some("thinking") => "thinking_end",
-                        Some("text") => "text_end",
+                        Some("text") => {
+                            let trailing = protocol_guard.finish_text_block();
+                            if !trailing.is_empty() {
+                                emit_message_chunk(app, &sid, "text_delta", &trailing);
+                            }
+                            "text_end"
+                        }
                         _ => return,
                     };
                     emit_message_chunk(app, &sid, kind, "");
@@ -369,6 +418,15 @@ pub(crate) fn process_claude_stream_line(
                 }
                 "message_stop" => {
                     emit_message_chunk(app, &sid, "stream_end", "");
+                }
+                "message_delta" => {
+                    if let Some(stop_reason) = event
+                        .get("delta")
+                        .and_then(|delta| delta.get("stop_reason"))
+                        .and_then(|reason| reason.as_str())
+                    {
+                        protocol_guard.mark_stop_reason(stop_reason);
+                    }
                 }
                 _ => {}
             }
@@ -382,16 +440,39 @@ pub(crate) fn process_claude_stream_line(
             }
         }
         "result" => {
-            let sid = resolve_stream_session_id(captured_session_id, &value);
             if value.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+                let sid = resolve_stream_session_id(captured_session_id, &value);
                 let error = extract_result_error(&value);
                 record_stream_error(stream_error, app, sid.as_deref(), error);
                 return;
             }
-            if let Some(sid) = sid {
-                emit_message_chunk(app, &sid, "complete", "");
-            }
+            // complete 由 spawn 在确认不会自动续跑后再发，避免 recovery 路径先收尾再续写
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProtocolLeakGuard;
+
+    #[test]
+    fn protocol_guard_filters_split_internal_route() {
+        let mut guard = ProtocolLeakGuard::default();
+        let mut visible = guard.filter_text_delta("有效正文\nassistant to=func");
+        visible.push_str(&guard.filter_text_delta("tions.Bash (commentary)\nNo."));
+        visible.push_str(&guard.finish_text_block());
+
+        assert_eq!(visible, "有效正文\n");
+        assert!(guard.take_recovery_needed());
+    }
+
+    #[test]
+    fn max_tokens_requests_one_controlled_recovery() {
+        let mut guard = ProtocolLeakGuard::default();
+        guard.mark_stop_reason("max_tokens");
+
+        assert!(guard.take_recovery_needed());
+        assert!(!guard.take_recovery_needed());
     }
 }

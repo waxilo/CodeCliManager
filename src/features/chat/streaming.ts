@@ -220,7 +220,7 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       break;
     case 'text_start':
       // 创建新的 text 块
-      state.blocks.push({ type: 'text', content: '' });
+      state.blocks.push({ type: 'text', content: '', finalized: false });
       state.currentBlockIdx = state.blocks.length - 1;
       break;
     case 'text_delta':
@@ -228,8 +228,18 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       if (isActive) scheduleStreamingRefresh(sid);
       break;
     case 'text_end':
+      flushPendingTextDelta(sid);
+      {
+        const block = state.blocks[state.currentBlockIdx];
+        if (block?.type === 'text') block.finalized = true;
+      }
+      if (isActive) refreshStreamingUI(sid);
+      break;
     case 'stream_end':
       flushPendingTextDelta(sid);
+      state.blocks.forEach((block) => {
+        if (block.type === 'text') block.finalized = true;
+      });
       if (isActive) refreshStreamingUI(sid);
       break;
     case 'error':
@@ -244,6 +254,9 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       break;
     case 'complete':
       flushPendingTextDelta(sid);
+      state.blocks.forEach((block) => {
+        if (block.type === 'text') block.finalized = true;
+      });
       if (isActive) {
         refreshStreamingUI(sid);
         // result 已到但 session-ended 稍晚：先去掉「正在输出」，避免误以为还在生成
@@ -344,6 +357,37 @@ export function removeStreamingElements() {
   document.querySelectorAll('[id^="streaming-"]').forEach((el) => el.remove());
 }
 
+function updateStreamingTextBody(mdBody: HTMLElement, block: StreamBlock): boolean {
+  if (block.finalized) {
+    if (
+      mdBody.dataset.renderMode !== 'markdown' ||
+      mdBody.dataset.renderedContent !== block.content
+    ) {
+      mdBody.classList.remove('streaming-plain-text');
+      mdBody.innerHTML = renderMarkdown(block.content);
+      mdBody.dataset.renderMode = 'markdown';
+      mdBody.dataset.renderedContent = block.content;
+      mdBody.dataset.renderedLength = String(block.content.length);
+      return true;
+    }
+    return false;
+  }
+
+  let renderedLength = Number(mdBody.dataset.renderedLength || 0);
+  if (mdBody.dataset.renderMode !== 'plain' || renderedLength > block.content.length) {
+    mdBody.textContent = '';
+    mdBody.classList.add('streaming-plain-text');
+    mdBody.dataset.renderMode = 'plain';
+    mdBody.dataset.renderedContent = '';
+    renderedLength = 0;
+  }
+  if (renderedLength < block.content.length) {
+    mdBody.appendChild(document.createTextNode(block.content.slice(renderedLength)));
+    mdBody.dataset.renderedLength = String(block.content.length);
+  }
+  return false;
+}
+
 export function refreshStreamingUI(sessionId: string) {
   // 只有当 sessionId 匹配当前会话时才更新
   if (sessionId !== appState.activeConversationId && !(appState.pendingUserMessage && !appState.activeConversationId && !appState.pendingUserMessageConvId)) return;
@@ -363,8 +407,9 @@ export function refreshStreamingUI(sessionId: string) {
       last.content = last.content + '\n' + block.content;
     } else if (last && last.type === block.type && block.type === 'text') {
       last.content = last.content + '\n\n' + block.content;
+      last.finalized = Boolean(last.finalized && block.finalized);
     } else {
-      merged.push({ type: block.type, content: block.content });
+      merged.push({ type: block.type, content: block.content, finalized: block.finalized });
     }
   }
 
@@ -427,22 +472,27 @@ export function refreshStreamingUI(sessionId: string) {
       }
     } else if (block.type === 'text') {
       if (existingEl && !existingEl.classList.contains('thinking-msg')) {
-        // 就地更新：只更新 markdown-body 内容
+        // 流式阶段仅追加纯文本；块完成后再做一次完整 Markdown 渲染。
         const mdBody = existingEl.querySelector('.markdown-body');
-        if (mdBody) mdBody.innerHTML = renderMarkdown(block.content);
+        if (mdBody && updateStreamingTextBody(mdBody as HTMLElement, block)) {
+          initCodeCopyButtons(existingEl);
+        }
       } else {
         existingEl?.remove();
         const el = document.createElement('div');
         el.id = blockId;
         el.className = 'message assistant streaming';
         el.innerHTML = `<div class="message-content">
-          <div class="markdown-body">${renderMarkdown(block.content)}</div>
+          <div class="markdown-body"></div>
           <div class="message-footer">
             <span class="message-streaming-indicator">正在输出...</span>
           </div>
         </div>`;
         messageList.appendChild(el);
-        initCodeCopyButtons(el);
+        const mdBody = el.querySelector<HTMLElement>('.markdown-body');
+        if (mdBody && updateStreamingTextBody(mdBody, block)) {
+          initCodeCopyButtons(el);
+        }
         existingEls.set(idx, el);
       }
     }

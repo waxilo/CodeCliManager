@@ -7,6 +7,9 @@ use std::sync::Mutex;
 
 use crate::paths::{get_claude_history_path, get_data_path};
 
+pub(crate) const INTERNAL_RECOVERY_PROMPT: &str = "<ccm-internal-recovery>\n上一轮输出因达到长度限制或包含异常工具协议而被截断。请从中断处继续完成原任务，不要复述已完成内容，也不要输出内部工具路由协议。\n</ccm-internal-recovery>";
+const INTERNAL_RECOVERY_PREFIX: &str = "<ccm-internal-recovery>";
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct Message {
     pub(crate) id: String,
@@ -161,7 +164,23 @@ pub(crate) fn is_tool_result_only_user_message(message: &serde_json::Value) -> b
     }
 }
 
-/// 判断 JSONL 行是否为真实人类用户消息（排除 meta / compact / 纯 tool_result）
+pub(crate) fn is_internal_recovery_message(message: &serde_json::Value) -> bool {
+    match message.get("content") {
+        Some(serde_json::Value::String(text)) => {
+            text.trim_start().starts_with(INTERNAL_RECOVERY_PREFIX)
+        }
+        Some(serde_json::Value::Array(blocks)) => blocks.iter().any(|block| {
+            block.get("type").and_then(|value| value.as_str()) == Some("text")
+                && block
+                    .get("text")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|text| text.trim_start().starts_with(INTERNAL_RECOVERY_PREFIX))
+        }),
+        _ => false,
+    }
+}
+
+/// 判断 JSONL 行是否为真实人类用户消息（排除 meta / compact / 内部恢复 / 纯 tool_result）
 pub(crate) fn is_human_user_message_line(value: &serde_json::Value) -> bool {
     if value.get("isMeta").and_then(|m| m.as_bool()) == Some(true) {
         return false;
@@ -180,7 +199,7 @@ pub(crate) fn is_human_user_message_line(value: &serde_json::Value) -> bool {
     if message.get("role").and_then(|r| r.as_str()) != Some("user") {
         return false;
     }
-    if is_tool_result_only_user_message(message) {
+    if is_internal_recovery_message(message) || is_tool_result_only_user_message(message) {
         return false;
     }
 
@@ -258,6 +277,23 @@ pub(crate) fn load_claude_history() -> Vec<Conversation> {
 
     conversations.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     conversations
+}
+
+/// 只刷新单个会话，避免 turn-complete 重试时反复扫描并解析全部历史。
+pub(crate) fn load_claude_conversation(path: &PathBuf) -> Option<Conversation> {
+    let mut conversation = parse_claude_session_cached(path)?;
+    let overlay = load_overlay();
+    if overlay
+        .deleted_session_ids
+        .iter()
+        .any(|id| id == &conversation.id)
+    {
+        return None;
+    }
+    if let Some(title) = overlay.title_overrides.get(&conversation.id) {
+        conversation.title = title.clone();
+    }
+    Some(conversation)
 }
 
 pub(crate) fn collect_jsonl_files(root: &PathBuf, files: &mut Vec<PathBuf>) {
@@ -368,6 +404,9 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
         }
 
         let message = message.unwrap();
+        if is_internal_recovery_message(message) {
+            continue;
+        }
 
         // 捕获最近一轮 assistant 的上下文用量与实际模型（用户消息无此字段，自动跳过）
         if let Some(usage) = message.get("usage") {
@@ -918,4 +957,37 @@ pub(crate) fn write_claude_custom_title(path: &Path, session_id: &str, title: &s
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_human_user_message_line, is_internal_recovery_message, INTERNAL_RECOVERY_PROMPT};
+
+    #[test]
+    fn internal_recovery_message_is_not_human_history() {
+        let line = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": INTERNAL_RECOVERY_PROMPT,
+            }
+        });
+
+        assert!(is_internal_recovery_message(&line["message"]));
+        assert!(!is_human_user_message_line(&line));
+    }
+
+    #[test]
+    fn normal_user_message_remains_human_history() {
+        let line = serde_json::json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": "请继续分析",
+            }
+        });
+
+        assert!(!is_internal_recovery_message(&line["message"]));
+        assert!(is_human_user_message_line(&line));
+    }
 }

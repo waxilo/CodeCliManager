@@ -10,6 +10,8 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 
+use crate::protocol_guard::normalize_stop_reason;
+
 /// 解析后的一条 Kiro 事件。
 #[derive(Debug, Clone)]
 pub struct KiroEvent {
@@ -256,11 +258,23 @@ mod tests {
     fn collects_text_and_stop_reason() {
         let mut data = Vec::new();
         data.extend_from_slice(&build_frame("assistantResponseEvent", &json!({ "content": "abc" })));
+        data.extend_from_slice(&build_frame("metadataEvent", &json!({ "stopReason": "END_TURN" })));
+        let events = parse_event_stream(&data);
+        let collected = collect_kiro_text(&events);
+        assert_eq!(collected.text, "abc");
+        assert_eq!(collected.stop_reason, "end_turn");
+    }
+
+    #[test]
+    fn downgrades_tool_use_stop_without_tool_blocks() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&build_frame("assistantResponseEvent", &json!({ "content": "abc" })));
         data.extend_from_slice(&build_frame("metadataEvent", &json!({ "stopReason": "TOOL_USE" })));
         let events = parse_event_stream(&data);
         let collected = collect_kiro_text(&events);
         assert_eq!(collected.text, "abc");
-        assert_eq!(collected.stop_reason, "tool_use");
+        assert!(collected.tool_uses.is_empty());
+        assert_eq!(collected.stop_reason, "end_turn");
     }
 
     #[test]
@@ -533,8 +547,13 @@ pub fn collect_kiro_text(events: &[KiroEvent]) -> CollectedText {
             collected.tool_uses.push(block);
         }
     }
-    if !collected.tool_uses.is_empty() {
-        collected.stop_reason = "tool_use".to_string();
+    if !collected.tool_uses.is_empty() || collected.stop_reason == "tool_use" {
+        collected.stop_reason = normalize_stop_reason(
+            &collected.stop_reason,
+            !collected.tool_uses.is_empty(),
+            false,
+        )
+        .to_string();
     }
 
     collected

@@ -68,6 +68,8 @@ export interface PendingAskQuestionState {
 export interface StreamBlock {
   type: 'thinking' | 'text';
   content: string;
+  /** text 块结束后才执行完整 Markdown 渲染 */
+  finalized?: boolean;
 }
 
 export interface StreamingState {

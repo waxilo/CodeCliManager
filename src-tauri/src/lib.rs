@@ -8,6 +8,7 @@ mod history;
 mod kiro;
 mod model_fetch;
 mod paths;
+mod protocol_guard;
 mod session;
 mod shell;
 mod updater_manifest;
