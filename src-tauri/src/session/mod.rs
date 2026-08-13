@@ -884,6 +884,23 @@ pub(crate) async fn session_stop_graceful_async(session_key: String, reason: &'s
         .unwrap_or(false)
 }
 
+/// 返回当前所有活跃会话的注册键（进程 + stdin 并集，去重）。
+/// 供应用更新 / 退出前全量优雅关闭常驻 claude 进程使用。
+pub(crate) fn active_session_keys() -> Vec<String> {
+    let mut keys: HashSet<String> = HashSet::new();
+    if let Ok(processes) = ACTIVE_PROCESSES.lock() {
+        if let Some(map) = processes.as_ref() {
+            keys.extend(map.keys().cloned());
+        }
+    }
+    if let Ok(stdins) = ACTIVE_STDIN.lock() {
+        if let Some(map) = stdins.as_ref() {
+            keys.extend(map.keys().cloned());
+        }
+    }
+    keys.into_iter().collect()
+}
+
 /// 关闭 stdin 后等待子进程退出；超时才强杀。stream 收尾唯一强杀入口。
 pub(crate) fn wait_child_after_stdin_close(child: &mut Child) -> std::io::Result<std::process::ExitStatus> {
     let deadline = Instant::now() + CHILD_EXIT_AFTER_STDIN_CLOSE;

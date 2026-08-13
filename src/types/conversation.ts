@@ -30,6 +30,15 @@ export interface Message {
   toolData?: ToolMessageData;
 }
 
+/** 会话累计 token / 成本用量 */
+export interface SessionUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+  cacheCreation: number;
+  costUsd?: number | null;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -41,6 +50,8 @@ export interface Conversation {
   updated_at: number;
   context_tokens?: number | null;
   last_model?: string | null;
+  /** 历史聚合用量（从 JSONL 解析），进程内增量在其上叠加 */
+  usage?: SessionUsage | null;
 }
 
 export interface WorkspaceGroup {

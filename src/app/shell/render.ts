@@ -24,6 +24,7 @@ import {
 import { renderChatContent, renderEmptyState, renderChatHeaderHtml } from '../../features/chat/render-chat';
 import { renderInputComposerHtml, renderBalanceStatusBarHtml, bindSessionIdCopyEvents, bindQueuedPromptEvents } from '../../features/chat/input-composer';
 import { setSendButtonLoading, isActiveConversationRunning, updateSendButtonState } from '../../features/chat/session-context';
+import { refreshStreamingUI } from '../../features/chat/streaming';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { bindPermissionModeBarEvents } from '../../features/settings/mount';
 import {
@@ -189,6 +190,13 @@ function performRender() {
   // render 重建了发送按钮 DOM，按 appState.runningSessions（与左侧同一逻辑）恢复 loading
   if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive) {
     setSendButtonLoading(isActiveConversationRunning());
+    // 全量重绘不包含进行中的流式块（buildDisplayMessages 只取已提交消息）。
+    // 从设置/API 配置等页面返回时，立即按 appState 恢复流式 DOM，
+    // 避免模型在思考/子代理静默期聊天区看起来「空白卡死」。
+    const sid = appState.activeConversationId;
+    if (sid && appState.streamingBySession.has(sid)) {
+      refreshStreamingUI(sid);
+    }
   }
   remountActiveInteractionPanel();
   if (appState.isKiroViewActive) {

@@ -399,6 +399,41 @@ pub async fn abort_session(
     Ok(aborted)
 }
 
+/// 全量优雅关闭所有常驻 claude 进程（应用更新 / 退出前调用）。
+/// 每个会话走 interrupt → 关 stdin → 等待退出的优雅路径，并行执行。
+#[tauri::command]
+pub async fn stop_all_sessions(reason: Option<String>) -> Result<usize, String> {
+    let keys = active_session_keys();
+    if keys.is_empty() {
+        return Ok(0);
+    }
+    let reason: &'static str = match reason.as_deref() {
+        Some("update") => "应用更新",
+        Some("quit") => "应用退出",
+        _ => "应用关闭",
+    };
+    eprintln!(
+        "[stop_all_sessions] 优雅关闭 {} 个活跃会话 ({})",
+        keys.len(),
+        reason
+    );
+
+    let handles: Vec<_> = keys
+        .into_iter()
+        .map(|key| {
+            tauri::async_runtime::spawn_blocking(move || session_stop_graceful(&key, reason))
+        })
+        .collect();
+
+    let mut stopped = 0usize;
+    for handle in handles {
+        if handle.await.unwrap_or(false) {
+            stopped += 1;
+        }
+    }
+    Ok(stopped)
+}
+
 /// 响应当前会话的工具权限请求（允许 / 拒绝）
 #[tauri::command]
 pub fn respond_tool_permission(
@@ -567,6 +602,7 @@ pub async fn retry_message(
                 updated_at: chrono::Utc::now().timestamp(),
                 context_tokens: None,
                 last_model: None,
+                usage: None,
             },
         );
     }

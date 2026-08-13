@@ -12,6 +12,8 @@ import type {
   QueuedPromptItem,
   SettingsSection,
   ActiveToolState,
+  TodoItem,
+  SessionUsage,
 } from '../types';
 import { createRequestGuard } from '../utils';
 import type { ScrollController } from '../ui';
@@ -141,6 +143,10 @@ export const appState = {
   pendingAskQuestions: new Map<string, PendingAskQuestionState>(),
   /** sessionId → toolUseId → 进行中的 Task 等可见工具 */
   activeToolsBySession: new Map<string, Map<string, ActiveToolState>>(),
+  /** sessionId → TodoList 清单（TodoWrite 整表替换） */
+  todosBySession: new Map<string, TodoItem[]>(),
+  /** sessionId → 会话累计用量（历史基线 + 进程增量叠加） */
+  usageBySession: new Map<string, SessionUsage>(),
   activeQuestionEnterHandler: null as (() => boolean) | null,
   activeAskQuestionCleanup: null as (() => void) | null,
   questionOtherInputActive: false,

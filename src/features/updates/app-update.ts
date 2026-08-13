@@ -7,6 +7,7 @@ import { showCopyToastMsg } from '../../ui';
 import { renderMarkdownCached as renderMarkdown } from '../../markdown';
 import { shouldShowClaudeUpdateBadge } from './claude-update';
 import { renderSettingsUpdateSectionIfOpen } from './claude-update';
+import { stopAllSessions } from '../../api/session';
 
 // ── 应用自身更新（tauri-plugin-updater 拉取 GitHub Releases） ──────────
 
@@ -315,7 +316,8 @@ export async function installAppUpdate(): Promise<void> {
   };
 
   try {
-    await appState.appUpdate.downloadAndInstall((event) => {
+    // 1. 下载更新包（仅下载，不安装）
+    await appState.appUpdate.download((event) => {
       if (event.event === 'Started') {
         appState.appUpdateProgress = { downloaded: 0, total: event.data.contentLength ?? 0 };
       } else if (event.event === 'Progress') {
@@ -323,17 +325,6 @@ export async function installAppUpdate(): Promise<void> {
           downloaded: (appState.appUpdateProgress?.downloaded ?? 0) + event.data.chunkLength,
           total: appState.appUpdateProgress?.total ?? 0,
         };
-      } else if (event.event === 'Finished') {
-        // macOS：bundle 可能已替换完成，但 Promise 偶发不返回；启动看门狗强制重启
-        if (stallTimer === null && navigator.platform.toLowerCase().includes('mac')) {
-          stallTimer = setTimeout(() => {
-            if (installResolved) return;
-            console.warn('[updater] macOS install stall, forcing relaunch');
-            void relaunchAfterUpdate();
-          }, MAC_UPDATE_INSTALL_STALL_MS);
-        } else if (isWindows) {
-          showCopyToastMsg('下载完成，正在安装…（若弹出 UAC 请允许）');
-        }
       }
       const progressPanel = document.querySelector('#app-update-popover, #settings-app-update-view');
       if (progressPanel) {
@@ -346,9 +337,35 @@ export async function installAppUpdate(): Promise<void> {
         if (pctEl) pctEl.textContent = `${pct}%`;
       }
     }, { timeout: 300_000 });
-    installResolved = true;
     clearStallTimer();
     appState.appUpdateProgress = null;
+
+    // 2. 安装前优雅关闭所有常驻 claude 进程。
+    // tauri-plugin-updater 无 beforeInstall 钩子：Windows 安装时 process::exit(0) 直接退进程，
+    // 若常驻 claude 仍在运行会成为孤儿进程，所以必须在 install 前主动关闭。
+    if (isWindows) {
+      showCopyToastMsg('下载完成，正在关闭常驻会话…');
+    }
+    const stopped = await stopAllSessions('update');
+    console.log(`[updater] 安装前已优雅关闭 ${stopped} 个常驻会话`);
+    if (isWindows) {
+      showCopyToastMsg('常驻会话已关闭，开始安装…（若弹出 UAC 请允许）');
+    }
+
+    // 3. 安装
+    installResolved = false;
+    const installPromise = appState.appUpdate.install();
+    // macOS：bundle 可能已替换完成，但 install Promise 偶发不返回；启动看门狗强制重启
+    if (navigator.platform.toLowerCase().includes('mac')) {
+      stallTimer = setTimeout(() => {
+        if (installResolved) return;
+        console.warn('[updater] macOS install stall, forcing relaunch');
+        void relaunchAfterUpdate();
+      }, MAC_UPDATE_INSTALL_STALL_MS);
+    }
+    await installPromise;
+    installResolved = true;
+    clearStallTimer();
     // 重启前先释放 updater 资源，避免 macOS 上 close 与 relaunch 竞态
     if (appState.appUpdate) {
       try {

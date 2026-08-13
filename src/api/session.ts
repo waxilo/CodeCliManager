@@ -28,6 +28,11 @@ export function abortSession(args?: {
   return invoke<boolean>('abort_session', args ?? {});
 }
 
+/** 全量优雅关闭所有常驻 claude 进程（应用更新 / 退出前调用） */
+export function stopAllSessions(reason?: 'update' | 'quit'): Promise<number> {
+  return invoke<number>('stop_all_sessions', { reason });
+}
+
 export function respondToolPermission(args: {
   requestId: string;
   behavior: string;

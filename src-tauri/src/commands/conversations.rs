@@ -229,5 +229,6 @@ pub fn update_conversation_title(
         updated_at: chrono::Utc::now().timestamp(),
         context_tokens: None,
         last_model: None,
+        usage: None,
     })
 }

@@ -24,6 +24,7 @@ export function normalizeSessionEventPayload(raw: SessionEventPayload): SessionE
     updated_at: updatedAt,
     context_tokens: raw.context_tokens ?? null,
     last_model: raw.last_model ?? null,
+    usage: raw.usage ?? null,
   };
 }
 

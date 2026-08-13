@@ -4,6 +4,7 @@ use tauri::{AppHandle, Emitter};
 
 use crate::history::{Conversation, Message};
 use crate::protocol_guard::ProtocolTextGuard;
+use crate::usage::{accumulate_session_usage, add_session_cost, SessionUsage};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct SessionEventPayload {
@@ -17,6 +18,8 @@ pub(crate) struct SessionEventPayload {
     pub(crate) context_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) usage: Option<SessionUsage>,
 }
 
 /// 流式消息块，参考 claudecodeui 的 NormalizedMessage.kind
@@ -91,6 +94,7 @@ pub(crate) fn conversation_to_payload(conv: &Conversation) -> SessionEventPayloa
         updated_at: conv.updated_at,
         context_tokens: conv.context_tokens,
         last_model: conv.last_model.clone(),
+        usage: conv.usage.clone(),
     }
 }
 
@@ -136,6 +140,7 @@ fn emit_task_tool_result_if_any(
     sid: &str,
     value: &serde_json::Value,
     known_task_ids: &HashSet<String>,
+    outstanding_task_ids: &mut HashSet<String>,
 ) {
     let message = match value.get("message") {
         Some(m) => m,
@@ -156,6 +161,8 @@ fn emit_task_tool_result_if_any(
         if tool_use_id.is_empty() || !known_task_ids.contains(tool_use_id) {
             continue;
         }
+        // 子代理结果已回：从未决集合中移除，允许主链 result 触发 turn-complete
+        outstanding_task_ids.remove(tool_use_id);
         let is_error = item
             .get("is_error")
             .and_then(|v| v.as_bool())
@@ -334,6 +341,31 @@ pub(crate) fn is_stream_turn_complete(line: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// result 事件是否属于主链（parent_tool_use_id 为空 / 不存在）。
+/// 启用 --include-partial-messages 后，子代理的 result 也会进入父流，
+/// 但其消息带非空 parent_tool_use_id；只有主链 result 才能作为「本轮结束」信号。
+pub(crate) fn is_main_stream_result(line: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+        return false;
+    };
+    if value.get("type").and_then(|t| t.as_str()) != Some("result") {
+        return false;
+    }
+    match value.get("parent_tool_use_id") {
+        None => true,
+        Some(serde_json::Value::Null) => true,
+        Some(_) => false,
+    }
+}
+
+/// 需要流式累积 input_json 的工具（Task 需发 tool_use 卡；TodoWrite 需解析 todos）
+const INPUT_JSON_TOOL_NAMES: &[&str] = &["Task", "TodoWrite"];
+
+/// system 事件的字段可能挂在顶层，防御性取值。
+fn system_event_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a serde_json::Value> {
+    value.get(field)
+}
+
 /// 解析 claude --output-format stream-json 的 NDJSON 行
 pub(crate) fn process_claude_stream_line(
     line: &str,
@@ -342,6 +374,7 @@ pub(crate) fn process_claude_stream_line(
     block_types: &mut HashMap<usize, String>,
     tool_use_blocks: &mut HashMap<usize, ToolUseBlockState>,
     known_task_ids: &mut HashSet<String>,
+    outstanding_task_ids: &mut HashSet<String>,
     protocol_guard: &mut ProtocolLeakGuard,
     stream_error: &mut Option<String>,
 ) {
@@ -405,12 +438,66 @@ pub(crate) fn process_claude_stream_line(
                         record_stream_error(stream_error, app, sid.as_deref(), error_msg);
                     }
                 }
+                Some("task_started") => {
+                    let sid = resolve_stream_session_id(captured_session_id, &value);
+                    if let Some(sid) = sid {
+                        let tool_use_id = system_event_field(&value, "tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let description = system_event_field(&value, "description")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let prompt = system_event_field(&value, "prompt")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let payload = serde_json::json!({
+                            "tool_use_id": tool_use_id,
+                            "description": description,
+                            "prompt": prompt,
+                        });
+                        emit_message_chunk(app, &sid, "task_started", &payload.to_string());
+                    }
+                }
+                Some("task_notification") => {
+                    let sid = resolve_stream_session_id(captured_session_id, &value);
+                    if let Some(sid) = sid {
+                        let tool_use_id = system_event_field(&value, "tool_use_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let status = system_event_field(&value, "status")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        // 兜底：子代理成功/失败通知即视为完成，避免 tool_result 偶发未匹配时卡死
+                        if !tool_use_id.is_empty() && (status == "success" || status == "error") {
+                            outstanding_task_ids.remove(&tool_use_id);
+                        }
+                        let payload = serde_json::json!({
+                            "tool_use_id": tool_use_id,
+                            "status": status,
+                            "total_tokens": system_event_field(&value, "total_tokens")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            "tool_uses": system_event_field(&value, "tool_uses")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                            "duration_ms": system_event_field(&value, "duration_ms")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(0),
+                        });
+                        emit_message_chunk(app, &sid, "task_progress", &payload.to_string());
+                    }
+                }
                 _ => {}
             }
         }
         "user" => {
             if let Some(sid) = resolve_stream_session_id(captured_session_id, &value) {
-                emit_task_tool_result_if_any(app, &sid, &value, known_task_ids);
+                emit_task_tool_result_if_any(app, &sid, &value, known_task_ids, outstanding_task_ids);
             }
         }
         "stream_event" => {
@@ -426,6 +513,22 @@ pub(crate) fn process_claude_stream_line(
             let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
 
             match event_type {
+                "message_start" => {
+                    // 输入 / 缓存 token 在 message_start 一次性给出；output 由最终 message_delta 累计
+                    if let Some(usage) = event.get("message").and_then(|m| m.get("usage")) {
+                        let input_tokens =
+                            usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let cache_read = usage
+                            .get("cache_read_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        let cache_creation = usage
+                            .get("cache_creation_input_tokens")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(0);
+                        accumulate_session_usage(&sid, input_tokens, 0, cache_read, cache_creation);
+                    }
+                }
                 "content_block_start" => {
                     if let Some(block) = event.get("content_block") {
                         let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
@@ -454,8 +557,10 @@ pub(crate) fn process_claude_stream_line(
                                     input_json: String::new(),
                                 },
                             );
-                            if name == "Task" && !id.is_empty() {
-                                known_task_ids.insert(id.clone());
+                            if INPUT_JSON_TOOL_NAMES.contains(&name.as_str()) && !id.is_empty() {
+                                if name == "Task" {
+                                    known_task_ids.insert(id.clone());
+                                }
                                 let payload = serde_json::json!({
                                     "id": id,
                                     "name": name,
@@ -512,7 +617,7 @@ pub(crate) fn process_claude_stream_line(
                                 delta.get("partial_json").and_then(|v| v.as_str())
                             {
                                 if let Some(block) = tool_use_blocks.get_mut(&index) {
-                                    if block.name == "Task" {
+                                    if INPUT_JSON_TOOL_NAMES.contains(&block.name.as_str()) {
                                         block.input_json.push_str(partial);
                                     }
                                 }
@@ -538,10 +643,30 @@ pub(crate) fn process_claude_stream_line(
                         }
                         Some("tool_use") => {
                             if let Some(block) = tool_use_blocks.remove(&index) {
-                                if block.name == "Task" {
+                                if INPUT_JSON_TOOL_NAMES.contains(&block.name.as_str()) {
                                     let input: serde_json::Value =
                                         serde_json::from_str(&block.input_json)
                                             .unwrap_or_else(|_| serde_json::json!({}));
+                                    if block.name == "Task" {
+                                        // 主链 Task 已发出：其子代理 result 不再视为本轮结束
+                                        outstanding_task_ids.insert(block.id.clone());
+                                    } else if block.name == "TodoWrite" {
+                                        // TodoWrite 协议为「整表替换」，直接透传完整 todos 给前端
+                                        let todos = input
+                                            .get("todos")
+                                            .cloned()
+                                            .unwrap_or_else(|| serde_json::json!([]));
+                                        let todos_payload = serde_json::json!({
+                                            "conversation_id": sid,
+                                            "todos": todos,
+                                        });
+                                        emit_message_chunk(
+                                            app,
+                                            &sid,
+                                            "todos_updated",
+                                            &todos_payload.to_string(),
+                                        );
+                                    }
                                     let payload = serde_json::json!({
                                         "id": block.id,
                                         "name": block.name,
@@ -574,6 +699,15 @@ pub(crate) fn process_claude_stream_line(
                         .and_then(|reason| reason.as_str())
                     {
                         protocol_guard.mark_stop_reason(stop_reason);
+                        // 仅带 stop_reason 的最终 message_delta 携带累计 output，且只出现一次，
+                        // 避免中间 delta 的累计 output 被重复累加
+                        if let Some(usage) = event.get("usage") {
+                            let output_tokens =
+                                usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+                            if output_tokens > 0 {
+                                accumulate_session_usage(&sid, 0, output_tokens, 0, 0);
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -588,6 +722,13 @@ pub(crate) fn process_claude_stream_line(
             }
         }
         "result" => {
+            // 主链 / 子代理 result 均携带 total_cost_usd，逐次累加（含子代理调用）
+            if let Some(cost) = value.get("total_cost_usd").and_then(|v| v.as_f64()) {
+                let sid = resolve_stream_session_id(captured_session_id, &value);
+                if let Some(sid) = sid.as_deref() {
+                    add_session_cost(sid, cost);
+                }
+            }
             if value.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
                 let sid = resolve_stream_session_id(captured_session_id, &value);
                 let error = extract_result_error(&value);

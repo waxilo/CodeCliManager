@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use crate::paths::{get_claude_history_path, get_data_path};
+use crate::usage::SessionUsage;
 
 pub(crate) const INTERNAL_RECOVERY_PROMPT: &str = "<ccm-internal-recovery>\n上一轮输出因达到长度限制或包含异常工具协议而被截断。请从中断处继续完成原任务，不要复述已完成内容，也不要输出内部工具路由协议。\n</ccm-internal-recovery>";
 const INTERNAL_RECOVERY_PREFIX: &str = "<ccm-internal-recovery>";
@@ -36,6 +37,8 @@ pub(crate) struct Conversation {
     pub(crate) context_tokens: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) last_model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) usage: Option<SessionUsage>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -483,6 +486,8 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     let mut last_model: Option<String> = None;
     // 主链上已保留的 Task tool_use id，用于配对保留对应 tool_result
     let mut visible_task_tool_ids: HashSet<String> = HashSet::new();
+    // 历史聚合用量：逐条 message.usage 累加 + result 行 total_cost_usd 累加
+    let mut usage_agg = SessionUsage::default();
 
     for (line_idx, value) in lines.iter().enumerate() {
         if project_dir.is_none() {
@@ -561,6 +566,11 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             continue;
         }
 
+        // result 行携带 total_cost_usd（单次模型调用成本，含子代理），逐次累加
+        if let Some(cost) = value.get("total_cost_usd").and_then(|v| v.as_f64()) {
+            *usage_agg.cost_usd.get_or_insert(0.0) += cost;
+        }
+
         let Some(message) = value.get("message") else {
             continue;
         };
@@ -569,12 +579,20 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
         }
 
         if let Some(usage) = message.get("usage") {
-            let field = |k: &str| usage.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
-            let ctx = field("input_tokens")
-                + field("cache_creation_input_tokens")
-                + field("cache_read_input_tokens");
+            let field = |k: &str| usage.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+            let input = field("input_tokens");
+            let output = field("output_tokens");
+            let cache_read = field("cache_read_input_tokens");
+            let cache_creation = field("cache_creation_input_tokens");
+            let ctx = (input + cache_creation + cache_read) as i64;
             if ctx > 0 {
                 last_context_tokens = Some(ctx);
+            }
+            if input + output + cache_read + cache_creation > 0 {
+                usage_agg.input_tokens += input;
+                usage_agg.output_tokens += output;
+                usage_agg.cache_read += cache_read;
+                usage_agg.cache_creation += cache_creation;
             }
         }
         if let Some(model) = message.get("model").and_then(|m| m.as_str()) {
@@ -653,6 +671,11 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
         updated_at: updated_at.unwrap_or_default(),
         context_tokens: last_context_tokens,
         last_model,
+        usage: if usage_agg.is_empty() {
+            None
+        } else {
+            Some(usage_agg)
+        },
     })
 }
 
@@ -668,7 +691,8 @@ pub(crate) fn decode_project_dir_from_jsonl_path(path: &Path) -> Option<String> 
 }
 
 /// 主链可见工具白名单：AskUserQuestion（互动卡片）+ Task（Subagent 状态）
-const VISIBLE_TOOL_NAMES: &[&str] = &["AskUserQuestion", "Task"];
+/// + TodoWrite / TaskCreate / TaskUpdate（TodoList 清单与任务管理卡）
+const VISIBLE_TOOL_NAMES: &[&str] = &["AskUserQuestion", "Task", "TodoWrite", "TaskCreate", "TaskUpdate"];
 
 fn is_visible_tool_name(name: &str) -> bool {
     VISIBLE_TOOL_NAMES.contains(&name)
@@ -1164,6 +1188,7 @@ mod tests {
             updated_at,
             context_tokens: None,
             last_model: None,
+            usage: None,
         }
     }
 

@@ -4,6 +4,7 @@ export type {
   ToolMessageData,
   Message,
   Conversation,
+  SessionUsage,
   WorkspaceGroup,
   ImportResult,
 } from './conversation';
@@ -20,6 +21,9 @@ export type {
   PendingAskQuestionState,
   ActiveToolState,
   ActiveToolStatus,
+  SubagentProgress,
+  TodoItem,
+  SessionUsageUpdatedPayload,
   StreamBlock,
   StreamingState,
   QueuedPromptItem,

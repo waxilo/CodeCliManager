@@ -1,7 +1,7 @@
 import { appState } from '../state';
 import { shellApi } from '../app/shell/api';
 import { listen } from '@tauri-apps/api/event';
-import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPayload, QueuedPromptItem } from '../types';
+import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPayload, QueuedPromptItem, SessionUsage, SessionUsageUpdatedPayload } from '../types';
 import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent, refreshStreamingUI, reconcileActiveToolsWithHistory } from '../features/chat/streaming';
 import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
@@ -9,6 +9,9 @@ import { setAbortingUi, setSendButtonLoading, isSendButtonLoading } from '../fea
 import { hideSendingState } from '../features/chat/retry';
 import { updateConversationListSpinner } from '../features/sidebar';
 import { updateContextIndicator } from '../features/chat/context-indicator';
+import { updateCostIndicator } from '../features/chat/cost-indicator';
+import { syncSubagentProgressUI } from '../features/chat/subagent-progress';
+import { syncTodoPanelUI, extractLatestTodos } from '../features/chat/todo-panel';
 import { abortSession } from '../features/chat/send';
 import { captureScrollState, getStreamingAssistantText, restoreScrollState } from '../features/chat/streaming';
 import { refreshConversationFromBackend } from '../features/conversations/load';
@@ -40,8 +43,25 @@ function scheduleChatRefresh(sessionId: string, delay = 32): void {
     if (appState.activeConversationId === sessionId) {
       shellApi.refreshChatContent();
       updateContextIndicator();
+      syncSubagentProgressUI();
+      syncTodoPanelUI();
     }
   }, delay));
+}
+
+/** 从历史 payload 重建用量基线 + TodoList（进程增量在其上叠加；无数据时不动既有累计） */
+function seedUsageAndTodos(payload: SessionEventPayload): void {
+  const sid = payload.conversation_id;
+  if (!sid) return;
+  if (payload.usage) {
+    appState.usageBySession.set(sid, payload.usage);
+  }
+  const latestTodos = extractLatestTodos(payload.messages);
+  if (latestTodos.length > 0) {
+    appState.todosBySession.set(sid, latestTodos);
+  } else {
+    appState.todosBySession.delete(sid);
+  }
 }
 
 export async function setupEventListeners() {
@@ -109,7 +129,11 @@ export async function setupEventListeners() {
 
     clearStreamingState(payload.conversation_id);
 
+    seedUsageAndTodos(payload);
     if (isViewingThis) {
+      syncTodoPanelUI();
+      syncSubagentProgressUI();
+      updateCostIndicator();
       hideSendingState();
       // 输出结束后重建消息列表：若用户此前已上滑阅读上方消息，重建后保持原位
       const scrollSnap = captureScrollState();
@@ -174,6 +198,7 @@ export async function setupEventListeners() {
       updated_at: payload.updated_at,
       context_tokens: payload.context_tokens ?? null,
       last_model: payload.last_model ?? null,
+      usage: payload.usage ?? null,
     });
 
     // 远程已有助手时不要再塞一条 stream-assistant；先清流式 DOM，避免与历史气泡叠两层
@@ -184,6 +209,8 @@ export async function setupEventListeners() {
       ensureAssistantPresent(payload.conversation_id, streamedText);
     }
     clearStreamingState(payload.conversation_id);
+
+    seedUsageAndTodos(payload);
 
     const isViewingThis = appState.activeConversationId === payload.conversation_id;
 
@@ -236,6 +263,29 @@ export async function setupEventListeners() {
       setSendButtonLoading(true);
     }
     updateConversationListSpinner();
+  });
+
+  // 会话用量增量事件（turn-complete 前由后端下发，叠加到历史基线上）
+  await listen<SessionUsageUpdatedPayload>('session-usage-updated', (event) => {
+    const { conversationId, inputTokens, outputTokens, cacheRead, cacheCreation, costUsd } = event.payload;
+    if (!conversationId) return;
+    const current = appState.usageBySession.get(conversationId) || {
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheRead: 0,
+      cacheCreation: 0,
+    };
+    const next: SessionUsage = {
+      inputTokens: current.inputTokens + (inputTokens || 0),
+      outputTokens: current.outputTokens + (outputTokens || 0),
+      cacheRead: current.cacheRead + (cacheRead || 0),
+      cacheCreation: current.cacheCreation + (cacheCreation || 0),
+      costUsd: (current.costUsd ?? 0) + (costUsd ?? 0),
+    };
+    appState.usageBySession.set(conversationId, next);
+    if (appState.activeConversationId === conversationId) {
+      updateCostIndicator();
+    }
   });
 
   await listen<string | null>('turn-continued', (event) => {
@@ -297,6 +347,9 @@ export async function setupEventListeners() {
       } else {
         shellApi.refreshChatContent();
         updateContextIndicator();
+        syncSubagentProgressUI();
+        syncTodoPanelUI();
+        updateCostIndicator();
       }
       if (wasUserAbort) {
         showCopyToastMsg('已停止');
@@ -359,6 +412,9 @@ export async function setupEventListeners() {
       updateConversationListSpinner();
       if (!isCurrentSession) return;
       updateContextIndicator();
+      syncSubagentProgressUI();
+      syncTodoPanelUI();
+      updateCostIndicator();
       if (appState.activeConversationId || appState.transientSessionError) {
         shellApi.refreshChatContent();
       }
@@ -368,6 +424,16 @@ export async function setupEventListeners() {
   // ESC 键取消正在运行的任务（参考 claudecodeui）
   document.addEventListener('keydown', (e: KeyboardEvent) => {
     if (e.key === 'Escape' && !e.repeat) {
+      // 全屏管理页 / Kiro 覆盖层打开时，ESC 交给各页面自己的 handler 负责关闭；
+      // 全局停止任务只在主聊天页生效，否则「进设置再 ESC 退出」会误中止后台会话。
+      if (
+        appState.isApiConfigViewActive ||
+        appState.isSettingsViewActive ||
+        appState.isMcpViewActive ||
+        appState.isKiroViewActive
+      ) {
+        return;
+      }
       // 权限面板 / 问答选择卡自行处理 ESC，避免同时 abort
       if (
         document.querySelector('.interaction-panel') ||

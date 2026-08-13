@@ -13,10 +13,12 @@ mod protocol_guard;
 mod session;
 mod shell;
 mod updater_manifest;
+mod usage;
 mod window;
 
 use commands::*;
 use kiro::KiroProxyState;
+use session::{active_session_keys, session_stop_graceful};
 use window::apply_responsive_window_size;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -45,6 +47,7 @@ pub fn run() {
             remove_queued_prompt_command,
             clear_queued_prompts_command,
             abort_session,
+            stop_all_sessions,
             respond_tool_permission,
             set_permission_mode,
             retry_message,
@@ -86,6 +89,20 @@ pub fn run() {
             run_claude_code_install,
             run_claude_code_update_silent,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application")
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                // 兜底：应用退出前优雅关闭所有常驻 claude 进程，
+                // 覆盖手动退出 / macOS relaunch（Windows 更新走 stop_all_sessions 命令 + process::exit）。
+                let keys = active_session_keys();
+                if !keys.is_empty() {
+                    eprintln!("[exit] 应用退出，优雅关闭 {} 个常驻会话", keys.len());
+                    for key in keys {
+                        let _ = session_stop_graceful(&key, "应用退出");
+                    }
+                }
+                let _ = app;
+            }
+        })
 }

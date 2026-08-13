@@ -1,4 +1,4 @@
-import type { FileRef, Message } from './conversation';
+import type { FileRef, Message, SessionUsage } from './conversation';
 
 export interface SessionErrorPayload {
   conversationId: string | null;
@@ -17,6 +17,7 @@ export interface SessionEventPayload {
   updatedAt?: number;
   context_tokens?: number | null;
   last_model?: string | null;
+  usage?: SessionUsage | null;
 }
 
 export interface MessageChunkPayload {
@@ -66,8 +67,16 @@ export interface PendingAskQuestionState {
   finish?: (result: QuestionDialogResult) => void;
 }
 
-/** 流式/进行中的可见工具（当前仅 Task） */
+/** 流式/进行中的可见工具 */
 export type ActiveToolStatus = 'running' | 'done' | 'failed';
+
+/** 子代理执行进度（system/task_notification 下发） */
+export interface SubagentProgress {
+  status?: string;
+  totalTokens?: number;
+  toolUses?: number;
+  durationMs?: number;
+}
 
 export interface ActiveToolState {
   toolUseId: string;
@@ -77,6 +86,28 @@ export interface ActiveToolState {
   toolResult?: string;
   isError?: boolean;
   startedAt: number;
+  /** 子代理 Task：执行描述（system/task_started 下发） */
+  description?: string;
+  /** 子代理 Task：进度汇总（system/task_notification 下发） */
+  progress?: SubagentProgress;
+}
+
+/** TodoList 清单项（TodoWrite 协议：整表替换） */
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: string;
+  [key: string]: unknown;
+}
+
+/** 会话用量增量事件（后端 session-usage-updated 下发） */
+export interface SessionUsageUpdatedPayload {
+  conversationId: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheRead: number;
+  cacheCreation: number;
+  costUsd?: number | null;
 }
 
 export interface StreamBlock {

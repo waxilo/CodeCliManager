@@ -12,6 +12,7 @@ use crate::config::{apply_model_override_env, has_custom_api_base};
 use crate::fs::resolve_or_create_dir;
 use crate::history::INTERNAL_RECOVERY_PROMPT;
 use crate::session::*;
+use crate::usage::emit_session_usage_if_any;
 
 fn should_auto_recover(was_aborted: bool, recovery_needed: bool, recovery_attempts: u8) -> bool {
     !was_aborted && recovery_needed && recovery_attempts < 1
@@ -29,6 +30,7 @@ pub(crate) fn spawn_claude_stream(
     // 本轮无输出超时；空闲常驻会话超时后优雅退出（下次发消息会 --resume 重建）
     let turn_idle_timeout = Duration::from_secs(600); // 10 分钟
     let session_idle_timeout = Duration::from_secs(3600); // 60 分钟
+    const SUBAGENT_IDLE_TIMEOUT: Duration = Duration::from_secs(1800); // 子代理执行期 30 分钟
     const PERMISSION_TIMEOUT: Duration = Duration::from_secs(600); // 权限确认等待
 
     #[cfg(target_os = "windows")]
@@ -153,6 +155,9 @@ pub(crate) fn spawn_claude_stream(
     let mut block_types: HashMap<usize, String> = HashMap::new();
     let mut tool_use_blocks: HashMap<usize, ToolUseBlockState> = HashMap::new();
     let mut known_task_ids: HashSet<String> = HashSet::new();
+    // 已发出 tool_use 且尚未收到 tool_result 的主链 Task 子代理 ID；
+    // 非空时忽略任何 result（含子代理 result），避免主进程等待期被误判为完成
+    let mut outstanding_task_ids: HashSet<String> = HashSet::new();
     let mut protocol_guard = ProtocolLeakGuard::default();
     let mut recovery_attempts = 0u8;
     let mut stream_error: Option<String> = None;
@@ -357,6 +362,7 @@ pub(crate) fn spawn_claude_stream(
                     &mut block_types,
                     &mut tool_use_blocks,
                     &mut known_task_ids,
+                    &mut outstanding_task_ids,
                     &mut protocol_guard,
                     &mut stream_error,
                 );
@@ -396,6 +402,34 @@ pub(crate) fn spawn_claude_stream(
                     stdout_finished = true;
                     continue;
                 }
+                // 子代理自身的 result：进入父流，但绝不能当作本轮结束信号
+                if !is_main_stream_result(&line) {
+                    last_activity = Instant::now();
+                    continue;
+                }
+                if !outstanding_task_ids.is_empty() {
+                    // 用户 interrupt / 切模型 / 优雅退出时，子代理 tool_result 可能缺失：
+                    // 清空未决集合，放行主链 result，避免后续轮次被残留 id 卡死。
+                    let shutting_down = is_stream_aborted(&captured_registry_key, &captured_session_id)
+                        || is_graceful_shutdown(&captured_registry_key, &captured_session_id)
+                        || is_stream_model_restart(&captured_registry_key, &captured_session_id);
+                    if shutting_down {
+                        outstanding_task_ids.clear();
+                    } else {
+                        eprintln!(
+                            "[claude] result 到达但仍有 {} 个子代理运行中，保持忙碌",
+                            outstanding_task_ids.len()
+                        );
+                        turn_active = true;
+                        mark_turn_active(&captured_registry_key);
+                        if let Some(sid) = captured_session_id.as_ref() {
+                            mark_turn_active(sid);
+                        }
+                        last_activity = Instant::now();
+                        continue;
+                    }
+                }
+
                 // 本轮 result：通知前端解除忙碌，但保持进程与 stdin，等待追问
                 if is_stream_turn_complete(&line) {
                     turns_completed += 1;
@@ -466,6 +500,7 @@ pub(crate) fn spawn_claude_stream(
                     }
                     recovery_attempts = 0;
                     if let Some(ref sid) = captured_session_id {
+                        emit_session_usage_if_any(&app, sid);
                         emit_message_chunk(&app, sid, "complete", "");
                         emit_turn_complete(&app, sid);
                     } else {
@@ -545,7 +580,10 @@ pub(crate) fn spawn_claude_stream(
                 }
 
                 let idle = last_activity.elapsed();
-                let timed_out = if turn_active {
+                let timed_out = if !outstanding_task_ids.is_empty() {
+                    // 子代理执行期：放宽空闲超时，避免长任务被误报超时
+                    idle >= SUBAGENT_IDLE_TIMEOUT
+                } else if turn_active {
                     idle >= turn_idle_timeout
                 } else if user_prompt_sent {
                     // 常驻空闲过久：优雅退出，前端下次发消息会 --resume
@@ -609,6 +647,7 @@ pub(crate) fn spawn_claude_stream(
             &mut block_types,
             &mut tool_use_blocks,
             &mut known_task_ids,
+            &mut outstanding_task_ids,
             &mut protocol_guard,
             &mut stream_error,
         );

@@ -7,6 +7,7 @@ import type {
   StreamBlock,
   StreamingState,
   ActiveToolState,
+  TodoItem,
 } from '../../types';
 import { renderMarkdownCached as renderMarkdown, initCodeCopyButtons } from '../../markdown';
 import { getThinkingScroller } from './thinking-scroller';
@@ -16,11 +17,16 @@ import { updateConversationListSpinner } from '../sidebar';
 import { renderThinkingDetails, extractToolUseId, processToolMessages } from './render-messages';
 import { clearPendingRequestState, hideSendingState, removePendingAssistantIndicator, updatePendingStatus } from './retry';
 import { ScrollController } from '../../ui';
+import { syncSubagentProgressUI } from './subagent-progress';
+import { syncTodoPanelUI } from './todo-panel';
 
 const TOOL_CHUNK_KINDS = new Set([
   'tool_use_start',
   'tool_use_end',
   'tool_result',
+  'task_started',
+  'task_progress',
+  'todos_updated',
 ]);
 
 function getActiveToolsMap(sessionId: string): Map<string, ActiveToolState> {
@@ -50,6 +56,8 @@ function parseChunkJson(content: string): Record<string, unknown> | null {
 function refreshActiveToolUI(sessionId: string) {
   if (appState.activeConversationId === sessionId) {
     shellApi.refreshChatContent();
+    syncSubagentProgressUI();
+    syncTodoPanelUI();
   }
 }
 
@@ -122,6 +130,9 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
       input: Object.keys(input).length ? input : existing?.input || {},
       status: 'running',
       startedAt: existing?.startedAt || Date.now(),
+      // task_started 可能先于 content_block_stop 到达：保留已设置的描述/进度
+      description: existing?.description,
+      progress: existing?.progress,
     });
     refreshActiveToolUI(sid);
     return true;
@@ -139,6 +150,56 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
     state.toolResult = String(data?.content ?? '');
     // 保留到 messages-updated 再 reconcile 删除，避免完成态卡片闪断
     refreshActiveToolUI(sid);
+    return true;
+  }
+
+  if (kind === 'task_started') {
+    // 官方子代理进度：补充描述，确保子代理卡片立即可见
+    const toolUseId = String(data?.tool_use_id || data?.toolUseId || '');
+    if (!toolUseId) return false;
+    const tools = getActiveToolsMap(sid);
+    const existing = tools.get(toolUseId);
+    const description =
+      String(data?.description || '') || String(data?.prompt || '') || existing?.description;
+    tools.set(toolUseId, {
+      toolUseId,
+      toolName: 'Task',
+      input: existing?.input || {},
+      status: 'running',
+      startedAt: existing?.startedAt || Date.now(),
+      description,
+    });
+    refreshActiveToolUI(sid);
+    return true;
+  }
+
+  if (kind === 'task_progress') {
+    const toolUseId = String(data?.tool_use_id || data?.toolUseId || '');
+    if (!toolUseId) return false;
+    const tools = getActiveToolsMap(sid);
+    const state = tools.get(toolUseId);
+    if (!state) return false;
+    const status = String(data?.status || '');
+    state.progress = {
+      status: status || state.progress?.status,
+      totalTokens: Number(data?.total_tokens ?? state.progress?.totalTokens) || state.progress?.totalTokens,
+      toolUses: Number(data?.tool_uses ?? state.progress?.toolUses) || state.progress?.toolUses,
+      durationMs: Number(data?.duration_ms ?? state.progress?.durationMs) || state.progress?.durationMs,
+    };
+    if (status === 'success' || status === 'error') {
+      state.status = status === 'error' ? 'failed' : 'done';
+    }
+    refreshActiveToolUI(sid);
+    return true;
+  }
+
+  if (kind === 'todos_updated') {
+    const todos = Array.isArray(data?.todos) ? data.todos : null;
+    if (!todos) return false;
+    appState.todosBySession.set(sid, todos as TodoItem[]);
+    if (appState.activeConversationId === sid) {
+      syncTodoPanelUI();
+    }
     return true;
   }
 
