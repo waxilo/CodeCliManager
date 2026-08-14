@@ -25,7 +25,12 @@ import { bindClaudeUpdatePopoverEvents } from '../../features/updates/claude-upd
 import { syncSubagentProgressUI } from '../../features/chat/subagent-progress';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
-import { resetChatRenderKey } from '../../features/chat/refresh';
+import { refreshStreamingUI } from '../../features/chat/streaming';
+import {
+  resetChatRenderKey,
+  getLastChatRenderKey,
+  getCurrentChatRenderKey,
+} from '../../features/chat/refresh';
 
 export type ManagementViewKind = 'api-config' | 'settings' | 'mcp';
 
@@ -34,6 +39,8 @@ interface StashedMainDom {
   mainContent: HTMLElement | null;
   subagentProgress: HTMLElement | null;
   statusBar: HTMLElement | null;
+  /** stash 时主视图聊天区 DOM 所对应的内容指纹：退出时据此判断内容是否变化 */
+  chatRenderKeyAtStash: string;
 }
 
 interface StashedMgmtDom {
@@ -221,7 +228,14 @@ export function enterManagementView(kind: ManagementViewKind): void {
   const subagentProgress = appContainer.querySelector<HTMLElement>('#subagent-progress');
   const statusBar = shell.querySelector<HTMLElement>('.balance-status-bar');
 
-  stashedMainDom = { sidebar, mainContent, subagentProgress, statusBar };
+  stashedMainDom = {
+    sidebar,
+    mainContent,
+    subagentProgress,
+    statusBar,
+    // 摘下时 DOM 所反映的内容指纹（最近一次 refreshChatContent 写入的 key）
+    chatRenderKeyAtStash: getLastChatRenderKey(),
+  };
   sidebar?.remove();
   mainContent?.remove();
   subagentProgress?.remove();
@@ -263,6 +277,7 @@ export function exitManagementView(): boolean {
   }
 
   const resizer = appContainer.querySelector('.sidebar-resizer');
+  const chatKeyAtStash = stashedMainDom.chatRenderKeyAtStash;
 
   // 摘走当前管理壳并缓存（节点保留全部监听，二次进入直接复用）
   const mgmtSidebar = appContainer.querySelector<HTMLElement>('.sidebar');
@@ -289,13 +304,27 @@ export function exitManagementView(): boolean {
   appContainer.classList.remove('is-api-config', 'is-mcp');
   stashedMainDom = null;
 
-  // 管理页期间会话可能推进：重置聊天指纹强制刷新一次（渲染缓存命中则几乎零开销），
-  // 同时同步侧栏运行态，避免展示摘下时的旧内容。
+  // 管理页期间会话可能推进。只有内容指纹真变了才强制重建聊天区——
+  // 未变时主视图 DOM 原样挂回即是最新，跳过整列表 innerHTML 重建（Win 卡顿主因）。
+  const contentChanged = getCurrentChatRenderKey() !== chatKeyAtStash;
+
   syncSubagentProgressUI();
   remountActiveInteractionPanel();
   shellApi.syncTitlebarActions();
   startMainBalanceBarAutoRefresh();
-  resetChatRenderKey();
-  scheduleUiRefresh({ chat: true, sidebar: true });
+  if (contentChanged) {
+    // 内容已变：重置指纹强制重建一次（管理页期间的 refresh 已把新内容写入渲染缓存，
+    // 重建走缓存命中，几乎跳过整条渲染管线）。
+    resetChatRenderKey();
+    scheduleUiRefresh({ chat: true, sidebar: true });
+  } else {
+    // 内容未变：保留挂回的 DOM，不重建聊天区。
+    // 仅当会话仍在流式时增量恢复流式块（离开期间可能持续推进）。
+    scheduleUiRefresh({ sidebar: true });
+    const sid = appState.activeConversationId;
+    if (sid && appState.streamingBySession.has(sid)) {
+      refreshStreamingUI(sid);
+    }
+  }
   return true;
 }

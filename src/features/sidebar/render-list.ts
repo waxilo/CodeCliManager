@@ -43,7 +43,6 @@ export function renderConversationItemHtml(c: Conversation): string {
   ].filter(Boolean).join(' ');
 
   const time = formatCompactTime(c.updated_at || c.created_at);
-  const stateIcon = isRunning ? CONVERSATION_RUNNING_DOT_HTML : CONVERSATION_CHAT_ICON_SVG;
 
   return `
     <div class="${classNames}" data-id="${c.id}" data-source-path="${sourcePath}" title="${escapeHtml(c.title)}">
@@ -63,7 +62,7 @@ export function renderConversationItemHtml(c: Conversation): string {
         </div>
       ` : `
         <span class="conversation-row">
-          ${stateIcon}
+          ${CONVERSATION_STATE_ICON}
           <span class="conversation-title">${escapeHtml(c.title)}</span>
           ${time ? `<span class="conversation-time">${escapeHtml(time)}</span>` : ''}
           <button type="button" class="conv-more-btn" data-action="more" data-id="${c.id}" data-source-path="${sourcePath}" title="更多操作" aria-label="更多操作">
@@ -145,6 +144,11 @@ const CONVERSATION_CHAT_ICON_SVG =
 
 const CONVERSATION_RUNNING_DOT_HTML =
   '<span class="conversation-status-dot" title="运行中" aria-label="运行中"></span>';
+
+/** 状态图标常驻容器：聊天图标 + 运行圆点同时渲染，CSS 按 .running 切换显隐，
+ *  避免运行时 outerHTML 替换节点触发侧栏行样式重算。 */
+const CONVERSATION_STATE_ICON =
+  `<span class="conversation-state-icon">${CONVERSATION_CHAT_ICON_SVG}${CONVERSATION_RUNNING_DOT_HTML}</span>`;
 
 /** 项目卡片元信息（最近使用时间 / 运行中状态）的内部 HTML */
 export function renderWorkspaceMetaInnerHtml(ws: SidebarWorkspaceView): string {
@@ -296,20 +300,13 @@ export function toggleWorkspaceExpanded(key: string): void {
 }
 
 export function updateConversationListSpinner() {
-  // 会话行：运行中显示脉冲点，否则回到聊天图标
+  // 会话行：运行中显示脉冲点，否则回到聊天图标。
+  // 图标已常驻 DOM（CONVERSATION_STATE_ICON），只切 .running class，
+  // 由 CSS 控制显隐，不再 outerHTML 替换节点触发侧栏行样式重算。
   document.querySelectorAll<HTMLElement>('.conversation-item').forEach((item) => {
     const id = item.dataset.id;
     if (!id) return;
-
-    const isRunning = appState.runningSessions.has(id);
-    const wasRunning = item.classList.contains('running');
-    item.classList.toggle('running', isRunning);
-    if (isRunning === wasRunning) return;
-
-    const icon = item.querySelector('.conversation-chat-icon, .conversation-status-dot');
-    if (icon) {
-      icon.outerHTML = isRunning ? CONVERSATION_RUNNING_DOT_HTML : CONVERSATION_CHAT_ICON_SVG;
-    }
+    item.classList.toggle('running', appState.runningSessions.has(id));
   });
 
   // 项目卡片：同步「运行中」标记与最近使用时间

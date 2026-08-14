@@ -538,6 +538,25 @@
   opacity: 1;
 }
 
+/* 状态图标常驻容器：聊天图标 + 运行圆点同时渲染，按 .running 切换显隐 */
+.conversation-state-icon {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+}
+
+.conversation-state-icon .conversation-status-dot {
+  display: none;
+}
+
+.conversation-item.running .conversation-state-icon .conversation-chat-icon {
+  display: none;
+}
+
+.conversation-item.running .conversation-state-icon .conversation-status-dot {
+  display: inline-flex;
+}
+
 /* 运行中状态：脉冲圆点替代聊天图标 */
 .conversation-status-dot {
   flex-shrink: 0;

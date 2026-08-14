@@ -121,6 +121,10 @@
   gap: 10px;
   max-width: 100%;
   min-width: 0;
+  /* 长会话在 Win WebView2 上：离屏消息跳过样式/布局/绘制，只布局可见区。
+     挂回/重建消息列表时大幅降低整体 layout 成本（auto 记录最近一次真实高度）。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 180px;
 }
 
 /* ---- 用户消息：右侧淡绿气泡 ---- */

@@ -113,6 +113,16 @@ export function resetChatRenderKey(): void {
   lastChatRenderKey = '';
 }
 
+/** 最近一次 refreshChatContent 计算并写入 DOM 的内容指纹（'' = 尚未渲染 / 已被 reset） */
+export function getLastChatRenderKey(): string {
+  return lastChatRenderKey;
+}
+
+/** 当前 appState 对应的聊天内容指纹（与 refreshChatContent 内部使用的 key 一致） */
+export function getCurrentChatRenderKey(): string {
+  return chatRenderKey(getActiveConversation());
+}
+
 /** 进行中工具的可见态签名：状态 / 是否错误 / 结果长度变化时也必须重建（否则卡片停留旧状态）。
  * 与 buildDisplayMessages 一致：当前会话无工具时回退到 'pending' 槽（发送中尚未落盘的工具）。 */
 function activeToolsSignature(sid: string): string {
@@ -178,13 +188,6 @@ const RENDER_CACHE_MAX = 6;
 export function renderCacheKey(conversation: Conversation | undefined): string {
   const thinkingSignature = [...appState.expandedThinkingBlocks].sort().join(',');
   return `${chatRenderKey(conversation)}|t:${thinkingSignature}`;
-}
-
-/** 当前会话是否仍在流式/运行中：此时每帧 key 都在变，缓存命中率低且写入大字符串徒增 GC 压力 */
-function isActiveConversationBusy(): boolean {
-  const sid = appState.activeConversationId;
-  if (!sid) return false;
-  return appState.runningSessions.has(sid) || appState.streamingBySession.has(sid);
 }
 
 /** 把已生成的 topbar / 消息列表 HTML 写入 DOM，并重绑事件、恢复滚动状态 */
@@ -255,13 +258,13 @@ export function refreshChatContent(): boolean {
   const chatHtml = renderConversationMessagesInnerHtml(messages);
   applyChatDom(topbarHtml, chatHtml);
 
-  // 仅缓存静止会话（流式/运行中 key 每帧变化，缓存命中率低且写入大字符串徒增 GC 压力）
-  if (!isActiveConversationBusy()) {
-    renderCache.set(cacheKey, { renderKey, topbarHtml, chatHtml });
-    if (renderCache.size > RENDER_CACHE_MAX) {
-      const oldest = renderCache.keys().next().value;
-      if (oldest !== undefined) renderCache.delete(oldest);
-    }
+  // 缓存本次渲染结果（运行中会话也缓存）：chatRenderKey 只在落盘/工具转态/回合切换时变化，
+  // 非流式每帧。缓存的是「已提交消息」快照；流式块由 refreshStreamingUI 增量补回，
+  // 回切/管理页返回时复用快照，跳过整条渲染管线（流式中途返回的最坏情况）。
+  renderCache.set(cacheKey, { renderKey, topbarHtml, chatHtml });
+  if (renderCache.size > RENDER_CACHE_MAX) {
+    const oldest = renderCache.keys().next().value;
+    if (oldest !== undefined) renderCache.delete(oldest);
   }
   return true;
 }

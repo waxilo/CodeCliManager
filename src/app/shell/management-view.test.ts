@@ -6,6 +6,7 @@ import {
   clearStashedMainDom,
 } from './management-view';
 import { syncSubagentProgressUI } from '../../features/chat/subagent-progress';
+import * as refresh from '../../features/chat/refresh';
 import type { ActiveToolState } from '../../types';
 
 // 测试不触发真实余额刷新（status-bar 其余导出保持原样，仅替换这一入口）
@@ -18,6 +19,17 @@ vi.mock('../../features/status-bar', async (importOriginal) => {
 vi.mock('../../features/mcp', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../features/mcp')>();
   return { ...actual, mountMcpView: vi.fn(async () => {}) };
+});
+
+// 控制内容指纹与指纹重置调用，验证退出时的「内容未变跳过重建 / 内容变化强制重建」
+vi.mock('../../features/chat/refresh', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../features/chat/refresh')>();
+  return {
+    ...actual,
+    getLastChatRenderKey: vi.fn(() => 'K'),
+    getCurrentChatRenderKey: vi.fn(() => 'K'),
+    resetChatRenderKey: vi.fn(),
+  };
 });
 
 function buildMainShell(): void {
@@ -58,6 +70,7 @@ describe('management-view 增量进出', () => {
     appState.activeConversationId = '';
     appState.activeToolsBySession.clear();
     clearStashedMainDom();
+    vi.clearAllMocks();
   });
 
   it('进入管理页摘取主视图并构建管理壳，退出时原节点挂回', () => {
@@ -239,5 +252,25 @@ describe('management-view 增量进出', () => {
     appState.isSettingsViewActive = false;
     expect(exitManagementView()).toBe(true);
     expect(document.querySelector('.main-content')).toBe(mainContent);
+  });
+
+  it('内容未变时退出不重置聊天指纹（保留挂回 DOM，跳过整列表重建）', () => {
+    buildMainShell();
+    vi.mocked(refresh.getLastChatRenderKey).mockReturnValue('K');
+    vi.mocked(refresh.getCurrentChatRenderKey).mockReturnValue('K');
+
+    enterManagementView('settings');
+    expect(exitManagementView()).toBe(true);
+    expect(refresh.resetChatRenderKey).not.toHaveBeenCalled();
+  });
+
+  it('内容变化时退出重置聊天指纹（强制重建到最新内容）', () => {
+    buildMainShell();
+    vi.mocked(refresh.getLastChatRenderKey).mockReturnValue('K');
+    vi.mocked(refresh.getCurrentChatRenderKey).mockReturnValue('K2');
+
+    enterManagementView('settings');
+    expect(exitManagementView()).toBe(true);
+    expect(refresh.resetChatRenderKey).toHaveBeenCalledTimes(1);
   });
 });
