@@ -291,6 +291,11 @@ export function renderClaudeUpdatePopoverBody(): string {
 }
 
 export function bindClaudeUpdatePopoverEvents(panel: Element) {
+  // 管理壳节点缓存复用：二次挂载时跳过重绑，避免同节点上监听叠加
+  const el = panel as HTMLElement;
+  if (el.dataset.bound === '1') return;
+  el.dataset.bound = '1';
+
   panel.querySelector('.claude-update-popover-close')?.addEventListener('click', () => {
     if (panel.id === 'settings-claude-update-view') return;
     closeClaudeUpdatePopover();

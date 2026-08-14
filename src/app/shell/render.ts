@@ -1,4 +1,3 @@
-import type { SettingsSection } from '../../types';
 import { app, appState } from '../../state';
 import { escapeHtml } from '../../utils';
 import {
@@ -11,8 +10,12 @@ import {
   bindSidebarResizer,
   toggleTheme,
 } from '../../ui';
-import { shellApi } from './api';
 import { patchTitlebarActions, renderTitlebarActions } from './titlebar';
+import {
+  clearStashedMainDom,
+  bindSettingsSectionNav,
+  mountActiveManagementView,
+} from './management-view';
 import {
   renderConversationList,
   bindSidebarSearch,
@@ -31,24 +34,22 @@ import { bindPermissionModeBarEvents } from '../../features/settings/mount';
 import {
   openApiConfigView,
   closeApiConfigView,
-  mountApiConfigView,
   renderApiConfigViewHtml,
 } from '../../features/api-config';
 import { renderApiConfigSidebarHtml } from '../../features/settings/view';
 import {
   openSettingsView,
   closeSettingsView,
-  mountSettingsView,
   renderSettingsViewHtml,
   renderSettingsSidebarHtml,
 } from '../../features/settings';
-import { openMcpView, closeMcpView, mountMcpView, renderMcpViewHtml } from '../../features/mcp';
+import { openMcpView, closeMcpView, renderMcpViewHtml } from '../../features/mcp';
 import { openKiroView, closeKiroView } from '../../features/kiro';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { loadData } from '../../features/conversations';
 import { newChat } from '../../features/chat/send';
 import { handleSendButtonClick } from '../../features/chat/retry';
-import { handleKeydown, setupMessageListPostRender } from '../../features/chat/refresh';
+import { handleKeydown, refreshChatContent, resetChatRenderKey } from '../../features/chat/refresh';
 import { bindChatModelPickerEvents } from '../../features/chat/model-picker';
 import {
   handlePaste,
@@ -60,8 +61,6 @@ import {
   previewFileByPath,
 } from '../../features/files';
 import { handleEditKeydown } from '../../features/conversations/edit-export';
-import { checkAppUpdate, bindAppUpdatePopoverEvents } from '../../features/updates/app-update';
-import { bindClaudeUpdatePopoverEvents } from '../../features/updates/claude-update';
 
 /** 合并连点/并发触发的全量重绘，避免 Win WebView2 上堆积卡死 */
 let isShellRendering = false;
@@ -84,6 +83,8 @@ export function render() {
 }
 
 function performRender() {
+  // 全量重绘重建整个 #app，任何被摘下保存的主视图引用都失效
+  clearStashedMainDom();
   app.innerHTML = `
     <div class="app-shell">
       <header class="app-titlebar">
@@ -156,7 +157,7 @@ function performRender() {
         aria-label="调整侧边栏宽度"
       ></div>
       <div class="main-content${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
-        ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isMcpViewActive ? renderMcpViewHtml() : renderChatAreaHtml()}
+        ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isMcpViewActive ? renderMcpViewHtml() : renderChatAreaHtml({ shellOnly: true })}
       </div>
       ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderSubagentProgressHtml() : ''}
       </div>
@@ -167,6 +168,10 @@ function performRender() {
   attachEventListeners();
   // render 重建了发送按钮 DOM，按 appState.runningSessions（与左侧同一逻辑）恢复 loading
   if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive) {
+    // 聊天区只渲染了壳：重置指纹后从渲染缓存 / 内容指纹填充，
+    // 避免全量重建时把当前会话全部消息再序列化一遍（连点回切/删除后渲染命中缓存）。
+    resetChatRenderKey();
+    refreshChatContent();
     setSendButtonLoading(isActiveConversationRunning());
     // 全量重绘不包含进行中的流式块（buildDisplayMessages 只取已提交消息）。
     // 从设置/API 配置等页面返回时，立即按 appState 恢复流式 DOM，
@@ -292,51 +297,9 @@ export function attachEventListeners() {
   });
   syncSidebarResponsiveState();
   syncSidebarCollapsedUI();
-  document.querySelectorAll<HTMLButtonElement>('[data-settings-section]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const section = btn.dataset.settingsSection as SettingsSection | undefined;
-      if (!section || section === appState.settingsSection) return;
-      appState.settingsSection = section;
-      shellApi.render();
-      // 进入 CCM 更新页时，若 UI 显示有更新但句柄已丢，自动补一次检查
-      if (
-        section === 'app-update' &&
-        appState.appUpdateInfo.updateAvailable &&
-        !appState.appUpdate &&
-        appState.appUpdateCheckStatus !== 'checking' &&
-        appState.appUpdateCheckStatus !== 'downloading'
-      ) {
-        void checkAppUpdate(true);
-      }
-    });
-  });
+  bindSettingsSectionNav();
   bindTitlebarActionEvents();
-
-  if (appState.isApiConfigViewActive) {
-    void mountApiConfigView();
-  }
-
-  if (appState.isSettingsViewActive) {
-    const updatePanel = document.querySelector('.settings-update-view');
-    if (updatePanel && appState.settingsSection === 'app-update') {
-      bindAppUpdatePopoverEvents(updatePanel);
-      if (
-        appState.appUpdateInfo.updateAvailable &&
-        !appState.appUpdate &&
-        appState.appUpdateCheckStatus !== 'checking' &&
-        appState.appUpdateCheckStatus !== 'downloading'
-      ) {
-        void checkAppUpdate(true);
-      }
-    } else if (updatePanel && appState.settingsSection === 'claude-update') {
-      bindClaudeUpdatePopoverEvents(updatePanel);
-    }
-    void mountSettingsView();
-  }
-
-  if (appState.isMcpViewActive) {
-    void mountMcpView();
-  }
+  mountActiveManagementView();
 
   // 拖拽文件自动引用（全屏管理页无输入区，跳过）
   if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive) {
@@ -378,8 +341,8 @@ export function attachEventListeners() {
     }, 50);
   }
 
-  // 初始化代码复制按钮和消息复制控件
-  const msgList = document.querySelector<HTMLDivElement>('#message-list');
-  if (msgList) setupMessageListPostRender(msgList);
+  // 消息列表的后处理（复制按钮/思考块折叠/滚动控制器）统一由 refreshChatContent 的
+  // applyChatDom 完成，全量渲染的聊天壳也在随后同步调用了 refreshChatContent，
+  // 这里不再重复绑定，避免同一节点监听叠加。
 }
 

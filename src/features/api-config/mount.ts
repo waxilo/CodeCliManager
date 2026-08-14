@@ -53,6 +53,11 @@ export async function mountApiConfigView() {
   }
   appState.apiConfigEscapeHandler = onEscapeKey;
   document.addEventListener('keydown', onEscapeKey);
+
+  // 管理壳节点缓存复用：表单绑定与模型拉取已在首次挂载完成，二次挂载只重绑 Escape
+  if ((overlay as HTMLElement).dataset.apiConfigCachedMounted === '1') return;
+  (overlay as HTMLElement).dataset.apiConfigCachedMounted = '1';
+
   const livePathEl = overlay.querySelector('.settings-live-path') as HTMLElement | null;
   let fetchedModels: FetchedModel[] = [];
   let modelsFetchInFlight = 0;

@@ -38,6 +38,10 @@ export const shellApi: {
   closeSettingsView: VoidFn;
   closeMcpView: VoidFn;
   closeKiroView: VoidFn;
+  /** 增量进入管理页（摘取保存主视图 DOM，不整页重绘） */
+  enterManagementView: (kind: 'api-config' | 'settings' | 'mcp') => void;
+  /** 增量退出管理页；返回是否走增量恢复（false = 已回退全量 render） */
+  exitManagementView: () => boolean;
   dismissApiConfigViewState: VoidFn;
   dismissSettingsViewState: VoidFn;
   dismissMcpViewState: VoidFn;
@@ -86,6 +90,8 @@ export const shellApi: {
   closeSettingsView: () => {},
   closeMcpView: () => {},
   closeKiroView: () => {},
+  enterManagementView: () => {},
+  exitManagementView: () => false,
   dismissApiConfigViewState: () => {},
   dismissSettingsViewState: () => {},
   dismissMcpViewState: () => {},

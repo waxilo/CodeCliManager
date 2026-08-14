@@ -5,9 +5,10 @@ import {
   ensureMessageWindowForActiveConversation,
   getActiveMessageWindowSize,
   incrementActiveMessageWindow,
+  renderChatAreaHtml,
 } from './render-chat';
 import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
-import type { Message } from '../../types';
+import type { Conversation, Message } from '../../types';
 
 function message(id: string, role: Message['role'], content: string): Message {
   return { id, role, content, timestamp: 1 };
@@ -87,5 +88,47 @@ describe('renderConversationMessagesInnerHtml tail-N 窗口', () => {
     // 切回会话 A：仍保留 600
     appState.activeConversationId = 'conv-1';
     expect(getActiveMessageWindowSize()).toBe(600);
+  });
+});
+
+describe('renderChatAreaHtml shellOnly（全量渲染聊天壳不序列化消息）', () => {
+  beforeEach(() => {
+    appState.activeConversationId = 'conv-1';
+    appState.activeConversationSourcePath = null;
+    appState.messageWindowSizeByConversation.clear();
+    appState.runningSessions.clear();
+    appState.pendingUserMessage = null;
+    appState.pendingUserMessageConvId = null;
+    appState.transientSessionError = null;
+    appState.pendingAskQuestions.clear();
+    appState.activeToolsBySession.clear();
+    appState.conversations = [{
+      id: 'conv-1',
+      title: '会话',
+      platform: 'cli',
+      messages: [
+        message('m1', 'user', 'hi'),
+        message('m2', 'assistant', 'hello'),
+      ],
+      created_at: 1,
+      updated_at: 2,
+    } satisfies Conversation];
+  });
+
+  it('shellOnly 只出空壳，消息列表不含任何消息内容', () => {
+    const html = renderChatAreaHtml({ shellOnly: true });
+    expect(html).toContain('id="message-list"');
+    expect(html).toContain('id="message-input"');
+    // 关键：不内联任何会话消息，避免全量重建时把全部消息序列化进大 innerHTML
+    expect(html).not.toContain('>hi</');
+    expect(html).not.toContain('>hello</');
+    // 壳内的消息列表是空的（待 refreshChatContent 从缓存/指纹填充）
+    expect(html).toMatch(/id="message-list">\s*<\/div>/);
+  });
+
+  it('非 shellOnly 正常内联全部消息（行为不变）', () => {
+    const html = renderChatAreaHtml();
+    expect(html).toContain('>hi</');
+    expect(html).toContain('>hello</');
   });
 });

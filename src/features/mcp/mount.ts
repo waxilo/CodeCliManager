@@ -16,10 +16,10 @@ export function openMcpView() {
   if (appState.isKiroViewActive) {
     shellApi.dismissKiroViewState();
   }
-  // 全量重绘会重建输入框，先保存草稿，返回聊天视图时再恢复
+  // 增量进出会摘取/挂回主视图；先保存草稿以防回退到全量重绘路径时丢失
   stashComposerDraft();
   appState.isMcpViewActive = true;
-  shellApi.render();
+  shellApi.enterManagementView('mcp');
 }
 
 /** 退出 MCP 管理页状态（不触发 render，供即将全量重绘的路径使用） */
@@ -40,7 +40,7 @@ export function closeMcpView() {
     return;
   }
   dismissMcpViewState();
-  shellApi.render();
+  shellApi.exitManagementView();
   restoreComposerDraft();
   startMainBalanceBarAutoRefresh();
 }
@@ -76,6 +76,10 @@ export async function mountMcpView() {
   }
   appState.mcpEscapeHandler = onEscapeKey;
   document.addEventListener('keydown', onEscapeKey);
+
+  // 管理壳节点缓存复用：按钮监听与服务器列表已在首次挂载完成，二次挂载只重绑 Escape
+  if ((view as HTMLElement).dataset.mcpCachedMounted === '1') return;
+  (view as HTMLElement).dataset.mcpCachedMounted = '1';
 
   view.querySelector('.settings-close-btn')?.addEventListener('click', close);
   view.querySelector('#mcp-add-btn')?.addEventListener('click', () => openMcpEditorDialog(null));

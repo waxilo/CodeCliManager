@@ -104,6 +104,15 @@ export function setupMessageListPostRender(container: HTMLElement): void {
 /** 最近一次聊天重建时的内容指纹；连点同一会话 / 重复事件时用于跳过昂贵的 innerHTML 重建 */
 let lastChatRenderKey = '';
 
+/**
+ * 强制下次 refreshChatContent 重建聊天区（忽略指纹跳过）。
+ * 管理页增量进出时主视图 DOM 被摘下保存，期间会话可能推进；
+ * 挂回后必须重置指纹，避免「指纹未变」跳过导致展示 stash 时的旧内容。
+ */
+export function resetChatRenderKey(): void {
+  lastChatRenderKey = '';
+}
+
 /** 进行中工具的可见态签名：状态 / 是否错误 / 结果长度变化时也必须重建（否则卡片停留旧状态）。
  * 与 buildDisplayMessages 一致：当前会话无工具时回退到 'pending' 槽（发送中尚未落盘的工具）。 */
 function activeToolsSignature(sid: string): string {

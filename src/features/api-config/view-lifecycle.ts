@@ -23,10 +23,10 @@ export function openApiConfigView() {
   if (getIsSidebarCollapsed()) {
     setSidebarCollapsed(false);
   }
-  // 全量重绘会重建输入框，先保存草稿，返回聊天视图时再恢复
+  // 增量进出会摘取/挂回主视图；先保存草稿以防回退到全量重绘路径时丢失
   stashComposerDraft();
   appState.isApiConfigViewActive = true;
-  shellApi.render();
+  shellApi.enterManagementView('api-config');
 }
 
 /** 退出 API 配置页状态（不触发 render，供即将全量重绘的路径使用） */
@@ -48,7 +48,7 @@ export function closeApiConfigView() {
     return;
   }
   dismissApiConfigViewState();
-  shellApi.render();
+  shellApi.exitManagementView();
   restoreComposerDraft();
   void loadChatModelOptions();
   if (!appState.activeConversationId) {

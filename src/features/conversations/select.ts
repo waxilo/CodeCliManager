@@ -109,6 +109,21 @@ function finishSelectUi(id: string): void {
 /** 用当前缓存立刻画出选中会话（Win 上避免整页 render） */
 function paintSelectedConversation(id: string, sourcePath: string | null, wasManagement: boolean): void {
   if (wasManagement || isManagementDomVisible() || !document.querySelector('#conversation-list')) {
+    // 管理页增量退出成功：主视图 DOM 原样挂回，再按新会话走增量路径
+    if (wasManagement && shellApi.exitManagementView()) {
+      if (!document.querySelector('#message-list')) {
+        if (!ensureChatMessageShell()) {
+          shellApi.render();
+          startMainBalanceBarAutoRefresh();
+          finishSelectUi(id);
+          return;
+        }
+      }
+      syncConversationActiveHighlight(id, sourcePath);
+      scheduleUiRefresh({ chat: true });
+      finishSelectUi(id);
+      return;
+    }
     shellApi.render();
     finishSelectUi(id);
     return;

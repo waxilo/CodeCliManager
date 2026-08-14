@@ -54,7 +54,7 @@ export function openKiroView() {
     shellApi.dismissMcpViewState();
   }
   if (leavingFullPageView) {
-    shellApi.render();
+    shellApi.exitManagementView();
   }
   appState.isKiroViewActive = true;
   if (!mountKiroOverlay()) {

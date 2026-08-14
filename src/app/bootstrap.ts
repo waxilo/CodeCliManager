@@ -12,6 +12,7 @@ import {
 } from '../ui';
 import { shellApi } from './shell/api';
 import { render, syncTitlebarActions } from './shell/render';
+import { enterManagementView, exitManagementView } from './shell/management-view';
 import { refreshChatContent } from '../features/chat/refresh';
 import { initPlatformClass, setupExternalLinkInterceptor } from './shell/platform';
 import { syncPermissionModeToBackend } from '../features/permissions/permission-mode';
@@ -108,6 +109,8 @@ function wireShellApi(): void {
   shellApi.closeSettingsView = closeSettingsView;
   shellApi.closeMcpView = closeMcpView;
   shellApi.closeKiroView = closeKiroView;
+  shellApi.enterManagementView = enterManagementView;
+  shellApi.exitManagementView = exitManagementView;
   shellApi.dismissApiConfigViewState = dismissApiConfigViewState;
   shellApi.dismissSettingsViewState = dismissSettingsViewState;
   shellApi.dismissMcpViewState = dismissMcpViewState;
