@@ -40,7 +40,7 @@ export function parseAskUserQuestionInput(input: unknown): AskUserQuestionInput 
 
 /**
  * AskUserQuestion：可点选卡片钉在输入框上方（#interaction-host）
- * 「其他」自定义回答使用下方大输入框
+ * 「自定义回答」是卡片内始终可见的输入框，直接填写即作为答案，无需先勾选「其他」
  */
 export function showQuestionDialog(
   payload: PermissionRequestPayload,
@@ -56,7 +56,6 @@ export function showQuestionDialog(
       document.removeEventListener('keydown', onKey);
       appState.activeQuestionEnterHandler = null;
       appState.activeAskQuestionCleanup = null;
-      appState.questionOtherInputActive = false;
       syncMessageInputPlaceholder();
 
       // 清掉临时可点选卡；已选结果等会话历史回写后展示
@@ -80,7 +79,13 @@ export function showQuestionDialog(
         const selected = Array.from(
           block.querySelectorAll<HTMLInputElement>(`input[name="ask-q-${qIndex}"]:checked`),
         );
-        if (selected.length === 0) {
+        const customInput = block.querySelector<HTMLInputElement>(
+          `input[data-ask-other-input="1"][data-q-index="${qIndex}"]`,
+        );
+        const customText = (customInput?.value || '').trim();
+
+        // 既没选项也没填写自定义回答 → 拦截，不发送响应
+        if (selected.length === 0 && !customText) {
           if (errorEl) {
             errorEl.hidden = false;
             errorEl.textContent = `请回答：${q.question}`;
@@ -88,28 +93,14 @@ export function showQuestionDialog(
           return null;
         }
 
-        const values: string[] = [];
-        for (const input of selected) {
-          if (input.dataset.other === '1') {
-            // 自定义回答用卡片内联输入框，不占用下方大输入框
-            const customInput = block.querySelector<HTMLInputElement>(
-              `input[data-ask-other-input="1"][data-q-index="${qIndex}"]`,
-            );
-            const customText = (customInput?.value || '').trim();
-            if (!customText) {
-              if (errorEl) {
-                errorEl.hidden = false;
-                errorEl.textContent = `请填写「其他」内容：${q.question}`;
-              }
-              customInput?.focus();
-              return null;
-            }
-            values.push(customText);
-          } else {
-            values.push(input.value);
-          }
+        // 自定义回答输入框即答案：非空即计入。单选时自定义回答优先（替换已选项）；多选时与已选项合并。
+        if (q.multiSelect) {
+          const values = selected.map((input) => input.value);
+          if (customText) values.push(customText);
+          answers[q.question] = values.join(', ');
+        } else {
+          answers[q.question] = customText || selected[0]?.value || '';
         }
-        answers[q.question] = q.multiSelect ? values.join(', ') : values[0];
       }
       if (errorEl) {
         errorEl.hidden = true;
@@ -172,20 +163,6 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
     const state = [...appState.pendingAskQuestions.values()].find((s) => s.requestId === requestId);
     if (!state?.finish) return;
 
-    const syncOtherInputVisibility = () => {
-      // 勾选「其他」时显示对应卡片内联输入框并聚焦
-      card.querySelectorAll<HTMLElement>('.ask-other-input').forEach((wrap) => {
-        const qIndex = wrap.dataset.qIndex || '';
-        const otherOn = !!card.querySelector<HTMLInputElement>(
-          `input[data-other="1"][data-q-index="${qIndex}"]:checked`,
-        );
-        wrap.hidden = !otherOn;
-        if (otherOn) {
-          wrap.querySelector<HTMLInputElement>('input[data-ask-other-input="1"]')?.focus();
-        }
-      });
-    };
-
     card.querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]').forEach((input) => {
       input.addEventListener('change', () => {
         // 同步选中样式
@@ -193,11 +170,10 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
           const inp = opt.querySelector('input');
           opt.classList.toggle('is-selected', !!inp?.checked);
         });
-        syncOtherInputVisibility();
       });
     });
 
-    // 卡片内联「其他」输入框：Enter 直接提交（与下方大输入框解耦）
+    // 卡片「自定义回答」输入框：Enter 直接提交
     card.querySelectorAll<HTMLInputElement>('input[data-ask-other-input="1"]').forEach((input) => {
       input.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
@@ -213,8 +189,6 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
     card.querySelector('[data-ask-action="submit"]')?.addEventListener('click', () => {
       appState.activeQuestionEnterHandler?.();
     });
-
-    syncOtherInputVisibility();
   });
 }
 

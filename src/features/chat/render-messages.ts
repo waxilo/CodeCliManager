@@ -1,6 +1,6 @@
 import { appState } from '../../state';
-import type { Message, FileRef } from '../../types';
-import { escapeHtml, formatTime } from '../../utils';
+import type { Message, FileRef, TaskNotificationData } from '../../types';
+import { escapeHtml, formatTime, formatDuration } from '../../utils';
 import { renderMarkdownCached as renderMarkdown } from '../../markdown';
 import { parseFileRefs, isImageFile } from '../files';
 import { parseAskUserQuestionInput } from '../permissions/ask-question';
@@ -18,6 +18,16 @@ export interface ToolConfig {
   iconColor: string;
 }
 
+/** Subagent 卡：Claude Agent SDK（Agent）与旧版 CLI（Task）共用同一外观 */
+const SUBAGENT_CONFIG: ToolConfig = {
+  displayMode: 'collapsible',
+  icon: '🤖',
+  label: 'Subagent',
+  getValue: (i) => String(i.description || i.prompt || '').substring(0, 80),
+  borderColor: '#a371f7',
+  iconColor: '#a371f7',
+};
+
 export const TOOL_CONFIG_MAP: Record<string, ToolConfig> = {
   Bash: { displayMode: 'one-line', icon: '>_', label: 'Bash', getValue: (i) => String(i.command || ''), getSecondary: (i) => i.description ? String(i.description) : undefined, style: 'terminal', borderColor: '#3fb950', iconColor: '#3fb950' },
   Read: { displayMode: 'one-line', icon: '📄', label: 'Read', getValue: (i) => String(i.file_path || ''), style: 'file-open', borderColor: '#8b949e', iconColor: '#8b949e' },
@@ -25,7 +35,8 @@ export const TOOL_CONFIG_MAP: Record<string, ToolConfig> = {
   Write: { displayMode: 'collapsible', icon: '📝', label: 'Write', getValue: (i) => String(i.file_path || ''), borderColor: '#d29922', iconColor: '#d29922' },
   Grep: { displayMode: 'one-line', icon: '🔍', label: 'Grep', getValue: (i) => String(i.pattern || ''), style: 'search', borderColor: '#8b949e', iconColor: '#8b949e' },
   Glob: { displayMode: 'one-line', icon: '🔍', label: 'Glob', getValue: (i) => String(i.pattern || ''), style: 'search', borderColor: '#8b949e', iconColor: '#8b949e' },
-  Task: { displayMode: 'collapsible', icon: '🤖', label: 'Subagent', getValue: (i) => String(i.description || i.prompt || '').substring(0, 80), borderColor: '#a371f7', iconColor: '#a371f7' },
+  Task: SUBAGENT_CONFIG,
+  Agent: SUBAGENT_CONFIG,
   TodoWrite: { displayMode: 'collapsible', icon: '✅', label: 'TodoWrite', getValue: (i) => { const todos = Array.isArray(i.todos) ? (i.todos as Array<Record<string, unknown>>) : []; const done = todos.filter((t) => t?.status === 'completed').length; return `任务 ${done}/${todos.length}`; }, getSecondary: (i) => { const todos = Array.isArray(i.todos) ? (i.todos as Array<Record<string, unknown>>) : []; const inProg = todos.filter((t) => t?.status === 'in_progress').length; return inProg > 0 ? `${inProg} 个进行中` : undefined; }, borderColor: '#a371f7', iconColor: '#a371f7' },
   TaskCreate: { displayMode: 'one-line', icon: '📋', label: 'Task', getValue: (i) => String(i.subject || ''), getSecondary: (i) => i.activeForm ? String(i.activeForm) : undefined, borderColor: '#a371f7', iconColor: '#a371f7' },
   TaskUpdate: { displayMode: 'one-line', icon: '📋', label: 'Task', getValue: (i) => String(i.subject || ''), getSecondary: (i) => i.status ? String(i.status) : undefined, borderColor: '#a371f7', iconColor: '#a371f7' },
@@ -49,24 +60,48 @@ export function tryParseJson(text: string): Record<string, unknown> | null {
   }
 }
 
+interface ParsedToolUse {
+  name: string;
+  id: string;
+  input: Record<string, unknown>;
+  taskNotification?: TaskNotificationData;
+}
+
+/**
+ * 单次解析 tool_use content，返回全部所需字段。
+ * processToolMessages 每条消息只调一次，避免 4 个 extract 各 JSON.parse 一遍。
+ * 外部调用方（todo-panel / streaming）仍走下方独立 extract 薄封装。
+ */
+function parseToolUseContent(content: string): ParsedToolUse {
+  const json = tryParseJson(content);
+  const rawTn = json?.taskNotification;
+  return {
+    name: json ? String(json.tool_name || json.tool || json.name || '') : '',
+    id: json ? String(json.id || json.tool_use_id || json.toolUseId || '') : '',
+    input: (json?.tool_input || json?.input || json?.arguments || {}) as Record<string, unknown>,
+    taskNotification:
+      rawTn && typeof rawTn === 'object' ? (rawTn as TaskNotificationData) : undefined,
+  };
+}
+
 /** 提取工具名称 */
 export function extractToolName(content: string): string {
-  const json = tryParseJson(content);
-  return json ? String(json.tool_name || json.tool || json.name || '') : '';
+  return parseToolUseContent(content).name;
 }
 
 /** 提取 tool_use id */
 export function extractToolUseId(content: string): string {
-  const json = tryParseJson(content);
-  if (!json) return '';
-  return String(json.id || json.tool_use_id || json.toolUseId || '');
+  return parseToolUseContent(content).id;
 }
 
 /** 提取工具输入 */
 export function extractToolInput(content: string): Record<string, unknown> {
-  const json = tryParseJson(content);
-  if (!json) return {};
-  return (json.tool_input || json.input || json.arguments || {}) as Record<string, unknown>;
+  return parseToolUseContent(content).input;
+}
+
+/** 提取子代理完成通知（history 合并进 tool_use content 的 taskNotification） */
+export function extractTaskNotification(content: string): TaskNotificationData | undefined {
+  return parseToolUseContent(content).taskNotification;
 }
 
 function stringifyToolResultContent(raw: unknown): string {
@@ -138,8 +173,8 @@ export function renderAskUserQuestionCardHtml(
       const optionsHtml = q.options
         .map((opt, oIndex) => {
           const isSelected = selectedSet.has(opt.label);
-          const hasDesc = Boolean(opt.description);
-          const desc = hasDesc ? opt.description! : opt.label;
+          // 没有 description 时不渲染描述行：避免把 label 重复显示两遍（占高度）
+          const desc = opt.description ? opt.description.trim() : '';
           if (interactive) {
             const idSafe = requestId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12);
             const id = `${name}-opt-${oIndex}-${idSafe}`;
@@ -152,20 +187,16 @@ export function renderAskUserQuestionCardHtml(
                   value="${escapeHtml(opt.label)}"
                   data-q-index="${qIndex}"
                 />
-                <div class="ask-option-top">
-                  <span class="ask-option-label">${escapeHtml(opt.label)}</span>
-                </div>
-                <div class="ask-option-desc">${escapeHtml(desc)}</div>
+                <span class="ask-option-label">${escapeHtml(opt.label)}</span>
+                ${desc ? `<span class="ask-option-desc" title="${escapeHtml(desc)}">${escapeHtml(desc)}</span>` : ''}
               </label>
             `;
           }
           return `
             <div class="ask-option${isSelected ? ' is-selected' : ''}">
-              <div class="ask-option-top">
-                <span class="ask-option-label">${escapeHtml(opt.label)}</span>
-                ${isSelected ? '<span class="ask-option-check" aria-hidden="true">✓</span>' : ''}
-              </div>
-              <div class="ask-option-desc">${escapeHtml(desc)}</div>
+              <span class="ask-option-label">${escapeHtml(opt.label)}</span>
+              ${desc ? `<span class="ask-option-desc" title="${escapeHtml(desc)}">${escapeHtml(desc)}</span>` : ''}
+              ${isSelected ? '<span class="ask-option-check" aria-hidden="true">✓</span>' : ''}
             </div>
           `;
         })
@@ -181,41 +212,25 @@ export function renderAskUserQuestionCardHtml(
 
       const otherHtml = interactive
         ? (() => {
-            const idSafe = requestId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12);
-            const otherId = `${name}-other-${idSafe}`;
+            // 自定义回答本身就是一个始终可见的输入框：无需先勾选「其他」再展开，占位文案即标题
             return `
-              <label class="ask-option ask-option-other" for="${otherId}">
-                <input
-                  type="${inputType}"
-                  id="${otherId}"
-                  name="${name}"
-                  value="__other__"
-                  data-q-index="${qIndex}"
-                  data-other="1"
-                />
-                <div class="ask-option-top">
-                  <span class="ask-option-label">其他</span>
-                </div>
-                <div class="ask-option-desc">自定义回答</div>
-              </label>
-              <div class="ask-other-input" data-q-index="${qIndex}" hidden>
+              <div class="ask-other" data-q-index="${qIndex}">
                 <input
                   type="text"
                   data-q-index="${qIndex}"
                   data-ask-other-input="1"
-                  placeholder="输入自定义回答…"
+                  placeholder="自定义回答…"
                   autocomplete="off"
+                  ${otherAnswer ? `value="${escapeHtml(otherAnswer)}"` : ''}
                 />
               </div>
             `;
           })()
         : otherAnswer
           ? `<div class="ask-option is-selected ask-option-other-result">
-               <div class="ask-option-top">
-                 <span class="ask-option-label">其他</span>
-                 <span class="ask-option-check" aria-hidden="true">✓</span>
-               </div>
-               <div class="ask-option-desc">${escapeHtml(otherAnswer)}</div>
+               <span class="ask-option-label">其他</span>
+               <span class="ask-option-desc">${escapeHtml(otherAnswer)}</span>
+               <span class="ask-option-check" aria-hidden="true">✓</span>
              </div>`
           : '';
 
@@ -391,14 +406,16 @@ export function processToolMessages(messages: Message[]): Message[] {
     if (msg.role === 'tool_result') continue;
 
     if (msg.role === 'tool_use') {
-      const toolName = extractToolName(msg.content);
-      const toolInput = extractToolInput(msg.content);
-      const toolUseId = extractToolUseId(msg.content);
+      const parsed = parseToolUseContent(msg.content);
+      const toolName = parsed.name;
+      const toolInput = parsed.input;
+      const toolUseId = parsed.id;
       const config = TOOL_CONFIG_MAP[toolName] || getDefaultToolConfig();
       const paired = resultForToolUse.get(i);
       const toolResult = paired?.text;
       const isError = paired?.isError ?? false;
       const toolUseResult = paired?.toolUseResult;
+      const taskNotification = parsed.taskNotification;
 
       // AskUserQuestion：把 answers 并入 toolInput，供专用卡片渲染
       let mergedInput = toolInput;
@@ -427,6 +444,7 @@ export function processToolMessages(messages: Message[]): Message[] {
             icon: config.iconColor,
             primary: config.borderColor,
           },
+          ...(taskNotification ? { taskNotification } : {}),
         },
       };
       result.push(toolMsg);
@@ -450,6 +468,7 @@ export function filterVisibleMessages(messages: Message[]): Message[] {
       || trimmed.startsWith('<local-command-caveat>')
       || trimmed.startsWith('<command-name>')
       || trimmed.startsWith('<local-command-stdout>')
+      || trimmed.startsWith('<task-notification>')
     ) {
       return false;
     }
@@ -555,6 +574,47 @@ export function renderToolMessageHtml(msg: Message): string {
         ${hasResult ? `<div class="tool-card-result"><div class="markdown-body">${renderMarkdown(toolResult!)}</div></div>` : ''}
       </div>`;
     return toolContent;
+  }
+
+  // Subagent 完成卡（Agent / Task + history 合并的 taskNotification）：
+  // tool_result 被导入层丢弃 → 通用路径会误判「运行中」，这里以通知的权威终态为准，
+  // 头部展示用量元信息，报告按 Markdown 渲染并默认展开，避免缩成一条空横线。
+  const tn = td.taskNotification;
+  if (tn) {
+    const config = TOOL_CONFIG_MAP[toolName] || getDefaultToolConfig();
+    const failed = tn.status === 'failed' || tn.status === 'error' || tn.status === 'stopped';
+    const done = tn.status === 'completed' || tn.status === 'success';
+    const statusBadge = failed
+      ? '<span class="tool-status tool-status-error">失败</span>'
+      : done
+        ? '<span class="tool-status tool-status-done">完成</span>'
+        : '<span class="tool-status tool-status-running">运行中</span>';
+    const metaParts: string[] = [];
+    if (tn.total_tokens) metaParts.push(`${tn.total_tokens} tokens`);
+    if (tn.tool_uses) metaParts.push(`${tn.tool_uses} 次工具`);
+    if (tn.duration_ms) metaParts.push(formatDuration(tn.duration_ms));
+    const meta = metaParts.length
+      ? `<span class="tool-meta">${escapeHtml(metaParts.join(' · '))}</span>`
+      : '';
+    const report = tn.result?.trim();
+    return `
+      <div class="tool-card subagent-task-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" style="border-left-color: ${colorScheme.border}">
+        <details class="tool-collapsible"${report ? ' open' : ''}>
+          <summary class="tool-card-header tool-collapsible-summary">
+            <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
+            <span class="tool-label">${escapeHtml(config.label)}</span>
+            <span class="tool-title-text">${escapeHtml((config.getValue ? config.getValue(toolInput) : undefined) || toolName)}</span>
+            ${meta}
+            ${statusBadge}
+            <span class="tool-chevron">▾</span>
+          </summary>
+          <div class="tool-card-body">
+            ${report
+              ? `<div class="tool-card-result"><div class="markdown-body">${renderMarkdown(report)}</div></div>`
+              : '<div class="tool-subagent-empty">已完成，无报告正文</div>'}
+          </div>
+        </details>
+      </div>`;
   }
 
   // 可折叠显示（Edit、Write、Task、Plan 等复杂工具）

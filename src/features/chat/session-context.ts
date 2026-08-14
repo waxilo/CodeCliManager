@@ -129,9 +129,6 @@ export function setAbortingUi(aborting: boolean) {
 
 export function getDefaultMessagePlaceholder(loading = isSendButtonLoading()): string {
   if (appState.isAbortingActiveSession) return '正在停止当前任务…';
-  if (appState.questionOtherInputActive) {
-    return '在下方输入自定义回答，Enter 或点「提交」确认…';
-  }
   if (loading) {
     const queuedCount = appState.activeConversationId
       ? appState.queuedPromptsBySession.get(appState.activeConversationId)?.length || 0

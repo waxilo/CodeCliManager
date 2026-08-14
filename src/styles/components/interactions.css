@@ -278,7 +278,7 @@
   border: 1px solid var(--color-composer-border);
   border-radius: 14px;
   background: var(--color-bg-elevated);
-  padding: 12px 14px;
+  padding: 10px 12px;
 }
 
 .ask-card.is-pending {
@@ -372,15 +372,15 @@
 .ask-options {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
 }
 
 .ask-option {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
-  min-height: 64px;
-  padding: 10px 12px;
+  align-items: center;
+  gap: 8px;
+  min-height: 0;
+  padding: 6px 10px;
   border: 1px solid var(--color-composer-border);
   border-radius: 10px;
   background: var(--color-bg-deep);
@@ -391,63 +391,69 @@
   background: color-mix(in srgb, var(--color-status-running) 12%, var(--color-bg-deep));
 }
 
-.ask-option-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-}
-
 .ask-option-label {
-  font-size: 11px;
-  font-weight: 650;
-  color: var(--color-text-muted);
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  color: var(--color-text);
 }
 
 .ask-option-desc {
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
-  font-size: 13px;
-  line-height: 1.35;
-  color: var(--color-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.3;
+  color: var(--color-text-muted);
 }
 
 .ask-option-check {
   flex-shrink: 0;
+  margin-left: auto;
   color: var(--color-status-running);
   font-weight: 700;
   font-size: 12px;
 }
 
-/* 「其他」内联自定义输入：卡片内填写，不占用下方大输入框 */
-.ask-other-input {
-  margin: 0 0 2px;
+/* 只读历史卡：描述允许换行（2 行截断），避免截断自定义回答；可点选卡保持单行紧凑 */
+.ask-card:not(.is-interactive) .ask-option-desc {
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
-.ask-other-input[hidden] {
-  display: none;
+/* 「自定义回答」：与上方选项条目完全同款——无分隔线、无额外间距、高度一致；占位文案即标题 */
+.ask-other {
+  margin: 0;
+  padding: 0;
+  border: 0;
 }
 
-.ask-other-input input {
+.ask-other input {
   width: 100%;
   box-sizing: border-box;
-  padding: 8px 10px;
+  padding: 6px 10px;
   border: 1px solid var(--color-composer-border);
-  border-radius: 8px;
-  background: var(--color-bg-surface);
+  border-radius: 10px;
+  background: var(--color-bg-deep);
   color: var(--color-text);
   font-size: 13px;
+  line-height: 1.3;
   font-family: inherit;
   outline: none;
 }
 
-.ask-other-input input:focus {
+.ask-other input:focus {
   border-color: var(--color-status-running);
+  background: color-mix(in srgb, var(--color-status-running) 8%, var(--color-bg-deep));
 }
 
-.ask-other-input input::placeholder {
+.ask-other input::placeholder {
   color: var(--color-text-muted);
 }
 

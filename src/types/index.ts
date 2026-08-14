@@ -2,6 +2,7 @@ export type {
   FileRef,
   ToolColorScheme,
   ToolMessageData,
+  TaskNotificationData,
   Message,
   Conversation,
   SessionUsage,

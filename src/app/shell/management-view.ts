@@ -6,7 +6,7 @@
  * 拼出 MB 级 innerHTML 让 WebView2 整体解析，Windows 上就是秒级卡顿。
  *
  * 本模块改为「双向摘挂」：
- *  - 进入管理页：把主视图四块 DOM（侧栏 / 主内容 / 子代理面板 / 余额状态栏）摘下保存，
+ *  - 进入管理页：把主视图三块 DOM（侧栏 / 主内容 / 余额状态栏）摘下保存，
  *    返回时原样挂回（DOM 移动保留全部事件监听 → 零重建、零重绑）。
  *  - 同时把上次构建的管理壳节点缓存（stashedMgmtDom）：同页面二次进入直接挂回缓存节点，
  *    跳过 sidebar/main-content 的 innerHTML 重建，表单值 / MCP 弹窗 / 滚动位置全部保留；
@@ -37,7 +37,6 @@ export type ManagementViewKind = 'api-config' | 'settings' | 'mcp';
 interface StashedMainDom {
   sidebar: HTMLElement | null;
   mainContent: HTMLElement | null;
-  subagentProgress: HTMLElement | null;
   statusBar: HTMLElement | null;
   /**
    * stash 时主视图聊天区 DOM 对应的「已提交内容」指纹（不含工具签名）：
@@ -159,7 +158,6 @@ function renderManagementViewHtml(kind: ManagementViewKind): string {
 function applyManagementShellState(kind: ManagementViewKind, appContainer: Element): void {
   appContainer.classList.toggle('is-api-config', kind !== 'mcp');
   appContainer.classList.toggle('is-mcp', kind === 'mcp');
-  appContainer.classList.remove('has-subagent-panel');
 }
 
 function buildManagementShell(kind: ManagementViewKind, appContainer: Element): void {
@@ -227,21 +225,17 @@ export function enterManagementView(kind: ManagementViewKind): void {
 
   const sidebar = appContainer.querySelector<HTMLElement>('.sidebar');
   const mainContent = appContainer.querySelector<HTMLElement>('.main-content');
-  // 生产 HTML 中面板类名是 subagent-panel、id 是 subagent-progress（见 renderSubagentProgressHtml）
-  const subagentProgress = appContainer.querySelector<HTMLElement>('#subagent-progress');
   const statusBar = shell.querySelector<HTMLElement>('.balance-status-bar');
 
   stashedMainDom = {
     sidebar,
     mainContent,
-    subagentProgress,
     statusBar,
     // 摘下时 DOM 所反映的「已提交内容」指纹（最近一次 refreshChatContent 写入）
     committedChatRenderKeyAtStash: getLastCommittedChatRenderKey(),
   };
   sidebar?.remove();
   mainContent?.remove();
-  subagentProgress?.remove();
   statusBar?.remove();
 
   // 同页面二次进入：直接挂回缓存的管理壳，跳过 sidebar/main 的 innerHTML 重建
@@ -299,9 +293,6 @@ export function exitManagementView(): boolean {
 
   if (stashedMainDom.sidebar && resizer) resizer.before(stashedMainDom.sidebar);
   if (stashedMainDom.mainContent && resizer) resizer.after(stashedMainDom.mainContent);
-  if (stashedMainDom.subagentProgress) {
-    appContainer.appendChild(stashedMainDom.subagentProgress);
-  }
   if (stashedMainDom.statusBar) shell.appendChild(stashedMainDom.statusBar);
 
   appContainer.classList.remove('is-api-config', 'is-mcp');

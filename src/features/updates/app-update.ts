@@ -144,6 +144,8 @@ export async function checkAppUpdate(force = false): Promise<void> {
 
   appState.appUpdateCheckStatus = 'checking';
   syncAppUpdateButtonUI();
+  // 立即把「正在检查更新…」/分步状态刷进弹层，避免点击后长时间无反馈
+  refreshUpdatePanel();
 
   appState.appUpdateCheckPromise = (async () => {
     try {
@@ -204,9 +206,11 @@ export function renderAppUpdatePopoverBody(): string {
   const current = appState.appUpdateInfo.currentVersion || '—';
   const latest = appState.appUpdateInfo.latestVersion || '—';
   const error = appState.appUpdateInfo.error || '';
+  const statusText = appState.appUpdateStatusText ?? (checking ? '正在检查更新…' : null);
   const hint = !checking && !hasUpdate && appState.appUpdateInfo.currentVersion && appState.appUpdateInfo.latestVersion
     ? '已是最新版本。'
     : '';
+  const directUrl = hasUpdate && appState.appUpdate ? extractAppUpdateDirectUrl(appState.appUpdate) : null;
 
   return `
     <div class="claude-update-popover-header">
@@ -223,7 +227,7 @@ export function renderAppUpdatePopoverBody(): string {
         <span class="claude-update-value${hasUpdate ? ' is-newer' : ''}">${escapeHtml(latest)}</span>
       </div>
     </div>
-    ${checking ? `<p class="claude-update-popover-status">正在检查更新…</p>` : ''}
+    ${statusText ? `<p class="claude-update-popover-status">${escapeHtml(statusText)}</p>` : ''}
     ${hint ? `<p class="claude-update-popover-status">${hint}</p>` : ''}
     ${hasUpdate && appState.appUpdateInfo.body ? renderAppUpdateNotes(appState.appUpdateInfo.body) : ''}
     ${downloading ? renderAppUpdateProgressHtml() : ''}
@@ -234,45 +238,97 @@ export function renderAppUpdatePopoverBody(): string {
       </button>
       ${hasUpdate && !downloading ? `
         <button type="button" class="claude-update-action primary" data-action="install">下载并安装</button>
+        ${directUrl ? `
+          <a class="claude-update-action" href="${escapeHtml(directUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(directUrl)}">直接下载</a>
+        ` : ''}
       ` : ''}
     </div>
   `;
 }
 
 export function bindAppUpdatePopoverEvents(panel: Element) {
-  // 管理壳节点缓存复用：二次挂载时跳过重绑，避免同节点上监听叠加
+  // 管理壳节点缓存复用：二次挂载时跳过重绑，避免同节点上监听叠加。
+  // 事件委托挂在面板节点上：innerHTML 重渲染后按钮点击依然有效
+  // （否则 data-bound 残留会让重渲染出来的「下载并安装」等按钮丢失事件，出现点击没反应）。
   const el = panel as HTMLElement;
   // innerHTML 每次都被重设，changelog 代码块需重新分片补高亮（不受 bound 门控影响）
   scheduleHighlighting(el);
   if (el.dataset.bound === '1') return;
   el.dataset.bound = '1';
 
-  panel.querySelector('.claude-update-popover-close')?.addEventListener('click', () => {
-    if (panel.id === 'settings-app-update-view') return;
-    closeAppUpdatePopover();
-  });
+  el.addEventListener('click', (event) => {
+    const target = (event.target as HTMLElement | null)?.closest(
+      '.claude-update-popover-close, [data-action]',
+    ) as HTMLElement | null;
+    if (!target) return;
 
-  panel.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const action = btn.dataset.action;
-      if (action === 'recheck') {
-        if (appState.appUpdateCheckStatus === 'checking' || appState.appUpdateCheckStatus === 'downloading') return;
-        btn.disabled = true;
-        btn.textContent = '检查中…';
-        void checkAppUpdate(true);
-      } else if (action === 'install') {
-        if (appState.appUpdateCheckStatus === 'downloading' || appState.appUpdateCheckStatus === 'checking') return;
-        btn.disabled = true;
-        btn.textContent = '准备中…';
-        void installAppUpdate();
-      }
-    });
+    if (target.classList.contains('claude-update-popover-close')) {
+      if (panel.id === 'settings-app-update-view') return;
+      closeAppUpdatePopover();
+      return;
+    }
+
+    const btn = target as HTMLButtonElement;
+    const action = btn.dataset.action;
+    if (action === 'recheck') {
+      if (appState.appUpdateCheckStatus === 'checking' || appState.appUpdateCheckStatus === 'downloading') return;
+      btn.disabled = true;
+      btn.textContent = '检查中…';
+      void checkAppUpdate(true);
+    } else if (action === 'install') {
+      if (appState.appUpdateCheckStatus === 'downloading' || appState.appUpdateCheckStatus === 'checking') return;
+      btn.disabled = true;
+      btn.textContent = '准备中…';
+      void installAppUpdate();
+    }
   });
 }
 
 export function closeAppUpdatePopover() {
   document.querySelector('.claude-update-popover-overlay')?.remove();
   document.querySelector('#app-update-popover')?.remove();
+}
+
+/** 若更新弹层/设置页开着，用当前状态重渲染内容并重绑事件。 */
+export function refreshUpdatePanel(): void {
+  const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
+  if (panel) {
+    panel.innerHTML = renderAppUpdatePopoverBody();
+    bindAppUpdatePopoverEvents(panel);
+  }
+}
+
+/** 更新过程分步状态文案；变更后立即刷新弹层，让用户看到内部正在做什么。 */
+export function setAppUpdateStatusText(text: string | null): void {
+  appState.appUpdateStatusText = text;
+  refreshUpdatePanel();
+}
+
+/** 按当前系统/架构顺序生成清单里平台键候选（与应用实际下载目标一致）。 */
+function detectPlatformTargetKeys(): string[] {
+  const ua = navigator.userAgent.toLowerCase();
+  const arch = `${(navigator as { userAgentData?: { architecture?: string } }).userAgentData?.architecture ?? ''} ${navigator.platform ?? ''}`.toLowerCase();
+  const isArm = /arm64|aarch64/.test(`${arch} ${ua}`);
+  if (ua.includes('win')) {
+    return isArm ? ['windows-arm64', 'windows-x86_64'] : ['windows-x86_64'];
+  }
+  if (ua.includes('mac')) {
+    return isArm ? ['darwin-aarch64', 'darwin-x86_64'] : ['darwin-x86_64', 'darwin-aarch64'];
+  }
+  return isArm ? ['linux-aarch64', 'linux-x86_64'] : ['linux-x86_64'];
+}
+
+/** 从更新清单里提取当前平台的安装包直链（镜像或 GitHub 原链，与应用实际下载地址一致）。 */
+export function extractAppUpdateDirectUrl(update: AppUpdate): string | null {
+  const platforms = update.rawJson?.platforms as
+    | Record<string, { url?: string } | undefined>
+    | undefined;
+  if (!platforms || typeof platforms !== 'object') return null;
+  for (const target of detectPlatformTargetKeys()) {
+    const url = platforms[target]?.url;
+    if (url && /^https?:\/\//i.test(url)) return url;
+  }
+  return null;
 }
 
 /** macOS 上 downloadAndInstall 可能卡在 Finished 后不 resolve；超时后强制 relaunch */
@@ -302,9 +358,15 @@ const MAX_DOWNLOAD_ATTEMPTS = 3;
 async function downloadAppUpdatePackage(): Promise<void> {
   for (let attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt++) {
     if (!appState.appUpdate) {
+      setAppUpdateStatusText(null);
       throw new Error('未找到可安装的更新包，请点击「重新检查」后再试。');
     }
     try {
+      setAppUpdateStatusText(
+        attempt > 1
+          ? `正在重试下载更新包（第 ${attempt}/${MAX_DOWNLOAD_ATTEMPTS} 次）…`
+          : '正在下载更新包，请稍候…',
+      );
       await downloadOnceWithStallAbort(appState.appUpdate);
       return;
     } catch (e) {
@@ -319,20 +381,18 @@ async function downloadAppUpdatePackage(): Promise<void> {
       }
       appState.appUpdate = null;
       if (attempt >= MAX_DOWNLOAD_ATTEMPTS) {
+        setAppUpdateStatusText(null);
         throw new Error(stalled ? '下载更新超时。请检查网络后重试。' : raw);
       }
       await checkAppUpdate(true);
       if (!appState.appUpdate) {
+        setAppUpdateStatusText(null);
         throw new Error('未找到可安装的更新包，请点击「重新检查」后再试。');
       }
       appState.appUpdateCheckStatus = 'downloading';
       appState.appUpdateProgress = { downloaded: 0, total: 0 };
       syncAppUpdateButtonUI();
-      const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
-      if (panel) {
-        panel.innerHTML = renderAppUpdatePopoverBody();
-        bindAppUpdatePopoverEvents(panel);
-      }
+      refreshUpdatePanel();
     }
   }
 }
@@ -404,20 +464,18 @@ export async function installAppUpdate(): Promise<void> {
 
   // 更新句柄可能在失败/超时后被清空，但 UI 仍显示「下载并安装」——先重新检查再安装，避免点击无反应
   if (!appState.appUpdate) {
-    showCopyToastMsg('正在重新获取更新…');
+    setAppUpdateStatusText('正在重新获取更新信息…');
     appState.appUpdateInfo.error = null;
     await checkAppUpdate(true);
     if (!appState.appUpdate) {
       appState.appUpdateCheckStatus = 'error';
       appState.appUpdateInfo.error = '未找到可安装的更新包，请点击「重新检查」后再试。';
+      appState.appUpdateStatusText = null;
       syncAppUpdateButtonUI();
-      const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
-      if (panel) {
-        panel.innerHTML = renderAppUpdatePopoverBody();
-        bindAppUpdatePopoverEvents(panel);
-      }
+      refreshUpdatePanel();
       return;
     }
+    appState.appUpdateStatusText = null;
   }
 
   const isWindows = /win/i.test(navigator.platform) || /windows/i.test(navigator.userAgent);
@@ -426,11 +484,7 @@ export async function installAppUpdate(): Promise<void> {
   appState.appUpdateCheckStatus = 'downloading';
   appState.appUpdateProgress = { downloaded: 0, total: 0 };
   syncAppUpdateButtonUI();
-  const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
-  if (panel) {
-    panel.innerHTML = renderAppUpdatePopoverBody();
-    bindAppUpdatePopoverEvents(panel);
-  }
+  refreshUpdatePanel();
 
   let installResolved = false;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
@@ -450,6 +504,7 @@ export async function installAppUpdate(): Promise<void> {
     // 2. 安装前优雅关闭所有常驻 claude 进程。
     // tauri-plugin-updater 无 beforeInstall 钩子：Windows 安装时 process::exit(0) 直接退进程，
     // 若常驻 claude 仍在运行会成为孤儿进程，所以必须在 install 前主动关闭。
+    setAppUpdateStatusText('下载完成，正在关闭常驻会话…');
     if (isWindows) {
       showCopyToastMsg('下载完成，正在关闭常驻会话…');
     }
@@ -461,6 +516,7 @@ export async function installAppUpdate(): Promise<void> {
 
     // 3. 安装
     installResolved = false;
+    setAppUpdateStatusText('正在安装更新，请稍候…');
     const installPromise = appState.appUpdate.install();
     // macOS：bundle 可能已替换完成，但 install Promise 偶发不返回；启动看门狗强制重启
     if (navigator.platform.toLowerCase().includes('mac')) {
@@ -483,11 +539,13 @@ export async function installAppUpdate(): Promise<void> {
       appState.appUpdate = null;
     }
     syncAppUpdateButtonUI();
+    appState.appUpdateStatusText = null;
     await relaunchAfterUpdate();
   } catch (e) {
     installResolved = true;
     clearStallTimer();
     appState.appUpdateCheckStatus = 'error';
+    appState.appUpdateStatusText = null;
     const raw = String(e);
     const timedOut = /timed?\s*out|timeout|连接超时|error sending request/i.test(raw);
     appState.appUpdateInfo.error = timedOut
@@ -497,11 +555,7 @@ export async function installAppUpdate(): Promise<void> {
     if (appState.appUpdateInfo.latestVersion) {
       appState.appUpdateInfo.updateAvailable = true;
     }
-    const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
-    if (panel) {
-      panel.innerHTML = renderAppUpdatePopoverBody();
-      bindAppUpdatePopoverEvents(panel);
-    }
+    refreshUpdatePanel();
     appState.appUpdateProgress = null;
     syncAppUpdateButtonUI();
     if (appState.appUpdate) {

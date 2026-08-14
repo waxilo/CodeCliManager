@@ -90,7 +90,6 @@ export const appState = {
   pendingProjectDir: null as string | null,
   chatModelPickerHighlightIndex: -1,
   expandedThinkingBlocks: new Set<string>(),
-  sidebarSearchQuery: '',
   isApiConfigViewActive: false,
   isSettingsViewActive: false,
   settingsSection: 'app-update' as SettingsSection,
@@ -126,6 +125,8 @@ export const appState = {
   appUpdateCheckStatus: 'idle' as AppUpdateCheckStatus,
   appUpdateProgress: null as { downloaded: number; total: number } | null,
   appUpdateCheckPromise: null as Promise<void> | null,
+  /** 更新过程中的分步状态文案（重新获取/下载/关闭会话/安装），用于弹层实时反馈，避免误以为卡死 */
+  appUpdateStatusText: null as string | null,
   newConversationIds: new Set<string>(),
   expandedWorkspaces: new Set<string>(
     (() => {
@@ -152,9 +153,12 @@ export const appState = {
   todosBySession: new Map<string, TodoItem[]>(),
   /** sessionId → 会话累计用量（历史基线 + 进程增量叠加） */
   usageBySession: new Map<string, SessionUsage>(),
+  /** sessionId → 本轮运行起始时间戳（ms）；输入框下方「执行时长」的计时锚点 */
+  sessionRunStartedAt: new Map<string, number>(),
+  /** sessionId → 临时状态文案（api_retry 等），下一个内容块/turn 结束时清除 */
+  runStatusOverride: new Map<string, string>(),
   activeQuestionEnterHandler: null as (() => boolean) | null,
   activeAskQuestionCleanup: null as (() => void) | null,
-  questionOtherInputActive: false,
   streamRefreshBySession: new Map<string, StreamRefreshState>(),
   answerScroller: null as ScrollController | null,
   thinkingScrollers: new Map<string, ScrollController>(),

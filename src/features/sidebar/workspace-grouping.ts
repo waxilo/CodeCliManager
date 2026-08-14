@@ -83,12 +83,15 @@ export function saveExpandedWorkspaces(): void {
   }
 }
 
-/** 按 project_dir 将对话分组为工作区，返回工作区列表和未分类对话 */
-export function groupConversationsByWorkspace(): { workspaces: WorkspaceGroup[]; uncategorized: Conversation[] } {
+/** 按 project_dir 将对话分组为工作区，返回工作区列表和未分类对话。
+ *  默认分组全部会话；传入 convs 时只分组该子集（如归档会话）。 */
+export function groupConversationsByWorkspace(
+  convs: Conversation[] = appState.conversations,
+): { workspaces: WorkspaceGroup[]; uncategorized: Conversation[] } {
   const workspaceMap = new Map<string, Conversation[]>();
   const uncategorized: Conversation[] = [];
 
-  for (const conv of appState.conversations) {
+  for (const conv of convs) {
     const dir = conv.project_dir?.trim();
     if (dir) {
       const list = workspaceMap.get(dir) || [];

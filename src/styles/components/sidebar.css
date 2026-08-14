@@ -42,80 +42,6 @@
   box-shadow: none;
 }
 
-/* 快速检索行：搜索框 + 刷新按钮 */
-.sidebar-search-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.sidebar-search {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 30px;
-  padding: 0 8px;
-  border: 1px solid var(--sidebar-search-border);
-  border-radius: 9px;
-  background: var(--sidebar-search-bg);
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-
-.sidebar-search:focus-within {
-  border-color: var(--color-accent);
-  box-shadow: 0 0 0 3px var(--color-accent-ring);
-}
-
-.sidebar-search-icon {
-  flex-shrink: 0;
-  display: inline-flex;
-  color: var(--color-text-muted);
-}
-
-.sidebar-search-input {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  border: none;
-  outline: none;
-  background: transparent;
-  color: var(--color-text);
-  font-size: 12.5px;
-  font-family: inherit;
-}
-
-.sidebar-search-input::placeholder {
-  color: var(--color-text-muted);
-}
-
-.sidebar-search-clear {
-  flex-shrink: 0;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: var(--sidebar-badge-bg);
-  color: var(--color-text-muted);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.15s ease, color 0.15s ease;
-}
-
-.sidebar-search-clear:hover {
-  background: var(--color-bg-surface-hover);
-  color: var(--color-text);
-}
-
-.sidebar-search-clear[hidden] {
-  display: none;
-}
-
 .new-chat-btn-wrapper {
   position: relative;
   flex: 1;
@@ -597,5 +523,163 @@
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+/* 活跃会话 tab：近一天会话平铺列表（无项目卡片缩进） */
+.active-conversations {
+  padding: 1px 5px 5px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+/* ── 侧边栏多视图页签（工作区 / 子代理 / 目录） ─────────────────── */
+.sidebar-tabs {
+  flex-shrink: 0;
+  display: flex;
+  gap: 2px;
+  padding: 0 7px 8px;
+  border-bottom: 1px solid var(--color-bg-surface-hover);
+}
+
+.sidebar-tab {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  font-family: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.sidebar-tab:hover {
+  background: var(--sidebar-item-hover);
+  color: var(--color-text);
+}
+
+.sidebar-tab.is-active {
+  color: var(--color-accent);
+  background: var(--sidebar-card-bg);
+  font-weight: 600;
+}
+
+/* 子代理运行数角标（accent 圆形胶囊） */
+.sidebar-tab-badge {
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+}
+
+.sidebar-tab-badge[hidden] {
+  display: none;
+}
+
+/* ── 子代理 tab：清单内嵌于侧栏，覆盖 composer.css 的右栏紧凑约束 ─ */
+.conversation-list .subagent-panel-header {
+  display: flex;
+  align-items: center;
+  padding: 2px 7px 8px;
+}
+
+.conversation-list .subagent-panel-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.conversation-list .subagent-progress-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: none;
+  overflow-y: auto;
+}
+
+/* 子代理报告：整行可点展开（<details>），点击折叠 */
+.conversation-list .subagent-item > .subagent-row {
+  display: flex;
+  cursor: pointer;
+  list-style: none;
+}
+
+.conversation-list .subagent-item > .subagent-row::-webkit-details-marker {
+  display: none;
+}
+
+.conversation-list .subagent-report-chevron {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--color-text-muted);
+  transition: transform 0.15s ease;
+}
+
+.conversation-list .subagent-item[open] > .subagent-row .subagent-report-chevron {
+  transform: rotate(90deg);
+}
+
+.conversation-list .subagent-report {
+  margin-top: 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-composer-border);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+  max-height: 320px;
+  overflow-y: auto;
+  overflow-wrap: break-word;
+}
+
+/* 报告头部：来源摘要（taskNotification.summary，如 `Agent "…" finished`） */
+.conversation-list .subagent-report-summary {
+  margin-bottom: 6px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--color-bg-surface-hover);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.conversation-list .subagent-report p {
+  margin: 0 0 8px;
+}
+
+.conversation-list .subagent-report p:last-child {
+  margin-bottom: 0;
+}
+
+.conversation-list .subagent-report pre {
+  font-size: 11px;
+  padding: 6px 8px;
+  background: var(--color-bg-elevated, var(--color-bg-base));
+  border-radius: 6px;
+  overflow-x: auto;
+}
+
+.conversation-list .subagent-report ul,
+.conversation-list .subagent-report ol {
+  margin: 4px 0 8px;
+  padding-left: 18px;
 }
 

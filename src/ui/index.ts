@@ -29,7 +29,6 @@ export {
   syncSidebarCollapsedUI,
   setSidebarCollapsed,
   toggleSidebarCollapsed,
-  syncSidebarForSubagents,
   initSidebarCollapsed,
   syncSidebarResponsiveState,
   bindSidebarResponsive,

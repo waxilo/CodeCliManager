@@ -43,3 +43,10 @@ export function formatTime(timestamp: number): string {
   const date = new Date(toMillis(timestamp));
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
+
+/** 耗时展示（子代理用量等）：<1s 用毫秒，否则秒保留一位 */
+export function formatDuration(ms: number): string {
+  if (!ms || ms <= 0) return '';
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}

@@ -10,6 +10,17 @@ export interface ToolColorScheme {
   primary: string;
 }
 
+/** 子代理完成通知（Rust 从 <task-notification> 解析，合并进 Agent/Task tool_use） */
+export interface TaskNotificationData {
+  tool_use_id?: string;
+  status?: string;
+  summary?: string;
+  result?: string;
+  total_tokens?: number;
+  tool_uses?: number;
+  duration_ms?: number;
+}
+
 export interface ToolMessageData {
   toolName: string;
   toolInput: Record<string, unknown>;
@@ -18,6 +29,8 @@ export interface ToolMessageData {
   toolUseId?: string;
   displayMode: 'one-line' | 'collapsible';
   colorScheme: ToolColorScheme;
+  /** 子代理完成通知（status / summary / 完整报告），由 history 解析合并 */
+  taskNotification?: TaskNotificationData;
 }
 
 export interface Message {

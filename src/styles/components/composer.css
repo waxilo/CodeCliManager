@@ -232,15 +232,53 @@
 }
 
 .input-composer-toolbar-end {
-  display: grid;
-  grid-template-columns: 156px 36px;
-  column-gap: 6px;
+  display: flex;
   align-items: center;
+  gap: 8px;
   flex-shrink: 0;
+  min-width: 0;
 }
 
-.input-composer-toolbar-end .send-btn {
-  justify-self: end;
+/* 执行状态 + 时长（输入框工具栏内、发送按钮左侧；原模型切换器位置，空闲隐藏） */
+.composer-status-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: 200px;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.composer-status-row[hidden] {
+  display: none;
+}
+
+.composer-status-dot {
+  flex-shrink: 0;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-accent);
+}
+
+.composer-status-row.is-busy .composer-status-dot {
+  animation: subagent-pulse 1.2s ease-in-out infinite;
+}
+
+.composer-status-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-status-elapsed {
+  flex-shrink: 0;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-variant-numeric: tabular-nums;
 }
 
 /* 输入框外下方：权限模式（左）+ Token/计费（右） */
@@ -254,11 +292,113 @@
   min-width: 0;
 }
 
-.composer-below-row .permission-mode-bar {
-  margin-top: 0;
-  padding: 0;
+/* 底部行三控件统一风格：导入 / 权限 / 模型，同为 26px 盒装控件 */
+.composer-below-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 1;
   min-width: 0;
+}
+
+.composer-below-left .import-btn,
+.composer-below-left .chat-model-picker-trigger {
+  box-sizing: border-box;
+  height: 26px;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.composer-below-left .import-btn:hover,
+.composer-below-left .chat-model-picker-trigger:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+.composer-below-left .import-btn:focus-visible,
+.composer-below-left .chat-model-picker-trigger:focus-visible {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px var(--color-accent-ring);
+}
+
+.composer-below-left .import-btn {
+  width: 26px;
+  padding: 0;
+  opacity: 1;
+}
+
+/* 权限分段控件：两个选项合并为一个整体（与导入/模型同为 26px） */
+.composer-below-left .permission-mode-bar {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 0;
+  flex-wrap: nowrap;
+  box-sizing: border-box;
+  height: 26px;
+  margin-top: 0;
+  padding: 0;
+  border: 1px solid var(--color-bg-surface-hover);
+  border-radius: 6px;
+  background: var(--color-bg-surface);
+  overflow: hidden;
+  flex-shrink: 1;
+  min-width: 0;
+}
+
+.composer-below-left .permission-mode-chip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.composer-below-left .permission-mode-chip + .permission-mode-chip {
+  border-left: 1px solid var(--color-bg-surface-hover);
+}
+
+.composer-below-left .permission-mode-chip:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+.composer-below-left .permission-mode-chip.is-selected,
+.composer-below-left .permission-mode-chip.is-selected:hover {
+  background: var(--color-accent-ring);
+  color: var(--color-accent);
+}
+
+/* 键盘焦点环：放在分段容器上（overflow:hidden 会裁剪 chip 自身的阴影） */
+.composer-below-left .permission-mode-bar:has(input:focus-visible) {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--color-accent-ring);
+}
+
+/* 隐藏原生单选圆点（保留可访问性：仍可聚焦） */
+.composer-below-left .permission-mode-chip input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 .composer-usage-bar {
@@ -270,50 +410,18 @@
   min-width: 0;
 }
 
-.input-composer .chat-model-picker-value {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* 模型切换器触发按钮：统一盒装，padding 预留箭头空间 */
+.composer-below-left .chat-model-picker-trigger {
+  padding: 0 22px 0 8px;
 }
 
-.input-composer .chat-model-picker-panel {
+.composer-below-left .chat-model-picker-chevron {
+  right: 6px;
+  font-size: 10px;
+}
+
+.composer-below-left .chat-model-picker-panel {
   z-index: 300;
-}
-
-.input-composer .chat-model-picker {
-  position: relative;
-  width: 100%;
-  min-width: 0;
-}
-
-.input-composer .chat-model-picker-trigger {
-  box-sizing: border-box;
-  width: 100%;
-  height: 32px;
-  padding: 0 18px 0 6px;
-  border: none;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--color-text-secondary);
-  font-size: 13px;
-}
-
-.input-composer .chat-model-picker-trigger:hover:not(:disabled) {
-  background: var(--color-bg-surface-hover);
-  border-color: transparent;
-  color: var(--color-text);
-}
-
-.input-composer .chat-model-picker-trigger:focus-visible {
-  border-color: transparent;
-  box-shadow: 0 0 0 2px var(--color-accent-ring);
-}
-
-.input-composer .chat-model-picker-chevron {
-  right: 4px;
-  font-size: 12px;
 }
 
 .input-area textarea::placeholder {
@@ -567,39 +675,6 @@
   opacity: 0.85;
 }
 
-/* 发送前检查 Kiro：输入区可见反馈，避免误判为卡死 */
-.input-composer.is-checking-kiro {
-  border-color: var(--color-accent, #4f8cff);
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent, #4f8cff) 35%, transparent);
-}
-
-.input-composer.is-checking-kiro .input-composer-textarea::placeholder {
-  color: var(--color-accent, #4f8cff);
-  opacity: 0.9;
-}
-
-.kiro-prepare-hint {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-left: 4px;
-  font-size: 12px;
-  line-height: 1.2;
-  color: var(--color-accent, #4f8cff);
-  white-space: nowrap;
-  user-select: none;
-}
-
-.kiro-prepare-hint::before {
-  content: '';
-  width: 10px;
-  height: 10px;
-  border: 1.5px solid color-mix(in srgb, var(--color-accent, #4f8cff) 35%, transparent);
-  border-top-color: var(--color-accent, #4f8cff);
-  border-radius: 50%;
-  animation: conv-spin 0.7s linear infinite;
-}
-
 .input-composer-textarea:disabled {
   cursor: not-allowed;
   opacity: 0.6;
@@ -754,7 +829,7 @@
   background: var(--color-bg-surface-active);
 }
 
-/* ── 子代理进度行（右侧清单栏复用） ───────────── */
+/* ── 子代理进度行（侧边栏「子代理」tab 复用） ───────────── */
 .subagent-progress-list {
   display: flex;
   flex-direction: column;

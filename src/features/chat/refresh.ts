@@ -6,7 +6,8 @@ import { renderConversationMessagesInnerHtml, buildDisplayMessages, ensureMessag
 import { bindSessionIdCopyEvents } from './input-composer';
 import { updateSendButtonState, isSendButtonLoading } from './session-context';
 import { sendMessage } from './send';
-import { handleRetryClick, handleUndoClick, removePendingAssistantIndicator, showPendingAssistantIndicator } from './retry';
+import { handleRetryClick, handleUndoClick } from './retry';
+import { refreshRunStatusStrip } from './run-status';
 import { initAnswerScroller, captureScrollState, restoreScrollState } from './streaming';
 import { renderChatHeaderHtml } from './render-chat';
 import { canSendMessage } from './session-context';
@@ -229,18 +230,15 @@ function applyChatDom(topbarHtml: string, chatHtml: string): void {
   }
 
   updateSendButtonState();
+  // 输入框下方状态条不随消息列表重建（composer 常驻），但全量渲染后需同步一次
+  refreshRunStatusStrip();
   if (messageList) {
     // 重建前记录滚动状态：输出结束时若用户在阅读上方消息，重建后不应强制跳回底部
     const scrollSnap = captureScrollState();
     messageList.innerHTML = chatHtml;
     // 后处理：代码复制按钮、思考块折叠事件、消息复制控件
     setupMessageListPostRender(messageList);
-    if (isSendButtonLoading()) {
-      showPendingAssistantIndicator();
-    } else {
-      removePendingAssistantIndicator();
-    }
-    // 恢复滚动状态（最后执行，覆盖 showPendingAssistantIndicator 的置底）
+    // 恢复滚动状态
     restoreScrollState(scrollSnap);
   }
 }
@@ -325,7 +323,7 @@ export function handleKeydown(e: KeyboardEvent) {
   }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    // 互动问答进行中：Enter 提交选项/「其他」自定义回答，不发成普通追问
+    // 互动问答进行中：Enter 提交选项/自定义回答，不发成普通追问
     if (appState.activeQuestionEnterHandler) {
       if (appState.activeQuestionEnterHandler()) return;
       return;

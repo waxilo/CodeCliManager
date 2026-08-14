@@ -89,6 +89,8 @@ pub(crate) struct KiroStatus {
     pub(crate) running: bool,
     /// 本地是否具备 Kiro（凭据文件 / 环境变量 / 代理已在跑），供前端决定是否展示入口
     pub(crate) available: bool,
+    /// 用户是否启用过 Kiro（prefs.enabled）。未启用时前端可跳过发送前预检，无需每次都亮"检查 Kiro" UI。
+    pub(crate) enabled: bool,
     pub(crate) port: Option<u16>,
     pub(crate) has_key: bool,
     pub(crate) auth_source: String,
@@ -124,6 +126,7 @@ pub(crate) fn build_kiro_status_from(state: &KiroProxyState) -> KiroStatus {
     KiroStatus {
         running,
         available: is_kiro_locally_available() || running,
+        enabled: load_kiro_proxy_prefs().enabled,
         port,
         has_key,
         auth_source: auth.describe_auth_source(),

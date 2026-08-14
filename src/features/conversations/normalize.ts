@@ -302,7 +302,8 @@ export function findConversationById(
   return appState.conversations.find((candidate) => candidate.id === id);
 }
 
-export function updateOrAddConversation(conv: Conversation) {
+/** 新增/更新会话。返回是否新插入了一条会话（true = 本次 unshift 新增）。 */
+export function updateOrAddConversation(conv: Conversation): boolean {
   const normalized = normalizeConversation(conv as Conversation & { projectDir?: string | null });
   let idx = appState.conversations.findIndex((candidate) =>
     isConversationInstance(candidate, normalized.id, normalized.source_path),
@@ -315,6 +316,7 @@ export function updateOrAddConversation(conv: Conversation) {
       idx = appState.conversations.indexOf(sameId[0]);
     }
   }
+  let added = false;
   if (idx >= 0) {
     const existing = appState.conversations[idx];
     appState.conversations[idx] = {
@@ -327,11 +329,13 @@ export function updateOrAddConversation(conv: Conversation) {
     };
   } else {
     appState.conversations.unshift(normalized);
+    added = true;
     // 标记为新增，下一次渲染时播放淡入动画
     appState.newConversationIds.add(normalized.id);
   }
   appState.conversations.sort(
     (a, b) => (b.updated_at || b.created_at) - (a.updated_at || a.created_at),
   );
+  return added;
 }
 

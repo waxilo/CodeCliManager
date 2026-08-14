@@ -54,7 +54,6 @@ function buildMainShell(): void {
             <div class="message-list" id="message-list">消息</div>
             <div class="input-area"></div>
           </div>
-          <aside class="subagent-panel" id="subagent-progress">子代理</aside>
         </div>
         <div id="balance-status-bar" class="balance-status-bar">余额</div>
       </div>
@@ -122,9 +121,8 @@ describe('management-view 增量进出', () => {
     expect(clicked).toHaveBeenCalledTimes(1);
   });
 
-  it('有子代理时退出后子代理面板保留；无子代理时被移除', () => {
+  it('右侧子代理面板已移除：有子代理时退出也不产生 #subagent-progress 节点', () => {
     buildMainShell();
-    const subagent = document.querySelector('#subagent-progress') as HTMLElement;
 
     appState.activeConversationId = 'conv-1';
     const task: ActiveToolState = {
@@ -136,15 +134,15 @@ describe('management-view 增量进出', () => {
     };
     appState.activeToolsBySession.set('conv-1', new Map([['t1', task]]));
 
+    expect(document.querySelector('#subagent-progress')).toBeNull();
+
     enterManagementView('settings');
-    expect(document.body.contains(subagent)).toBe(false);
-
     expect(exitManagementView()).toBe(true);
-    // 有 Task 运行 → 面板挂回并保留
-    expect(document.querySelector('#subagent-progress')).toBe(subagent);
-    expect(document.querySelector('.app-container')?.classList.contains('has-subagent-panel')).toBe(true);
+    // 子代理由侧栏「子代理」tab 承载，不再挂右侧面板节点
+    expect(document.querySelector('#subagent-progress')).toBeNull();
+    expect(document.querySelector('.app-container')?.classList.contains('has-subagent-panel')).toBe(false);
 
-    // 无子代理 → syncSubagentProgressUI 移除面板
+    // 无子代理时同步同样不产生任何面板节点
     appState.activeToolsBySession.clear();
     syncSubagentProgressUI();
     expect(document.querySelector('#subagent-progress')).toBeNull();

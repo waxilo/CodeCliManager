@@ -4,6 +4,7 @@ import { showCopyToastMsg, scheduleUiRefresh } from '../../ui';
 import { setSendButtonLoading, setAbortingUi, updateSendButtonState } from './session-context';
 import { clearStreamingState } from './streaming';
 import { abortSession, sendMessage } from './send';
+import { markSessionRunStart } from './run-status';
 import { canSendMessage, isSendButtonLoading } from './session-context';
 import { refreshConversationFromBackend } from '../conversations/load';
 import { updateConversationListSpinner } from '../sidebar/render-list';
@@ -21,6 +22,7 @@ export async function invokeRetryMessage(mode: 'regenerate' | 'undo') {
   if (mode === 'regenerate') {
     setSendButtonLoading(true);
     appState.runningSessions.add(cid);
+    markSessionRunStart(cid);
   } else {
     // 撤回：也设置 loading 状态防止双击，但不加入 appState.runningSessions
     setSendButtonLoading(true);
@@ -101,43 +103,12 @@ export function handleSendButtonClick() {
   }
 }
 
+/** 流式「待回复」占位已移除：状态改由输入框下方状态条承载。保留空实现兼容调用方。 */
 export function removePendingAssistantIndicator() {
   document.querySelector('#pending-assistant')?.remove();
 }
 
-export function showPendingAssistantIndicator(statusText = '正在思考...') {
-  const messageList = document.querySelector<HTMLDivElement>('#message-list');
-  if (!messageList) return;
-
-  let pendingEl = document.querySelector('#pending-assistant') as HTMLDivElement | null;
-  if (!pendingEl) {
-    pendingEl = document.createElement('div');
-    pendingEl.id = 'pending-assistant';
-    pendingEl.className = 'message assistant pending';
-    pendingEl.innerHTML = `
-      <div class="message-content message-pending-content">
-        <div class="pending-animation">
-          <span class="pending-dot"></span>
-          <span class="pending-dot"></span>
-          <span class="pending-dot"></span>
-        </div>
-        <span class="pending-text"></span>
-      </div>
-    `;
-    messageList.appendChild(pendingEl);
-  }
-
-  const textEl = pendingEl.querySelector('.pending-text');
-  if (textEl) {
-    textEl.textContent = statusText;
-  }
-  appState.answerScroller?.scrollToBottom();
-}
-
-export function updatePendingStatus(statusText: string) {
-  showPendingAssistantIndicator(statusText);
-}
-
+/** 流式「待回复」占位已移除：状态改由输入框下方状态条承载。保留空实现兼容调用方。 */
 export function clearPendingRequestState() {
   removePendingAssistantIndicator();
 }

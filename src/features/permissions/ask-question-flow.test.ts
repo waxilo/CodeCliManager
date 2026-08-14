@@ -64,7 +64,6 @@ describe('AskUserQuestion 完整交互流程', () => {
     appState.activeInteractionPanel = null;
     appState.activeAskQuestionCleanup = null;
     appState.activeQuestionEnterHandler = null;
-    appState.questionOtherInputActive = false;
     respondMock.mockClear();
     // jsdom 未实现 scrollIntoView；afterUiRefresh 可能触发它
     Element.prototype.scrollIntoView = vi.fn();
@@ -100,20 +99,16 @@ describe('AskUserQuestion 完整交互流程', () => {
     expect(appState.pendingAskQuestions.size).toBe(0);
   });
 
-  it('勾选「其他」后显示卡片内联输入框，空值提交被拦截，填写后提交自定义回答', async () => {
+  it('「自定义回答」是始终可见的输入框：直接填写即答案，空值时提交被拦截', async () => {
     const p = handlePermissionRequest(askPayload());
     const c = card()!;
-    const otherWrap = c.querySelector<HTMLElement>('.ask-other-input')!;
     const otherInput = c.querySelector<HTMLInputElement>('input[data-ask-other-input="1"]')!;
 
-    // 默认内联输入框隐藏（不占地方）
-    expect(otherWrap.hidden).toBe(true);
+    // 自定义回答输入框始终可见，无需先勾选「其他」
+    expect(c.querySelector('.ask-other')).not.toBeNull();
+    expect(otherInput).not.toBeNull();
 
-    // 勾选「其他」→ 内联输入框出现
-    (c.querySelector<HTMLInputElement>('input[data-other="1"]')!).click();
-    expect(otherWrap.hidden).toBe(false);
-
-    // 内联输入为空时提交被拦截（不发送响应）
+    // 没选选项、也没填自定义回答时提交被拦截（不发送响应）
     (c.querySelector('[data-ask-action="submit"]') as HTMLButtonElement).click();
     await Promise.resolve();
     await Promise.resolve();
@@ -121,7 +116,7 @@ describe('AskUserQuestion 完整交互流程', () => {
     const err = c.querySelector<HTMLElement>('.ask-error')!;
     expect(err.hidden).toBe(false);
 
-    // 在卡片内联输入框填写后提交成功，不再读取下方大输入框
+    // 只填自定义回答即可作为答案提交（无需点选任何选项）
     otherInput.value = '自定义回答内容';
     (c.querySelector('[data-ask-action="submit"]') as HTMLButtonElement).click();
     await p;
@@ -131,6 +126,25 @@ describe('AskUserQuestion 完整交互流程', () => {
     ];
     const updated = args.updatedInput as { questions: unknown; answers: Record<string, string> };
     expect(updated.answers).toEqual({ '选择运行方式？': '自定义回答内容' });
+    expect(card()).toBeNull();
+  });
+
+  it('在「自定义回答」输入框内按 Enter 直接提交', async () => {
+    const p = handlePermissionRequest(askPayload());
+    const c = card()!;
+    const otherInput = c.querySelector<HTMLInputElement>('input[data-ask-other-input="1"]')!;
+    otherInput.value = 'Enter 提交的自定义回答';
+
+    otherInput.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    );
+    await p;
+    expect(respondMock).toHaveBeenCalledTimes(1);
+    const [args] = respondMock.mock.calls[0] as [
+      { requestId: string; behavior: string; updatedInput: unknown },
+    ];
+    const updated = args.updatedInput as { questions: unknown; answers: Record<string, string> };
+    expect(updated.answers).toEqual({ '选择运行方式？': 'Enter 提交的自定义回答' });
     expect(card()).toBeNull();
   });
 

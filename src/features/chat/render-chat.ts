@@ -2,7 +2,7 @@ import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
 import type { Message, Conversation } from '../../types';
 import { escapeHtml } from '../../utils';
 import * as api from '../../api';
-import { renderMessageListHtml } from './render-messages';
+import { renderMessageListHtml, extractToolName, extractToolUseId, extractToolResult } from './render-messages';
 import { getEffectiveProjectDir } from './session-context';
 import { renderCopyIconHtml, renderInputComposerHtml } from './input-composer';
 import { getActiveChatModelForRender } from './model-picker';
@@ -119,11 +119,30 @@ export function renderChatHeaderHtml(conversation: Conversation | undefined): st
 
 export function buildDisplayMessages(conversation: Conversation | undefined): Message[] {
   // 子代理（Task）不在主输出页面展示：主页面只显示用户/助手对话与普通工具卡，
-  // 子代理执行态由右侧子代理清单栏（#subagent-progress）承载；已提交的 Task 卡同样过滤，
+  // 子代理执行态由侧边栏「子代理」标签页承载；已提交的 Task 卡同样过滤，
   // 避免历史里混排「子代理」卡片（会话数据完整保留，仅不渲染）。
-  const messages = [...(conversation?.messages ?? [])].filter(
-    (m) => !(m.role === 'tool' && m.toolData?.toolName === 'Task'),
-  );
+  // 注意：历史 tool_use 是原始 role（tool_use/tool_result），要按 content 里的
+  // tool_name 识别 Task，并连带其 tool_result 一起移除，否则孤立结果会错配到 Agent 卡。
+  const taskToolUseIds = new Set<string>();
+  const messages = [...(conversation?.messages ?? [])].filter((m) => {
+    // 已配对的内嵌工具消息（pending-* 乐观态）
+    if (m.role === 'tool' && m.toolData?.toolName === 'Task') return false;
+    // 原始 tool_use：Task 记录其 id 供结果配对移除，Agent 保留（主视图展示子代理完成卡）
+    if (m.role === 'tool_use') {
+      if (extractToolName(m.content) === 'Task') {
+        const id = extractToolUseId(m.content);
+        if (id) taskToolUseIds.add(id);
+        return false;
+      }
+      return true;
+    }
+    // 原始 tool_result：Task 的结果一并移除，避免无主结果污染配对
+    if (m.role === 'tool_result') {
+      const resultToolUseId = extractToolResult(m.content).toolUseId;
+      return !(resultToolUseId && taskToolUseIds.has(resultToolUseId));
+    }
+    return true;
+  });
   // 只有当 appState.pendingUserMessage 属于当前会话时才显示（防止串会话）
   const pendingBelongsToThisConv = appState.pendingUserMessage &&
     (appState.pendingUserMessageConvId === appState.activeConversationId || (!appState.pendingUserMessageConvId && !appState.activeConversationId));
@@ -148,8 +167,8 @@ export function buildDisplayMessages(conversation: Conversation | undefined): Me
   // 钉到输入框上方（#interaction-host），避免长输出会话中「选择卡」与正文混排、滚动被顶走。
   // 已选结果由会话历史回写展示。
 
-  // 进行中的 Task（Subagent）同样不注入消息流：运行中子代理由右侧子代理清单栏
-  // （#subagent-progress）承载，主输出页面只保留用户/助手正文。
+  // 进行中的 Task（Subagent）同样不注入消息流：运行中子代理由侧边栏「子代理」标签页
+  // 承载，主输出页面只保留用户/助手正文。
 
   return dedupeAdjacentDuplicateMessages(messages);
 }

@@ -63,7 +63,7 @@ export function renderTodoPanelHtml(): string {
     </div>`;
 }
 
-/** 重建输入区上方的 TodoList 面板（子代理面板之下） */
+/** 重建输入区上方的 TodoList 面板（排队区 / 交互面板之上） */
 export function syncTodoPanelUI(): void {
   const inputArea = document.querySelector('.input-area');
   if (!inputArea) return;
@@ -71,7 +71,6 @@ export function syncTodoPanelUI(): void {
   const html = renderTodoPanelHtml();
   if (!html) return;
   const ref =
-    (document.querySelector('#subagent-progress') as HTMLElement) ||
     (document.querySelector('#queued-prompts') as HTMLElement) ||
     (document.querySelector('#interaction-host') as HTMLElement);
   ref?.insertAdjacentHTML('afterend', html);

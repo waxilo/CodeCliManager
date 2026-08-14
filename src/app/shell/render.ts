@@ -17,18 +17,20 @@ import {
   mountActiveManagementView,
 } from './management-view';
 import {
-  renderConversationList,
-  bindSidebarSearch,
   handleConversationListClick,
   handleConversationListKeydown,
   handleConversationListContextMenu,
   refreshConversationListDom,
+  renderSidebarTabsHtml,
+  renderActiveTabContent,
+  bindSidebarTabs,
+  getActiveSidebarTab,
 } from '../../features/sidebar';
 import { renderChatAreaHtml } from '../../features/chat/render-chat';
 import { renderBalanceStatusBarHtml, bindSessionIdCopyEvents, bindQueuedPromptEvents } from '../../features/chat/input-composer';
 import { setSendButtonLoading, isActiveConversationRunning, updateSendButtonState } from '../../features/chat/session-context';
 import { refreshStreamingUI } from '../../features/chat/streaming';
-import { renderSubagentProgressHtml, syncSubagentProgressUI } from '../../features/chat/subagent-progress';
+import { syncSubagentProgressUI } from '../../features/chat/subagent-progress';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { bindPermissionModeBarEvents } from '../../features/settings/mount';
 import {
@@ -107,45 +109,19 @@ function performRender() {
         </div>
       </header>
       <div class="app-container${getIsSidebarCollapsed() ? ' is-sidebar-collapsed' : ''}${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
-      <div class="sidebar${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : ''}">
+      <div class="sidebar${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : ''}${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? ` is-${getActiveSidebarTab()}` : ''}">
         ${appState.isApiConfigViewActive ? renderApiConfigSidebarHtml() : appState.isSettingsViewActive ? renderSettingsSidebarHtml() : appState.isMcpViewActive ? '' : `
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
             <div class="new-chat-btn-wrapper">
               <button type="button" class="new-chat-btn" id="new-chat-btn" aria-haspopup="menu"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>新建会话</button>
             </div>
-          </div>
-          <div class="sidebar-search-row">
-            <div class="sidebar-search">
-              <span class="sidebar-search-icon" aria-hidden="true">
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-              </span>
-              <input
-                type="text"
-                class="sidebar-search-input"
-                id="sidebar-search-input"
-                placeholder="搜索会话或项目…"
-                autocomplete="off"
-                spellcheck="false"
-                aria-label="搜索会话或项目"
-                value="${escapeHtml(appState.sidebarSearchQuery)}"
-              />
-              <button
-                type="button"
-                class="sidebar-search-clear"
-                id="sidebar-search-clear"
-                title="清空搜索"
-                aria-label="清空搜索"
-                ${appState.sidebarSearchQuery ? '' : 'hidden'}
-              >
-                <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-              </button>
-            </div>
             <button type="button" class="refresh-btn" id="refresh-btn" title="扫描本地新会话" aria-label="刷新会话列表"><span class="refresh-icon">↻</span></button>
           </div>
         </div>
+        ${renderSidebarTabsHtml()}
         <div class="conversation-list" id="conversation-list">
-          ${renderConversationList()}
+          ${renderActiveTabContent()}
         </div>
         `}
       </div>
@@ -159,7 +135,6 @@ function performRender() {
       <div class="main-content${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
         ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isMcpViewActive ? renderMcpViewHtml() : renderChatAreaHtml({ shellOnly: true })}
       </div>
-      ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderSubagentProgressHtml() : ''}
       </div>
       ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderBalanceStatusBarHtml() : ''}
     </div>
@@ -180,7 +155,7 @@ function performRender() {
     if (sid && appState.streamingBySession.has(sid)) {
       refreshStreamingUI(sid);
     }
-    // 同步右侧子代理栏显隐与左侧会话栏收起状态（全量 HTML 已嵌入面板时也要补 class）
+    // 同步左侧「子代理」tab 内容 / 角标 / 自动切换（全量 HTML 已嵌入时也要补）
     syncSubagentProgressUI();
   }
   remountActiveInteractionPanel();
@@ -261,7 +236,7 @@ export function attachEventListeners() {
     }
   });
 
-  bindSidebarSearch();
+  bindSidebarTabs();
 
   const listEl = document.querySelector('#conversation-list');
   if (listEl) {

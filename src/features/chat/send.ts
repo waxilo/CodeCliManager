@@ -6,7 +6,7 @@ import { escapeHtml } from '../../utils';
 import { showCopyToastMsg, showToast, scheduleUiRefresh } from '../../ui';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getActiveChatModel } from './model-picker';
-import { getEffectiveProjectDir, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading, syncMessageInputPlaceholder } from './session-context';
+import { getEffectiveProjectDir, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading } from './session-context';
 import { resolveFileReferences, disposePasteAttachments, invalidateFileCache, restoreComposerDraftSnapshot, stashComposerDraft, takeComposerDraftSnapshot } from '../files';
 import { closePermissionDialogs } from '../permissions';
 import { groupConversationsByWorkspace } from '../sidebar';
@@ -15,6 +15,7 @@ import { clearStreamingState, commitStreamingAssistantToConversation } from './s
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshModelInfo } from './render-chat';
 import { hideSendingState } from './retry';
+import { markSessionRunStart, setTransientStatus } from './run-status';
 import { isImageFile, stripFileRefTags, unwrapFileRef } from '../files/index';
 import { dismissMcpViewState } from '../mcp/mount';
 import { normalizeModelKey } from '../permissions/permission-mode';
@@ -25,28 +26,9 @@ import { newChatInWorkspace } from '../sidebar/workspace-grouping';
 
 let isPreparingKiroSend = false;
 
-/** 发送前 Kiro 预检的可见反馈，避免用户误以为卡死 */
-function setKiroPrepareUi(active: boolean, input: HTMLTextAreaElement, sendBtn: HTMLButtonElement | null): void {
-  const composer = document.querySelector('.input-composer');
-  composer?.classList.toggle('is-checking-kiro', active);
-
-  const toolbarStart = document.querySelector('.input-composer-toolbar-start');
-  let hint = document.querySelector('#kiro-prepare-hint') as HTMLElement | null;
-  if (active) {
-    if (!hint && toolbarStart) {
-      hint = document.createElement('span');
-      hint.id = 'kiro-prepare-hint';
-      hint.className = 'kiro-prepare-hint';
-      hint.setAttribute('role', 'status');
-      hint.setAttribute('aria-live', 'polite');
-      hint.textContent = '正在检查 Kiro 代理…';
-      toolbarStart.appendChild(hint);
-    } else if (hint) {
-      hint.hidden = false;
-    }
-  } else {
-    hint?.remove();
-  }
+/** 发送前 Kiro 预检的可见反馈：状态并入输入框下方状态条，不再单独展示提示/改占位符 */
+function setKiroPrepareUi(active: boolean, sendBtn: HTMLButtonElement | null): void {
+  setTransientStatus(active ? '正在检查 Kiro 代理…' : null);
 
   if (sendBtn) {
     if (active) {
@@ -54,12 +36,6 @@ function setKiroPrepareUi(active: boolean, input: HTMLTextAreaElement, sendBtn: 
     } else {
       delete sendBtn.dataset.checkingKiro;
     }
-  }
-
-  if (active) {
-    input.placeholder = '正在检查 Kiro 代理，请稍候…';
-  } else {
-    syncMessageInputPlaceholder();
   }
 
   updateSendButtonState();
@@ -75,7 +51,7 @@ async function prepareKiroBeforeSend(
 ): Promise<boolean> {
   if (isPreparingKiroSend) return false;
   isPreparingKiroSend = true;
-  setKiroPrepareUi(true, input, sendBtn);
+  setKiroPrepareUi(true, sendBtn);
 
   try {
     const status = await api.kiroPrepareSend();
@@ -88,7 +64,7 @@ async function prepareKiroBeforeSend(
     return false;
   } finally {
     isPreparingKiroSend = false;
-    setKiroPrepareUi(false, input, sendBtn);
+    setKiroPrepareUi(false, sendBtn);
   }
 }
 
@@ -248,7 +224,10 @@ export async function sendMessage() {
   let shouldRestore = true;
 
   try {
-    if (!(await prepareKiroBeforeSend(input, sendBtn))) return;
+    // 仅当用户启用过 Kiro 时才做发送前预检；未启用时跳过，避免每次发送都亮「检查 Kiro」UI 并多一次 IPC 往返。
+    if (appState.kiroStatus?.enabled) {
+      if (!(await prepareKiroBeforeSend(input, sendBtn))) return;
+    }
 
     const content = snapshot.text.trim();
     const pasteRefs = snapshot.pasteAttachments.map((attachment) => ({ ...attachment }));
@@ -370,6 +349,7 @@ export async function executePreparedCommand(
       }
       appState.sessionProcessModels.set(conversationId, nextModelKey);
       appState.runningSessions.add(conversationId);
+      markSessionRunStart(conversationId);
 
       const conv = findConversationById(conversationId);
       commitStreamingAssistantToConversation(conversationId);
@@ -393,6 +373,7 @@ export async function executePreparedCommand(
     } else {
       appState.sessionProcessModels.set('pending', nextModelKey);
       appState.runningSessions.add('pending');
+      markSessionRunStart('pending');
       shellApi.render();
     }
 

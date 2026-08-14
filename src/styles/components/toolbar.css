@@ -301,6 +301,13 @@
   cursor: not-allowed;
 }
 
+a.claude-update-action {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
 .claude-update-action.primary {
   background: var(--color-accent);
   border-color: var(--color-accent);
@@ -496,13 +503,10 @@
   font-weight: 500;
   line-height: 1.35;
   color: var(--color-text-secondary);
-  /* 最多两行，超出省略 */
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
+  /* 单行省略，保证所有列表项高度一致；完整标题悬停可见（item 自带 title） */
+  white-space: nowrap;
   overflow: hidden;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
   transition: color 0.15s ease;
 }
 

@@ -7,7 +7,7 @@ import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLo
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
 import { setAbortingUi, setSendButtonLoading, isSendButtonLoading } from '../features/chat/session-context';
 import { hideSendingState } from '../features/chat/retry';
-import { updateConversationListSpinner } from '../features/sidebar';
+import { updateConversationListSpinner, refreshActiveTabContent } from '../features/sidebar';
 import { updateContextIndicator } from '../features/chat/context-indicator';
 import { updateCostIndicator } from '../features/chat/cost-indicator';
 import { syncSubagentProgressUI } from '../features/chat/subagent-progress';
@@ -20,6 +20,10 @@ import { normalizeMessageForCompare } from '../features/files/index';
 import type { PermissionRequestPayload } from '../types';
 import { showCopyToastMsg, scheduleUiRefresh } from '../ui';
 import { syncQueuedPromptsUI } from '../features/chat/input-composer';
+import {
+  markSessionRunStart,
+  startRunStatusTicker,
+} from '../features/chat/run-status';
 
 interface QueuedPromptsUpdatedPayload {
   conversationId: string;
@@ -60,6 +64,9 @@ export async function setupEventListeners() {
   if (eventListenersReady) return;
   eventListenersReady = true;
 
+  // 输入框下方状态条：定时刷新执行时长与状态
+  startRunStatusTicker();
+
   // 监听流式消息块（thinking / answer 实时分离）
   await listen<MessageChunkPayload>('message-chunk', (event) => {
     handleMessageChunk(event.payload);
@@ -93,7 +100,7 @@ export async function setupEventListeners() {
       appState.pendingProjectDir = null;
     }
 
-    updateOrAddConversation({
+    const added = updateOrAddConversation({
       id: payload.conversation_id,
       title: payload.title,
       messages: (() => {
@@ -109,6 +116,8 @@ export async function setupEventListeners() {
       context_tokens: payload.context_tokens ?? null,
       last_model: payload.last_model ?? null,
     });
+    // 新会话首落盘时重建侧边栏当前 tab，否则左侧列表不出现新条目
+    if (added) refreshActiveTabContent();
 
     // 只在会话数据已包含用户消息时才清空 appState.pendingUserMessage
     // 同时确保只清除属于当前会话的 pending 消息（防止串会话）
@@ -184,7 +193,7 @@ export async function setupEventListeners() {
       existingConv?.messages,
     );
 
-    updateOrAddConversation({
+    const added = updateOrAddConversation({
       id: payload.conversation_id,
       title: payload.title,
       messages: mergedMessages,
@@ -197,6 +206,8 @@ export async function setupEventListeners() {
       last_model: payload.last_model ?? null,
       usage: payload.usage ?? null,
     });
+    // 兜底：会话仅经 messages-updated 首现（session-created 未触发）时也要刷新侧边栏
+    if (added) refreshActiveTabContent();
 
     // 远程已「内容级」包含当前流式文本（最终报告已落盘）才不再补 stream-assistant。
     // 仅凭「存在任意 assistant 气泡」会漏判「远程只有更早的 progress、最终报告尚未写入」，
@@ -260,6 +271,7 @@ export async function setupEventListeners() {
       conversation.updated_at = Math.floor(Date.now() / 1000);
     }
     appState.runningSessions.add(conversationId);
+    markSessionRunStart(conversationId);
     if (appState.activeConversationId === conversationId) {
       scheduleChatRefresh(conversationId);
       setSendButtonLoading(true);
@@ -294,6 +306,7 @@ export async function setupEventListeners() {
     const sid = event.payload;
     if (!sid || sid !== appState.activeConversationId) return;
     appState.runningSessions.add(sid);
+    markSessionRunStart(sid);
     appState.pendingUserMessage = null;
     appState.pendingUserMessageConvId = null;
     setSendButtonLoading(true);

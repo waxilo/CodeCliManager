@@ -5,55 +5,6 @@
   width: 100%;
 }
 
-/* 右侧子代理清单栏。
-   元素只在有子代理数据时存在于 DOM；基础态为收起（width:0），
-   与左侧边栏联动：仅当「有数据且侧边栏收起」时才展开（见下方双类选择器）。 */
-.subagent-panel {
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  width: 0;
-  min-width: 0;
-  overflow: hidden;
-  border-left: 1px solid transparent;
-  background: var(--color-bg-surface);
-  transition: width 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, border-color 0.2s ease;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.app-container.has-subagent-panel.is-sidebar-collapsed .subagent-panel {
-  width: min(300px, 32vw);
-  border-left-color: var(--color-bg-surface);
-  opacity: 1;
-  pointer-events: auto;
-}
-
-.subagent-panel-header {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 12px 14px 8px;
-  border-bottom: 1px solid color-mix(in srgb, var(--color-bg-surface-hover) 70%, transparent);
-}
-
-.subagent-panel-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-}
-
-.subagent-panel .subagent-progress-list {
-  flex: 1;
-  min-height: 0;
-  max-height: none;
-  overflow-y: auto;
-  padding: 10px 10px 14px;
-  gap: 6px;
-}
-
 .sidebar {
   position: relative;
   width: var(--sidebar-width, 280px);
@@ -113,8 +64,7 @@ body.is-sidebar-resizing {
 
 /* 拖拽调宽时关闭宽度过渡，保证宽度跟手；松手后恢复 */
 body.is-sidebar-resizing .sidebar,
-body.is-sidebar-resizing .sidebar-resizer,
-body.is-sidebar-resizing .subagent-panel {
+body.is-sidebar-resizing .sidebar-resizer {
   transition: none;
 }
 

@@ -3,6 +3,8 @@ export interface KiroStatusData {
   running: boolean;
   /** 本地是否具备 Kiro（凭据/环境变量/已运行），用于决定是否展示入口 */
   available: boolean;
+  /** 用户是否启用过 Kiro（prefs.enabled）。未启用时发送前跳过 Kiro 预检 */
+  enabled: boolean;
   port: number | null;
   hasKey: boolean;
   authSource: string;

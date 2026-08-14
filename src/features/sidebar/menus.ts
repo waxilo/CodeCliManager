@@ -80,7 +80,21 @@ export function handleConversationListClick(e: Event) {
 
 export function handleConversationListContextMenu(e: Event) {
   const target = e.target as HTMLElement;
-  // 只有工作区 header 区域触发右键菜单（非按钮区域）
+  const event = e as MouseEvent;
+
+  // 会话条目右键 → 会话操作菜单（重命名 / 导出 / 删除），锚定鼠标位置
+  const item = target.closest<HTMLElement>('.conversation-item');
+  if (item) {
+    const id = item.dataset.id;
+    const sourcePath = item.dataset.sourcePath || null;
+    if (!id) return;
+    e.preventDefault();
+    e.stopPropagation();
+    toggleConversationMenu(id, sourcePath, item, event);
+    return;
+  }
+
+  // 工作区 header 右键 → 项目操作菜单
   const workspaceHeader = target.closest('.workspace-header') as HTMLElement | null;
   if (!workspaceHeader) return;
 
@@ -90,7 +104,7 @@ export function handleConversationListContextMenu(e: Event) {
 
   e.preventDefault();
   e.stopPropagation();
-  toggleWorkspaceMenu(workspacePath, workspaceHeader, e as MouseEvent);
+  toggleWorkspaceMenu(workspacePath, workspaceHeader, event);
 }
 
 export function closeWorkspaceContextMenu() {
@@ -196,10 +210,16 @@ export function closeConversationMenu() {
   closeWorkspaceContextMenu();
 }
 
+/**
+ * 会话操作菜单。
+ * - 由 ⋮ 按钮触发时锚定按钮右下角
+ * - 由右键触发时锚定鼠标位置
+ */
 export function toggleConversationMenu(
   conversationId: string,
   sourcePath: string | null,
   anchorEl: HTMLElement,
+  event?: MouseEvent,
 ) {
   const existing = document.querySelector<HTMLElement>('.conv-menu-overlay');
   if (
@@ -252,8 +272,17 @@ export function toggleConversationMenu(
     const menu = overlay.querySelector<HTMLElement>('.conv-menu-dropdown');
     if (!menu) return;
     const r = menu.getBoundingClientRect();
-    menu.style.left = `${Math.max(8, right - r.width)}px`;
-    menu.style.top = `${bottom + r.height > window.innerHeight ? Math.max(8, anchorTop - r.height - 4) : bottom + 4}px`;
+    if (event) {
+      // 右键：锚定鼠标位置，超出视口时折回
+      const left = event.clientX + r.width > window.innerWidth ? Math.max(8, event.clientX - r.width) : event.clientX;
+      const top = event.clientY + r.height > window.innerHeight ? Math.max(8, event.clientY - r.height) : event.clientY;
+      menu.style.left = `${Math.max(8, left)}px`;
+      menu.style.top = `${Math.max(8, top)}px`;
+    } else {
+      // ⋮ 按钮：右对齐于按钮下方
+      menu.style.left = `${Math.max(8, right - r.width)}px`;
+      menu.style.top = `${bottom + r.height > window.innerHeight ? Math.max(8, anchorTop - r.height - 4) : bottom + 4}px`;
+    }
   });
 }
 

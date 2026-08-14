@@ -13,9 +13,15 @@ import { renderMarkdownCached as renderMarkdown, initCodeCopyButtons, scheduleHi
 import { getThinkingScroller } from './thinking-scroller';
 import { updateSendButtonState, setSendButtonLoading } from './session-context';
 import { updateOrAddConversation, findConversationById, assistantTextCovers } from '../conversations';
-import { updateConversationListSpinner } from '../sidebar';
+import { updateConversationListSpinner, refreshActiveTabContent } from '../sidebar';
 import { renderThinkingDetails, extractToolUseId, processToolMessages } from './render-messages';
-import { clearPendingRequestState, hideSendingState, removePendingAssistantIndicator, updatePendingStatus } from './retry';
+import { clearPendingRequestState, hideSendingState } from './retry';
+import {
+  refreshRunStatusStrip,
+  markSessionRunStart,
+  setRunStatusOverride,
+  transferSessionRunTimer,
+} from './run-status';
 import { ScrollController, scheduleUiRefresh } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
 
@@ -82,6 +88,7 @@ function findActiveTool(
 }
 
 function refreshActiveToolUI(sessionId: string) {
+  refreshRunStatusStrip();
   if (appState.activeConversationId === sessionId) {
     // 统一走中央调度器合并；聊天重建后由执行器负责恢复流式块
     scheduleUiRefresh({ chat: true, subagent: true, todo: true });
@@ -457,6 +464,7 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
     }
     appState.runningSessions.delete('pending');
     appState.runningSessions.add(sid);
+    transferSessionRunTimer('pending', sid);
     const pendingModel = appState.sessionProcessModels.get('pending');
     if (pendingModel !== undefined) {
       appState.sessionProcessModels.set(sid, pendingModel);
@@ -483,7 +491,7 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
     // 只有当 appState.pendingUserMessage 属于此会话时才使用（防止串会话）
     const pendingMatchesThisSession = appState.pendingUserMessage &&
       (!appState.pendingUserMessageConvId || appState.pendingUserMessageConvId === sid);
-    updateOrAddConversation({
+    const added = updateOrAddConversation({
       id: sid,
       title: existing?.title || 'New Chat',
       messages: existing?.messages ?? (pendingMatchesThisSession
@@ -495,6 +503,9 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       created_at: existing?.created_at ?? now,
       updated_at: now,
     });
+    // 新会话加入列表后立即重建侧边栏当前 tab：pending 阶段已渲染出 #message-list，
+    // ensureChatViewVisible 只刷新聊天区，列表若不重建新会话不会出现，直到手动刷新。
+    if (added) refreshActiveTabContent();
     // 此时尚无会话数据，保留 appState.pendingUserMessage 以确保用户消息可见
     updateSendButtonState();
     ensureChatViewVisible();
@@ -529,6 +540,7 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       !wasModelRestarting
     ) {
       appState.runningSessions.add(sid);
+      markSessionRunStart(sid);
       updateConversationListSpinner();
       if (isActive) {
         setSendButtonLoading(true);
@@ -538,6 +550,8 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
 
   switch (kind) {
     case 'thinking_start':
+      // 新内容恢复：清除 api_retry 等临时状态文案
+      appState.runStatusOverride.delete(sid);
       state.thinkingDone = false;
       // 创建新的 thinking 块
       state.blocks.push({ type: 'thinking', content: '' });
@@ -558,6 +572,8 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       if (isActive) refreshStreamingUI(sid);
       break;
     case 'text_start':
+      // 新内容恢复：清除 api_retry 等临时状态文案
+      appState.runStatusOverride.delete(sid);
       // 创建新的 text 块
       state.blocks.push({ type: 'text', content: '', finalized: false });
       state.currentBlockIdx = state.blocks.length - 1;
@@ -587,8 +603,8 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       break;
     case 'api_retry':
       if (isActive) {
-        removePendingAssistantIndicator();
-        updatePendingStatus(content);
+        // 临时状态：输入框下方状态条展示重试文案，下一个内容块到达时清除
+        setRunStatusOverride(sid, content?.trim() || '正在重试…');
       }
       break;
     case 'complete':
@@ -598,8 +614,7 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       });
       if (isActive) {
         refreshStreamingUI(sid);
-        // result 已到但 session-ended 稍晚：先去掉「正在输出」，避免误以为还在生成
-        document.querySelectorAll('.message-streaming-indicator').forEach((el) => el.remove());
+        // result 已到但 session-ended 稍晚：去掉流式标记，避免误以为还在生成
         document.querySelectorAll('.message.streaming').forEach((el) => {
           el.classList.remove('streaming');
         });
@@ -659,7 +674,8 @@ export function handleSessionError(payload: SessionErrorPayload) {
 
   if (sid) {
     appState.transientSessionError = null;
-    let conversation = findConversationById(sid);
+    const existingConversation = findConversationById(sid);
+    let conversation = existingConversation;
     if (!conversation) {
       conversation = {
         id: sid,
@@ -671,6 +687,8 @@ export function handleSessionError(payload: SessionErrorPayload) {
         updated_at: errorMessage.timestamp,
       };
       appState.conversations.unshift(conversation);
+      // 会话创建即失败（无 session_created 事件）：同样要刷新侧边栏，否则新会话不出现
+      refreshActiveTabContent();
     }
 
     const hasSameError = conversation.messages.some(
@@ -755,8 +773,6 @@ export function refreshStreamingUI(sessionId: string) {
 
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   if (!messageList) return;
-
-  removePendingAssistantIndicator();
 
   const state = getStreamingState(sessionId);
 
@@ -846,9 +862,6 @@ export function refreshStreamingUI(sessionId: string) {
         el.className = 'message assistant streaming';
         el.innerHTML = `<div class="message-content">
           <div class="markdown-body"></div>
-          <div class="message-footer">
-            <span class="message-streaming-indicator">正在输出...</span>
-          </div>
         </div>`;
         messageList.appendChild(el);
         const mdBody = el.querySelector<HTMLElement>('.markdown-body');
@@ -874,6 +887,9 @@ export function refreshStreamingUI(sessionId: string) {
 
   // Answer 区域自动置底
   appState.answerScroller?.onNewContent();
+
+  // 思考中/输入中状态同步到输入框下方状态条
+  refreshRunStatusStrip();
 }
 
 /** 初始化 Answer 区域 ScrollController（#message-list） */

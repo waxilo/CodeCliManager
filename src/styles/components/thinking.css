@@ -107,17 +107,7 @@
   background: transparent;
 }
 
-/* ---- 流式思考中的闪烁动画标签 ---- */
-.thinking-block.streaming-active .thinking-label-text {
-  background: linear-gradient(90deg, var(--color-accent) 0%, var(--color-accent-soft) 50%, var(--color-accent) 100%);
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  background-clip: text;
-  animation: thinking-shimmer 2s linear infinite;
-}
-
-/* @keyframes thinking-shimmer → utilities/animations.css */
+/* ---- 流式思考标签：动态状态已由输入框下方状态条承载，标签保持静态文案 ---- */
 
 /* 纯 thinking 消息样式：紧凑间距 */
 .message.thinking-msg {
@@ -134,34 +124,10 @@
   padding: 0;
 }
 
-/* 流式输出中的消息：左侧蓝色指示条 + 生成中动画 */
+/* 流式输出中的消息：左侧蓝色指示条（进行中内容标识；状态文案已移到输入框下方状态条） */
 .message.streaming .message-content .markdown-body {
   border-left: 2px solid var(--color-accent);
   padding-left: 10px;
-}
-
-/* 流式输出指示器：显示在 message-footer 中，与完成后的时间戳结构一致 */
-.message-streaming-indicator {
-  font-size: 11px;
-  color: var(--color-accent-soft);
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-/* 流式输出中的闪烁点动画（与 pending-dot 保持一致的风格） */
-.message-streaming-indicator::before {
-  content: '';
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--color-accent);
-  animation: pending-dot-bounce 1.2s infinite ease-in-out;
-}
-
-/* 统一 message-footer 最小高度，避免流式输出切换到完成状态时布局跳动 */
-.message.streaming .message-footer {
-  min-height: 20px;
 }
 
 /* ---- 错误消息 ---- */
@@ -193,34 +159,7 @@
   color: var(--color-code);
 }
 
-/* ---- 待处理消息（等待回复）---- */
-.message.pending {
-  padding: 0 12px;
-}
-
-.message.pending .message-content,
-.message-pending-content {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 36px;
-  padding: 0;
-  color: var(--color-text-secondary);
-  background: transparent;
-  border: none;
-}
-
-.pending-animation {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.pending-text {
-  font-size: 13px;
-  color: var(--color-text-muted);
-}
-
+/* ---- 加载占位点（工具运行卡 / 配置页共用）---- */
 .pending-dot {
   width: 6px;
   height: 6px;

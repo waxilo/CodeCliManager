@@ -3,9 +3,26 @@ import { escapeHtml, toMillis, formatRelativeTime, formatCompactTime } from '../
 import type { Conversation } from '../../types';
 import { isConversationInstance } from '../conversations/normalize';
 import { groupConversationsByWorkspace, getWorkspaceHue, getWorkspaceInitials, formatModelLabel, saveExpandedWorkspaces } from './workspace-grouping';
+import { refreshActiveTabContent } from './sidebar-tabs';
 
 /** 未分类分组的固定 key */
 export const UNCATEGORIZED_WORKSPACE_KEY = '__uncategorized__';
+
+/** 活跃会话的时间窗口：updated_at 在最近 N 小时内 */
+export const RECENT_HOURS = 24;
+
+/** 判定会话是否属于「活跃」（最近 RECENT_HOURS 小时内有更新） */
+export function isRecentConversation(conv: Conversation, now = Date.now()): boolean {
+  // updated_at 后端为秒级（timestamp()），本地乐观气泡可能为毫秒；统一经 toMillis 归一化
+  return toMillis(conv.updated_at) >= now - RECENT_HOURS * 3600 * 1000;
+}
+
+/** 活跃会话列表：近 24 小时更新的会话，按最近更新降序 */
+export function getRecentConversations(now = Date.now()): Conversation[] {
+  return appState.conversations
+    .filter((c) => isRecentConversation(c, now))
+    .sort((a, b) => b.updated_at - a.updated_at);
+}
 
 export interface SidebarWorkspaceView {
   key: string;
@@ -74,9 +91,10 @@ export function renderConversationItemHtml(c: Conversation): string {
   `;
 }
 
-export function buildSidebarWorkspaceViews(): SidebarWorkspaceView[] {
-  const { workspaces, uncategorized } = groupConversationsByWorkspace();
-  const query = appState.sidebarSearchQuery.trim().toLowerCase();
+export function buildSidebarWorkspaceViews(
+  convs: Conversation[] = appState.conversations,
+): SidebarWorkspaceView[] {
+  const { workspaces, uncategorized } = groupConversationsByWorkspace(convs);
 
   const toView = (
     key: string,
@@ -85,12 +103,7 @@ export function buildSidebarWorkspaceViews(): SidebarWorkspaceView[] {
     convs: Conversation[],
     isUncategorized: boolean,
   ): SidebarWorkspaceView | null => {
-    // 目录名/路径命中时保留全部会话，否则只保留标题命中的会话
-    const workspaceHit =
-      !!query && (displayName.toLowerCase().includes(query) || path.toLowerCase().includes(query));
-    const matched = !query || workspaceHit
-      ? convs
-      : convs.filter((c) => c.title.toLowerCase().includes(query));
+    const matched = convs;
 
     if (matched.length === 0) return null;
 
@@ -212,37 +225,52 @@ export function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: bo
   `;
 }
 
-export function renderSidebarEmptyHtml(isSearching: boolean): string {
-  const icon = isSearching
-    ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>'
-    : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-
+function renderSidebarEmptyHtml(title: string, hint: string): string {
   return `
     <div class="sidebar-empty">
-      <span class="sidebar-empty-icon">${icon}</span>
-      <span class="sidebar-empty-title">${isSearching ? '没有匹配的会话' : '还没有会话'}</span>
-      <span class="sidebar-empty-hint">${isSearching ? '试试其他关键词，或清空搜索条件' : '点击上方「新建会话」选择工作目录开始'}</span>
+      <span class="sidebar-empty-icon" aria-hidden="true">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+      </span>
+      <span class="sidebar-empty-title">${escapeHtml(title)}</span>
+      <span class="sidebar-empty-hint">${escapeHtml(hint)}</span>
     </div>
   `;
 }
 
-export function renderConversationList(): string {
-  const isSearching = appState.sidebarSearchQuery.trim().length > 0;
-  const views = appState.conversations.length === 0 ? [] : buildSidebarWorkspaceViews();
+/** 活跃会话 tab：近 RECENT_HOURS 小时内更新的会话平铺展示（按最近更新降序） */
+export function renderActiveConversations(): string {
+  const recent = getRecentConversations();
+
+  if (recent.length === 0) {
+    appState.newConversationIds.clear();
+    return renderSidebarEmptyHtml('近一天没有新会话', '开始一段新对话后，会话会显示在这里');
+  }
+
+  const label = `<div class="sidebar-section-label"><span>活跃会话</span><span class="sidebar-section-label-count">${recent.length} 个会话</span></div>`;
+  const rows = recent.map((c) => renderConversationItemHtml(c)).join('');
+  appState.newConversationIds.clear();
+
+  return label + `<div class="active-conversations">${rows}</div>`;
+}
+
+/** 归档会话 tab：超过 RECENT_HOURS 未更新的会话按工作区分组展示 */
+export function renderArchivedConversationList(): string {
+  const now = Date.now();
+  const archived = appState.conversations.filter((c) => !isRecentConversation(c, now));
+  const views = archived.length === 0 ? [] : buildSidebarWorkspaceViews(archived);
 
   if (views.length === 0) {
     appState.newConversationIds.clear();
-    return renderSidebarEmptyHtml(isSearching);
+    if (appState.conversations.length === 0) {
+      return renderSidebarEmptyHtml('还没有会话', '点击上方「新建会话」选择工作目录开始');
+    }
+    return renderSidebarEmptyHtml('暂无归档会话', '近一天的会话在「活跃会话」tab');
   }
 
-  const totalConversations = views.reduce((sum, ws) => sum + ws.conversations.length, 0);
-  const label = isSearching
-    ? `<div class="sidebar-section-label"><span>搜索结果</span><span class="sidebar-section-label-count">${totalConversations} 个会话</span></div>`
-    : `<div class="sidebar-section-label"><span>工作区</span><span class="sidebar-section-label-count">${views.length} 个项目</span></div>`;
+  const label = `<div class="sidebar-section-label"><span>归档会话</span><span class="sidebar-section-label-count">${views.length} 个项目</span></div>`;
 
-  // 搜索时强制展开所有命中的卡片，方便直接定位会话
   const cards = views
-    .map((ws) => renderWorkspaceCardHtml(ws, isSearching || appState.expandedWorkspaces.has(ws.key)))
+    .map((ws) => renderWorkspaceCardHtml(ws, appState.expandedWorkspaces.has(ws.key)))
     .join('');
 
   // 淡入动画只播放一次
@@ -251,11 +279,9 @@ export function renderConversationList(): string {
   return label + cards;
 }
 
-/** 局部重渲染侧边栏会话列表 */
+/** 局部重渲染侧边栏当前 tab 的内容（工作区 tab 即会话列表；守卫在 refreshActiveTabContent） */
 export function refreshConversationListDom(): void {
-  if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive || appState.isKiroViewActive) return;
-  const list = document.querySelector('#conversation-list');
-  if (list) list.innerHTML = renderConversationList();
+  refreshActiveTabContent();
 }
 
 /** 展开 / 收起工作区卡片（带 200ms 高度过渡） */

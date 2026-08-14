@@ -105,8 +105,6 @@
   --sidebar-badge-bg: rgba(255, 255, 255, 0.07);
   --sidebar-badge-text: #a6adc8;
   --sidebar-divider: rgba(255, 255, 255, 0.06);
-  --sidebar-search-bg: #11111b;
-  --sidebar-search-border: rgba(255, 255, 255, 0.07);
   --sidebar-avatar-lightness: 62%;
   --sidebar-avatar-text-lightness: 16%;
 }
@@ -201,8 +199,6 @@
   --sidebar-badge-bg: #f1f5f9;
   --sidebar-badge-text: #64748b;
   --sidebar-divider: rgba(15, 23, 42, 0.07);
-  --sidebar-search-bg: #ffffff;
-  --sidebar-search-border: rgba(15, 23, 42, 0.1);
   --sidebar-avatar-lightness: 52%;
   --sidebar-avatar-text-lightness: 100%;
 }

@@ -10,6 +10,7 @@ import {
 } from './conversations/normalize';
 import {
   handleMessageChunk,
+  handleSessionError,
   purgeTerminalTools,
   reconcileActiveToolsWithHistory,
   commitStreamingAssistantToConversation,
@@ -18,6 +19,7 @@ import {
 } from './chat/streaming';
 import { showConfirmDialog } from '../ui/confirm-dialog';
 import { appState } from '../state';
+import { resetSidebarTabState } from './sidebar/sidebar-tabs';
 import type { Message, MessageChunkPayload } from '../types';
 
 function message(id: string, role: Message['role'], content: string): Message {
@@ -192,6 +194,50 @@ describe('cross-session conversation identity', () => {
     expect(appState.conversations.length).toBe(before);
     const entry = appState.conversations.find((c) => c.id === 'c1');
     expect(entry?.messages).toHaveLength(2);
+  });
+});
+
+describe('新建会话后侧边栏刷新', () => {
+  beforeEach(() => {
+    // 提供 #conversation-list 供 refreshActiveTabContent 落盘；无 .main-content，
+    // ensureChatViewVisible 提前返回 false，避免触发 shellApi.render()
+    document.body.innerHTML = '<div id="conversation-list"></div>';
+    resetSessionState();
+    resetSidebarTabState();
+    appState.conversations = [];
+    appState.newConversationIds.clear();
+  });
+
+  it('session_created chunk 首落盘新会话时重建侧边栏，新会话立即出现', () => {
+    appState.pendingUserMessage = 'hello';
+    appState.pendingUserMessageConvId = null;
+
+    handleMessageChunk(chunk('conv-new', 'session_created', '/proj'));
+
+    expect(appState.conversations.some((c) => c.id === 'conv-new')).toBe(true);
+    const listHtml = document.querySelector('#conversation-list')!.innerHTML;
+    expect(listHtml).toContain('conv-new');
+    expect(listHtml).toContain('New Chat');
+  });
+
+  it('既有会话重复收到 session_created 不新增、不重建侧边栏', () => {
+    handleMessageChunk(chunk('conv-dup', 'session_created', '/proj'));
+    const htmlAfterFirst = document.querySelector('#conversation-list')!.innerHTML;
+    expect(htmlAfterFirst).toContain('conv-dup');
+
+    handleMessageChunk(chunk('conv-dup', 'session_created', '/proj'));
+
+    expect(appState.conversations.filter((c) => c.id === 'conv-dup')).toHaveLength(1);
+    expect(document.querySelector('#conversation-list')!.innerHTML).toBe(htmlAfterFirst);
+  });
+
+  it('会话创建即失败（session-error 无 session_created）也刷新侧边栏', () => {
+    appState.activeConversationId = 'conv-err';
+
+    handleSessionError({ conversationId: 'conv-err', error: 'shell failed' });
+
+    expect(appState.conversations.some((c) => c.id === 'conv-err')).toBe(true);
+    expect(document.querySelector('#conversation-list')!.innerHTML).toContain('conv-err');
   });
 });
 

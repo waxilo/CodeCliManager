@@ -195,36 +195,42 @@ export function renderInputComposerHtml(): string {
         ></textarea>
         <div id="file-suggestions" class="file-suggestions" style="display:none"></div>
         <div class="input-composer-toolbar">
-          <div class="input-composer-toolbar-start">
-            <button
-              id="btn-import"
-              class="toolbar-icon-btn import-btn"
-              type="button"
-              title="导入外部文件 / 文件夹"
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-                <polyline points="17 8 12 3 7 8"/>
-                <line x1="12" y1="3" x2="12" y2="15"/>
-              </svg>
-            </button>
-          </div>
+          <div class="input-composer-toolbar-start"><!-- 撑开剩余空间，把状态条与发送按钮推到右侧 --></div>
           <div class="input-composer-toolbar-end">
-            ${renderChatModelPickerHtml()}
+            <div class="composer-status-row" id="composer-status-row" hidden>
+              <span class="composer-status-dot" aria-hidden="true"></span>
+              <span class="composer-status-text" id="composer-status-text" role="status"></span>
+              <span class="composer-status-elapsed" id="composer-status-elapsed"></span>
+            </div>
             ${renderSendButtonHtml()}
           </div>
         </div>
       </div>
       <div class="composer-below-row">
-        <div class="permission-mode-bar" role="radiogroup" aria-label="工具权限模式">
-          <label class="permission-mode-chip${mode === 'ask' ? ' is-selected' : ''}" title="同工具类型首次询问，之后本会话自动放行">
-            <input type="radio" name="permission-mode" value="ask"${mode === 'ask' ? ' checked' : ''} />
-            <span>每次询问</span>
-          </label>
-          <label class="permission-mode-chip${mode === 'silent' ? ' is-selected' : ''}" title="自动允许工具请求，不再询问">
-            <input type="radio" name="permission-mode" value="silent"${mode === 'silent' ? ' checked' : ''} />
-            <span>静默授权</span>
-          </label>
+        <div class="composer-below-left">
+          <button
+            id="btn-import"
+            class="toolbar-icon-btn import-btn"
+            type="button"
+            title="导入外部文件 / 文件夹"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </button>
+          <div class="permission-mode-bar" role="radiogroup" aria-label="工具权限模式">
+            <label class="permission-mode-chip${mode === 'ask' ? ' is-selected' : ''}" title="同工具类型首次询问，之后本会话自动放行">
+              <input type="radio" name="permission-mode" value="ask"${mode === 'ask' ? ' checked' : ''} />
+              <span>每次询问</span>
+            </label>
+            <label class="permission-mode-chip${mode === 'silent' ? ' is-selected' : ''}" title="自动允许工具请求，不再询问">
+              <input type="radio" name="permission-mode" value="silent"${mode === 'silent' ? ' checked' : ''} />
+              <span>静默授权</span>
+            </label>
+          </div>
+          ${renderChatModelPickerHtml()}
         </div>
         <div class="composer-usage-bar" id="composer-usage-bar">
           ${renderCostIndicatorHtml()}

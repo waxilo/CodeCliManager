@@ -93,6 +93,10 @@ export interface ActiveToolState {
   description?: string;
   /** 子代理 Task：进度汇总（system/task_notification 下发） */
   progress?: SubagentProgress;
+  /** 子代理：完成通知摘要（<task-notification> summary，history 解析合并） */
+  summary?: string;
+  /** 子代理：完整报告（<task-notification> result，history 解析合并） */
+  report?: string;
 }
 
 /** TodoList 清单项（TodoWrite 协议：整表替换） */

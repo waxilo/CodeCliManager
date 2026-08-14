@@ -6,6 +6,7 @@ import {
   getActiveMessageWindowSize,
   incrementActiveMessageWindow,
   renderChatAreaHtml,
+  buildDisplayMessages,
 } from './render-chat';
 import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
 import type { Conversation, Message } from '../../types';
@@ -133,3 +134,48 @@ describe('renderChatAreaHtml shellOnly（全量渲染聊天壳不序列化消息
   });
 });
 
+describe('buildDisplayMessages：主视图过滤子代理（Task）卡，保留 Agent 卡', () => {
+  function toolUse(id: string, name: string, input: Record<string, unknown>): Message {
+    return {
+      id: `tu-${id}`,
+      role: 'tool_use',
+      content: JSON.stringify({ name, tool_name: name, input, id }),
+      timestamp: 1,
+    };
+  }
+
+  function toolResult(toolUseId: string, content: string): Message {
+    return {
+      id: `tr-${toolUseId}`,
+      role: 'tool_result',
+      content: JSON.stringify({ content, tool_use_id: toolUseId }),
+      timestamp: 1,
+    };
+  }
+
+  it('历史 Task tool_use 与其 tool_result 一并移除，Agent tool_use 保留', () => {
+    const msgs: Message[] = [
+      { id: 'u1', role: 'user', content: '跑子代理', timestamp: 1 },
+      toolUse('call_task_1', 'Task', { description: '子代理任务' }),
+      toolResult('call_task_1', 'task done'),
+      toolUse('call_agent_1', 'Agent', { description: 'Agent 审查' }),
+      toolResult('call_agent_1', 'agent result'),
+      { id: 'a1', role: 'assistant', content: '完成', timestamp: 1 },
+    ];
+    const out = buildDisplayMessages({ id: 'c1', messages: msgs } as never);
+    expect(out.map((m) => m.role)).toEqual(['user', 'tool_use', 'tool_result', 'assistant']);
+    // 保留的是 Agent 的 tool_use + tool_result，Task 的已移除
+    expect(JSON.stringify(out)).toContain('call_agent_1');
+    expect(JSON.stringify(out)).not.toContain('call_task_1');
+    expect(JSON.stringify(out)).not.toContain('task done');
+  });
+
+  it('无对应 tool_result 的孤立 Task tool_use 也移除', () => {
+    const msgs: Message[] = [
+      toolUse('call_task_x', 'Task', { description: 'x' }),
+      { id: 'a1', role: 'assistant', content: 'ok', timestamp: 1 },
+    ];
+    const out = buildDisplayMessages({ id: 'c1', messages: msgs } as never);
+    expect(out.map((m) => m.role)).toEqual(['assistant']);
+  });
+});

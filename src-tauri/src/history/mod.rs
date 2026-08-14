@@ -22,6 +22,31 @@ pub(crate) struct Message {
     pub(crate) timestamp: i64,
 }
 
+/// 子代理完成通知（transcript 里 <task-notification> 用户行）。
+/// 解析后合并进对应 Agent/Task tool_use 消息，供前端「子代理」tab 展示报告。
+/// 仅手工构造 + 序列化，无反序列化需求，故不派生 Deserialize。
+#[derive(Debug, Serialize, Clone, Default)]
+pub(crate) struct TaskNotificationData {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) tool_use_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) summary: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) result: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) total_tokens: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) tool_uses: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub(crate) duration_ms: u64,
+}
+
+fn is_zero(v: &u64) -> bool {
+    *v == 0
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct Conversation {
     pub(crate) id: String,
@@ -535,6 +560,8 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     let mut last_model: Option<String> = None;
     // 主链上已保留的 Task tool_use id，用于配对保留对应 tool_result
     let mut visible_task_tool_ids: HashSet<String> = HashSet::new();
+    // 子代理完成通知：tool_use_id -> 通知（循环结束后合并进对应 tool_use 消息）
+    let mut task_notifications: HashMap<String, TaskNotificationData> = HashMap::new();
     // 历史聚合用量：逐条 message.usage 累加 + result 行 total_cost_usd 累加
     let mut usage_agg = SessionUsage::default();
 
@@ -678,6 +705,16 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
 
         for msg in expanded {
             let trimmed = msg.content.trim();
+            // 子代理完成通知：CLI 以 user 角色写进 transcript 的 <task-notification>，
+            // 是内部进度回执而非用户消息，不进消息流；解析结果合并进对应 tool_use
+            if trimmed.starts_with("<task-notification>") {
+                if let Some(notif) = parse_task_notification(trimmed) {
+                    if !notif.tool_use_id.is_empty() {
+                        task_notifications.insert(notif.tool_use_id.clone(), notif);
+                    }
+                }
+                continue;
+            }
             if trimmed.starts_with("<system-reminder>")
                 || trimmed.starts_with("<local-command-caveat>")
                 || trimmed.starts_with("<command-name>")
@@ -686,6 +723,27 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
                 continue;
             }
             messages.push(msg);
+        }
+    }
+
+    // 把 <task-notification>（状态 / 摘要 / 完整报告）合并进对应 Agent/Task tool_use 消息，
+    // 前端「子代理」tab 与工具卡据此展示执行结果与报告
+    if !task_notifications.is_empty() {
+        for msg in messages.iter_mut() {
+            if msg.role != "tool_use" {
+                continue;
+            }
+            let Ok(mut payload) = serde_json::from_str::<serde_json::Value>(&msg.content) else {
+                continue;
+            };
+            let Some(id) = payload.get("id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            if let Some(notif) = task_notifications.get(id) {
+                payload["taskNotification"] =
+                    serde_json::to_value(notif).unwrap_or(serde_json::Value::Null);
+                msg.content = payload.to_string();
+            }
         }
     }
 
@@ -739,12 +797,59 @@ pub(crate) fn decode_project_dir_from_jsonl_path(path: &Path) -> Option<String> 
     (encoded == "-").then(|| "/".to_string())
 }
 
-/// 主链可见工具白名单：AskUserQuestion（互动卡片）+ Task（Subagent 状态）
+/// 主链可见工具白名单：AskUserQuestion（互动卡片）+ Agent / Task（Subagent 状态）
 /// + TodoWrite / TaskCreate / TaskUpdate（TodoList 清单与任务管理卡）
-const VISIBLE_TOOL_NAMES: &[&str] = &["AskUserQuestion", "Task", "TodoWrite", "TaskCreate", "TaskUpdate"];
+const VISIBLE_TOOL_NAMES: &[&str] = &["AskUserQuestion", "Agent", "Task", "TodoWrite", "TaskCreate", "TaskUpdate"];
 
 fn is_visible_tool_name(name: &str) -> bool {
     VISIBLE_TOOL_NAMES.contains(&name)
+}
+
+/// 提取 `<tag>...</tag>` 块内容（CLI 的 task-notification 是简单自闭合 tag 结构）
+fn extract_tag<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(&text[start..end])
+}
+
+/// 解析子代理完成通知：status/summary/result/usage，按 tool-use-id 与 Agent tool_use 关联
+fn parse_task_notification(content: &str) -> Option<TaskNotificationData> {
+    let mut data = TaskNotificationData {
+        tool_use_id: extract_tag(content, "tool-use-id")
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        status: extract_tag(content, "status")
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        summary: extract_tag(content, "summary")
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        result: extract_tag(content, "result")
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        ..Default::default()
+    };
+    if let Some(usage) = extract_tag(content, "usage") {
+        let parse = |tag: &str| {
+            extract_tag(usage, tag)
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        data.total_tokens = parse("subagent_tokens");
+        data.tool_uses = parse("tool_uses");
+        data.duration_ms = parse("duration_ms");
+    }
+    if data.tool_use_id.is_empty() && data.status.is_empty() {
+        None
+    } else {
+        Some(data)
+    }
 }
 
 /// 将 content（字符串或数组）展开为多条消息，保留 thinking/text 穿插顺序
@@ -1440,6 +1545,53 @@ mod tests {
         assert_eq!(content, vec!["first question", "first answer", "continued answer"]);
         assert_eq!(conversation.messages[0].id, "msg_root_0");
         assert_eq!(conversation.messages[2].id, "msg_a2_0");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn task_notification_user_message_is_filtered_from_history() {
+        // CLI 把子代理完成通知（<task-notification>，含完整 <result>）以 user 角色写进
+        // transcript，属内部进度回执，不应作为用户消息出现在会话里。
+        let contents = concat!(
+            r#"{"sessionId":"tn","uuid":"q","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"问题"}}"#,
+            "\n",
+            r#"{"sessionId":"tn","uuid":"a1","parentUuid":"q","type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":"答复"}}"#,
+            "\n",
+            r#"{"sessionId":"tn","uuid":"tn1","parentUuid":"a1","type":"user","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"<task-notification>\n<task-id>abc</task-id>\n<tool-use-id>call_1</tool-use-id>\n<status>completed</status>\n<summary>Agent \"审查\" finished</summary>\n<result>report body</result>\n</task-notification>"}}"#,
+        );
+        let path = temp_jsonl("task-notification.jsonl", contents);
+        let conversation = parse_claude_session(&path).unwrap();
+        let content: Vec<&str> = conversation.messages.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(content, vec!["问题", "答复"]);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn task_notification_merges_report_into_agent_tool_use() {
+        // Agent tool_use 保留（可展示子代理），<task-notification> 不进消息流，
+        // 但 status/summary/result/usage 合并进对应 tool_use，供「子代理」tab 展示报告。
+        let contents = concat!(
+            r#"{"sessionId":"tnm","uuid":"q","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"审查代码"}}"#,
+            "\n",
+            r#"{"sessionId":"tnm","uuid":"a1","parentUuid":"q","type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"call_04_1","name":"Agent","input":{"description":"审查 UI"}}]}}"#,
+            "\n",
+            r#"{"sessionId":"tnm","uuid":"tn","parentUuid":"a1","type":"user","timestamp":"2026-01-01T00:00:02Z","message":{"role":"user","content":"<task-notification>\n<task-id>abc</task-id>\n<tool-use-id>call_04_1</tool-use-id>\n<status>completed</status>\n<summary>Agent \"审查 UI\" finished</summary>\n<result>报告正文</result>\n<usage><subagent_tokens>100</subagent_tokens><tool_uses>3</tool_uses><duration_ms>5000</duration_ms></usage>\n</task-notification>"}}"#,
+        );
+        let path = temp_jsonl("task-notification-merge.jsonl", contents);
+        let conversation = parse_claude_session(&path).unwrap();
+        assert_eq!(conversation.messages.len(), 2);
+        assert_eq!(conversation.messages[0].content, "审查代码");
+        let tool_msg = &conversation.messages[1];
+        assert_eq!(tool_msg.role, "tool_use");
+        let payload: serde_json::Value = serde_json::from_str(&tool_msg.content).unwrap();
+        assert_eq!(payload["name"], "Agent");
+        let tn = &payload["taskNotification"];
+        assert_eq!(tn["status"], "completed");
+        assert_eq!(tn["result"], "报告正文");
+        assert_eq!(tn["summary"], "Agent \"审查 UI\" finished");
+        assert_eq!(tn["total_tokens"], 100);
+        assert_eq!(tn["tool_uses"], 3);
+        assert_eq!(tn["duration_ms"], 5000);
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }
