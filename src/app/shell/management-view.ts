@@ -26,10 +26,11 @@ import { syncSubagentProgressUI } from '../../features/chat/subagent-progress';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { refreshStreamingUI } from '../../features/chat/streaming';
+import { syncActiveToolCardsInMessageList } from '../../features/chat/render-chat';
 import {
   resetChatRenderKey,
-  getLastChatRenderKey,
-  getCurrentChatRenderKey,
+  getLastCommittedChatRenderKey,
+  getCurrentCommittedChatRenderKey,
 } from '../../features/chat/refresh';
 
 export type ManagementViewKind = 'api-config' | 'settings' | 'mcp';
@@ -39,8 +40,11 @@ interface StashedMainDom {
   mainContent: HTMLElement | null;
   subagentProgress: HTMLElement | null;
   statusBar: HTMLElement | null;
-  /** stash 时主视图聊天区 DOM 所对应的内容指纹：退出时据此判断内容是否变化 */
-  chatRenderKeyAtStash: string;
+  /**
+   * stash 时主视图聊天区 DOM 对应的「已提交内容」指纹（不含工具签名）：
+   * 退出时据此判断是否需要整列表重建。工具转态由增量恢复，不触发重建。
+   */
+  committedChatRenderKeyAtStash: string;
 }
 
 interface StashedMgmtDom {
@@ -233,8 +237,8 @@ export function enterManagementView(kind: ManagementViewKind): void {
     mainContent,
     subagentProgress,
     statusBar,
-    // 摘下时 DOM 所反映的内容指纹（最近一次 refreshChatContent 写入的 key）
-    chatRenderKeyAtStash: getLastChatRenderKey(),
+    // 摘下时 DOM 所反映的「已提交内容」指纹（最近一次 refreshChatContent 写入）
+    committedChatRenderKeyAtStash: getLastCommittedChatRenderKey(),
   };
   sidebar?.remove();
   mainContent?.remove();
@@ -277,7 +281,7 @@ export function exitManagementView(): boolean {
   }
 
   const resizer = appContainer.querySelector('.sidebar-resizer');
-  const chatKeyAtStash = stashedMainDom.chatRenderKeyAtStash;
+  const committedChatKeyAtStash = stashedMainDom.committedChatRenderKeyAtStash;
 
   // 摘走当前管理壳并缓存（节点保留全部监听，二次进入直接复用）
   const mgmtSidebar = appContainer.querySelector<HTMLElement>('.sidebar');
@@ -304,9 +308,10 @@ export function exitManagementView(): boolean {
   appContainer.classList.remove('is-api-config', 'is-mcp');
   stashedMainDom = null;
 
-  // 管理页期间会话可能推进。只有内容指纹真变了才强制重建聊天区——
-  // 未变时主视图 DOM 原样挂回即是最新，跳过整列表 innerHTML 重建（Win 卡顿主因）。
-  const contentChanged = getCurrentChatRenderKey() !== chatKeyAtStash;
+  // 管理页期间会话可能推进。只有「已提交内容」指纹真变了才强制重建聊天区——
+  // 工具转态 / 流式块推进不算：未变时主视图 DOM 原样挂回 + 增量恢复流式块即可，
+  // 跳过整列表 innerHTML 重建（运行中会话每次退出都重建，是 Win 卡顿主因）。
+  const contentChanged = getCurrentCommittedChatRenderKey() !== committedChatKeyAtStash;
 
   syncSubagentProgressUI();
   remountActiveInteractionPanel();
@@ -319,12 +324,14 @@ export function exitManagementView(): boolean {
     scheduleUiRefresh({ chat: true, sidebar: true });
   } else {
     // 内容未变：保留挂回的 DOM，不重建聊天区。
-    // 仅当会话仍在流式时增量恢复流式块（离开期间可能持续推进）。
+    // 仅当会话仍在流式时增量恢复流式块（离开期间可能持续推进）；
+    // 进行中工具卡片按活状态增量同步（运行中 → 已完成），不触发整列表重建。
     scheduleUiRefresh({ sidebar: true });
     const sid = appState.activeConversationId;
     if (sid && appState.streamingBySession.has(sid)) {
       refreshStreamingUI(sid);
     }
+    syncActiveToolCardsInMessageList();
   }
   return true;
 }

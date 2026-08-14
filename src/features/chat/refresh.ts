@@ -103,6 +103,12 @@ export function setupMessageListPostRender(container: HTMLElement): void {
 
 /** 最近一次聊天重建时的内容指纹；连点同一会话 / 重复事件时用于跳过昂贵的 innerHTML 重建 */
 let lastChatRenderKey = '';
+/**
+ * 最近一次重建时「已提交内容」的指纹（不含流式瞬态的工具签名）。
+ * 运行中会话每次工具转态都会变 full key，但已提交消息没变——
+ * 管理页退出用它判断「是否真的需要整列表重建」，避免流式中每次进出都强制重建。
+ */
+let lastCommittedChatRenderKey = '';
 
 /**
  * 强制下次 refreshChatContent 重建聊天区（忽略指纹跳过）。
@@ -111,6 +117,7 @@ let lastChatRenderKey = '';
  */
 export function resetChatRenderKey(): void {
   lastChatRenderKey = '';
+  lastCommittedChatRenderKey = '';
 }
 
 /** 最近一次 refreshChatContent 计算并写入 DOM 的内容指纹（'' = 尚未渲染 / 已被 reset） */
@@ -121,6 +128,16 @@ export function getLastChatRenderKey(): string {
 /** 当前 appState 对应的聊天内容指纹（与 refreshChatContent 内部使用的 key 一致） */
 export function getCurrentChatRenderKey(): string {
   return chatRenderKey(getActiveConversation());
+}
+
+/** 最近一次 refreshChatContent 写入的「已提交内容」指纹（不含工具签名） */
+export function getLastCommittedChatRenderKey(): string {
+  return lastCommittedChatRenderKey;
+}
+
+/** 当前 appState 对应的「已提交内容」指纹（不含工具签名） */
+export function getCurrentCommittedChatRenderKey(): string {
+  return committedChatRenderKey(getActiveConversation());
 }
 
 /** 进行中工具的可见态签名：状态 / 是否错误 / 结果长度变化时也必须重建（否则卡片停留旧状态）。
@@ -168,6 +185,30 @@ function chatRenderKey(conversation: Conversation | undefined): string {
     appState.transientSessionError ? 'e' : '',
     pendingAskSignature(sid),
     activeToolsSignature(sid),
+  ].join('|');
+}
+
+/**
+ * 「已提交内容」指纹：比 chatRenderKey 少 activeToolsSignature。
+ * 工具签名在运行中会随 tool_use_start/end/result/task_progress 频繁变化，
+ * 但工具卡片是「已提交消息」里的内容，由下次落盘重建 / 增量面板刷新恢复——
+ * 管理页退出若按 full key 门控，运行中会话每次进出都会强制整列表 innerHTML 重建（Win 卡顿）。
+ */
+function committedChatRenderKey(conversation: Conversation | undefined): string {
+  const msgs = conversation?.messages ?? [];
+  const last = msgs[msgs.length - 1];
+  return [
+    appState.activeConversationId || '',
+    appState.activeConversationSourcePath || '',
+    conversation?.updated_at ?? '',
+    msgs.length,
+    last?.id ?? '',
+    last?.timestamp ?? '',
+    getActiveMessageWindowSize(),
+    appState.runningSessions.has(appState.activeConversationId) ? 'r' : '',
+    appState.pendingUserMessage ? 'p' : '',
+    appState.transientSessionError ? 'e' : '',
+    pendingAskSignature(appState.activeConversationId || 'pending'),
   ].join('|');
 }
 
@@ -236,7 +277,18 @@ export function refreshChatContent(): boolean {
     updateSendButtonState();
     return false;
   }
+  const committedKey = committedChatRenderKey(conversation);
+  const committedChanged = committedKey !== lastCommittedChatRenderKey;
   lastChatRenderKey = key;
+  lastCommittedChatRenderKey = committedKey;
+
+  // 管理页停留期间消息列表被摘下：仅工具/流式转态（已提交内容未变）时，
+  // 渲染结果无处落盘纯属浪费，直接跳过整条渲染管线；已提交内容变化时仍渲染入缓存，
+  // 让退出 contentChanged 路径走缓存命中。
+  if (!document.querySelector('#message-list') && !committedChanged) {
+    updateSendButtonState();
+    return false;
+  }
 
   // 按会话渲染缓存命中：回切 A 时直接复用上次渲染的 HTML 字符串，跳过整条渲染管线
   const cacheKey = conversationInstanceKey(

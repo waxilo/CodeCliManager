@@ -22,12 +22,13 @@ vi.mock('../../features/mcp', async (importOriginal) => {
 });
 
 // 控制内容指纹与指纹重置调用，验证退出时的「内容未变跳过重建 / 内容变化强制重建」
+// 门控用的是「已提交内容」指纹（不含工具签名）：工具转态不应触发整列表重建。
 vi.mock('../../features/chat/refresh', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../features/chat/refresh')>();
   return {
     ...actual,
-    getLastChatRenderKey: vi.fn(() => 'K'),
-    getCurrentChatRenderKey: vi.fn(() => 'K'),
+    getLastCommittedChatRenderKey: vi.fn(() => 'K'),
+    getCurrentCommittedChatRenderKey: vi.fn(() => 'K'),
     resetChatRenderKey: vi.fn(),
   };
 });
@@ -254,23 +255,38 @@ describe('management-view 增量进出', () => {
     expect(document.querySelector('.main-content')).toBe(mainContent);
   });
 
-  it('内容未变时退出不重置聊天指纹（保留挂回 DOM，跳过整列表重建）', () => {
+  it('已提交内容未变时退出不重置聊天指纹（保留挂回 DOM，跳过整列表重建）', () => {
     buildMainShell();
-    vi.mocked(refresh.getLastChatRenderKey).mockReturnValue('K');
-    vi.mocked(refresh.getCurrentChatRenderKey).mockReturnValue('K');
+    vi.mocked(refresh.getLastCommittedChatRenderKey).mockReturnValue('K');
+    vi.mocked(refresh.getCurrentCommittedChatRenderKey).mockReturnValue('K');
 
     enterManagementView('settings');
     expect(exitManagementView()).toBe(true);
     expect(refresh.resetChatRenderKey).not.toHaveBeenCalled();
   });
 
-  it('内容变化时退出重置聊天指纹（强制重建到最新内容）', () => {
+  it('已提交内容变化时退出重置聊天指纹（强制重建到最新内容）', () => {
     buildMainShell();
-    vi.mocked(refresh.getLastChatRenderKey).mockReturnValue('K');
-    vi.mocked(refresh.getCurrentChatRenderKey).mockReturnValue('K2');
+    vi.mocked(refresh.getLastCommittedChatRenderKey).mockReturnValue('K');
+    vi.mocked(refresh.getCurrentCommittedChatRenderKey).mockReturnValue('K2');
 
     enterManagementView('settings');
     expect(exitManagementView()).toBe(true);
     expect(refresh.resetChatRenderKey).toHaveBeenCalledTimes(1);
+  });
+
+  it('运行中会话仅工具转态（提交内容指纹未变）时退出不重建聊天区', () => {
+    // 模拟：管理页停留期间工具签名变化，但「已提交内容」指纹保持 K——
+    // 门控只看提交内容，工具卡片由增量恢复/下次落盘重建，避免每次退出强制整列表重建。
+    buildMainShell();
+    vi.mocked(refresh.getLastCommittedChatRenderKey).mockReturnValue('K');
+    vi.mocked(refresh.getCurrentCommittedChatRenderKey).mockReturnValue('K');
+
+    appState.activeConversationId = 'conv-1';
+    appState.runningSessions.add('conv-1');
+
+    enterManagementView('settings');
+    expect(exitManagementView()).toBe(true);
+    expect(refresh.resetChatRenderKey).not.toHaveBeenCalled();
   });
 });

@@ -533,7 +533,7 @@ export function renderToolMessageHtml(msg: Message): string {
     const secondaryHtml = secondary ? `<span class="tool-secondary">${escapeHtml(secondary)}</span>` : '';
 
     const toolContent = `
-      <div class="tool-card" style="border-left-color: ${colorScheme.border}">
+      <div class="tool-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" style="border-left-color: ${colorScheme.border}">
         <div class="tool-card-header">
           <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
           <span class="tool-label">${escapeHtml(config.label)}</span>
@@ -574,7 +574,7 @@ export function renderToolMessageHtml(msg: Message): string {
 
   const expanded = isRunning ? ' open' : '';
   const toolContent = `
-    <div class="tool-card" style="border-left-color: ${colorScheme.border}">
+    <div class="tool-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" style="border-left-color: ${colorScheme.border}">
       <details class="tool-collapsible"${expanded}>
         <summary class="tool-card-header tool-collapsible-summary">
           <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>

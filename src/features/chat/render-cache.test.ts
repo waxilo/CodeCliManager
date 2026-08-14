@@ -1,7 +1,11 @@
 import { describe, expect, it, beforeEach } from 'vitest';
-import { renderCacheKey } from './refresh';
+import {
+  renderCacheKey,
+  getCurrentChatRenderKey,
+  getCurrentCommittedChatRenderKey,
+} from './refresh';
 import { appState } from '../../state';
-import type { Conversation } from '../../types';
+import type { Conversation, ActiveToolState } from '../../types';
 import { conversationInstanceKey } from '../conversations/normalize';
 
 function conv(id: string, updatedAt: number): Conversation {
@@ -52,6 +56,42 @@ describe('renderCacheKey（按会话渲染缓存键）', () => {
   it('同一状态下 key 稳定', () => {
     const c = conv('c1', 100);
     expect(renderCacheKey(c)).toBe(renderCacheKey(c));
+  });
+
+  it('工具转态改变 full key 但不改变「已提交内容」key（管理页退出不因工具转态重建）', () => {
+    appState.conversations = [conv('c1', 100)];
+    appState.activeConversationId = 'c1';
+    appState.activeConversationSourcePath = null;
+
+    const fullBefore = getCurrentChatRenderKey();
+    const committedBefore = getCurrentCommittedChatRenderKey();
+
+    // 模拟运行中会话工具转态：tool_result 到达，工具从 running → done
+    const task: ActiveToolState = {
+      toolUseId: 't1',
+      toolName: 'Task',
+      input: {},
+      status: 'done',
+      isError: false,
+      toolResult: 'ok',
+      startedAt: 1_000,
+    };
+    appState.activeToolsBySession.set('c1', new Map([['t1', task]]));
+
+    // full key 变（activeToolsSignature 进入）……
+    expect(getCurrentChatRenderKey()).not.toBe(fullBefore);
+    // ……但已提交内容 key 不变（工具签名被排除）
+    expect(getCurrentCommittedChatRenderKey()).toBe(committedBefore);
+
+    // 已提交内容变化（新消息落盘）才让 committed key 变化
+    const active = appState.conversations[0];
+    active.messages.push({ id: 'm2', role: 'assistant', content: 'x', timestamp: 2 });
+    expect(getCurrentCommittedChatRenderKey()).not.toBe(committedBefore);
+
+    appState.conversations = [];
+    appState.activeConversationId = '';
+    appState.activeConversationSourcePath = null;
+    appState.activeToolsBySession.clear();
   });
 
   it('消息窗口按会话独立记忆：切走再切回，c1 的扩展窗口仍保留', () => {

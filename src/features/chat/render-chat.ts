@@ -2,7 +2,8 @@ import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
 import type { Message, Conversation } from '../../types';
 import { escapeHtml } from '../../utils';
 import * as api from '../../api';
-import { renderMessageListHtml, TOOL_CONFIG_MAP, getDefaultToolConfig, extractToolUseId } from './render-messages';
+import { renderMessageListHtml, renderToolMessageHtml, TOOL_CONFIG_MAP, getDefaultToolConfig, extractToolUseId } from './render-messages';
+import { initCodeCopyButtons } from '../../markdown';
 import { getEffectiveProjectDir } from './session-context';
 import { renderCopyIconHtml, renderInputComposerHtml } from './input-composer';
 import { getActiveChatModelForRender } from './model-picker';
@@ -214,6 +215,63 @@ export function buildDisplayMessages(conversation: Conversation | undefined): Me
   }
 
   return dedupeAdjacentDuplicateMessages(messages);
+}
+
+/**
+ * 增量同步进行中工具卡片：管理页退出走「已提交内容未变」路径时，DOM 里的 pending 工具卡片
+ * 仍是 stash 时的旧状态（如运行中 → 已完成）。逐个按 data-tool-use-id 定位并重渲染，
+ * 只替换状态真正变化的卡片，避免整列表 innerHTML 重建（运行中会话每次退出的 Win 卡顿主因）。
+ */
+export function syncActiveToolCardsInMessageList(): void {
+  const messageList = document.querySelector<HTMLDivElement>('#message-list');
+  if (!messageList) return;
+  const sid = appState.activeConversationId || 'pending';
+  const tools =
+    appState.activeToolsBySession.get(sid) ||
+    (appState.activeConversationId
+      ? appState.activeToolsBySession.get('pending')
+      : undefined);
+  if (!tools || tools.size === 0) return;
+
+  for (const [toolUseId, tool] of tools) {
+    if (!toolUseId) continue;
+    const card = messageList.querySelector<HTMLElement>(
+      `.tool-card[data-tool-use-id="${toolUseId}"]`,
+    );
+    if (!card) continue;
+    const isRunningLive = tool.status === 'running';
+    const isRunningInDom = !!card.querySelector('.tool-status-running');
+    if (isRunningLive === isRunningInDom) continue;
+
+    const config = TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig();
+    const msg: Message = {
+      id: `pending-tool-${toolUseId}`,
+      role: 'tool',
+      content: JSON.stringify(tool.input || {}),
+      timestamp: Math.floor(tool.startedAt / 1000) || Math.floor(Date.now() / 1000),
+      toolData: {
+        toolName: tool.toolName,
+        toolInput: tool.input || {},
+        toolUseId,
+        toolResult: isRunningLive ? undefined : tool.toolResult ?? '',
+        isError: tool.isError,
+        displayMode: config.displayMode,
+        colorScheme: {
+          border: config.borderColor,
+          icon: config.iconColor,
+          primary: config.borderColor,
+        },
+      },
+    };
+    const parent = card.parentElement;
+    card.outerHTML = renderToolMessageHtml(msg);
+    const newCard = parent?.querySelector<HTMLElement>(
+      `.tool-card[data-tool-use-id="${toolUseId}"]`,
+    );
+    if (newCard) {
+      initCodeCopyButtons(newCard);
+    }
+  }
 }
 
 export function renderConversationMessagesInnerHtml(messages: Message[]): string {
