@@ -195,6 +195,22 @@ pub(crate) fn invalidate_session_cache(path: &Path) {
     }
 }
 
+/// 会话数据版本号：文件 mtime + overlay mtime 组合。
+/// 任一变化（新消息写入 / 标题覆盖 / 删除标记）都视为内容变更；
+/// 前端回传 known_version 时据此跳过未变更会话的整条克隆 + IPC 搬运。
+pub(crate) fn conversation_version(path: &Path) -> String {
+    format!(
+        "{}:{}",
+        file_mtime_secs(path),
+        file_mtime_secs(&get_overlay_path())
+    )
+}
+
+/// 无会话文件的持久化状态兜底版本：以 state.json 的 mtime 为变更信号。
+pub(crate) fn persisted_state_version() -> String {
+    format!("p:{}", file_mtime_secs(&get_data_path().join("state.json")))
+}
+
 /// Claude JSONL 里工具回执也常写成 type=user / role=user，且 content 全是 tool_result。
 /// 这类行不能当作可撤回/可重试的「人类用户消息」。
 pub(crate) fn is_tool_result_only_user_message(message: &serde_json::Value) -> bool {

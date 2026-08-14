@@ -9,6 +9,8 @@ export function normalizeConversation(
     ...raw,
     project_dir: projectDir?.trim() ? projectDir.trim() : null,
     source_path: raw.source_path ?? raw.sourcePath ?? null,
+    // 摘要化后 get_conversations 不再携带 messages，缺省为空数组
+    messages: raw.messages ?? [],
   };
 }
 

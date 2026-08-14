@@ -1,24 +1,84 @@
-import { appState } from '../../state';
+import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
 import type { Message, Conversation } from '../../types';
 import { escapeHtml } from '../../utils';
 import * as api from '../../api';
-import { renderMessageListHtml, TOOL_CONFIG_MAP, getDefaultToolConfig, extractToolUseId, processToolMessages } from './render-messages';
+import { renderMessageListHtml, TOOL_CONFIG_MAP, getDefaultToolConfig, extractToolUseId } from './render-messages';
 import { getEffectiveProjectDir } from './session-context';
 import { renderCopyIconHtml, renderInputComposerHtml } from './input-composer';
 import { getActiveChatModelForRender } from './model-picker';
-import { dedupeAdjacentDuplicateMessages, getActiveConversation } from '../conversations/normalize';
+import { dedupeAdjacentDuplicateMessages, getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
 import { normalizeMessageForCompare } from '../files/index';
 
-function messagesHaveToolUseId(messages: Message[], toolUseId: string): boolean {
-  if (!toolUseId) return false;
-  const processed = processToolMessages(messages);
-  return processed.some((m) => {
-    if (m.toolData?.toolUseId === toolUseId) return true;
-    if (m.role === 'tool_use' || m.role === 'tool') {
-      return extractToolUseId(m.content) === toolUseId;
+/** 单遍收集历史中已存在的 tool_use_id（替代对每个进行中工具重跑 processToolMessages 的 O(T·N)） */
+function collectToolUseIds(messages: Message[]): Set<string> {
+  const ids = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role === 'tool_use' || msg.role === 'tool') {
+      const id = msg.toolData?.toolUseId || extractToolUseId(msg.content);
+      if (id) ids.add(id);
     }
-    return false;
-  });
+  }
+  return ids;
+}
+
+/** tail-N 消息窗口：只保留尾部 windowSize 条；窗口起点是 tool_result 时回退纳入其 tool_use，避免结果无来源 */
+export function splitMessageWindow(
+  messages: Message[],
+  windowSize: number,
+): { visible: Message[]; totalHidden: number } {
+  const size = Math.max(1, windowSize);
+  if (messages.length <= size) {
+    return { visible: messages, totalHidden: 0 };
+  }
+  let start = messages.length - size;
+  while (start > 0 && messages[start].role === 'tool_result') {
+    start -= 1;
+  }
+  return {
+    visible: messages.slice(start),
+    totalHidden: start,
+  };
+}
+
+function renderLoadEarlierButtonHtml(hidden: number): string {
+  return `
+    <button type="button" class="load-earlier-btn" data-load-earlier title="加载更早的消息">
+      <svg class="load-earlier-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 15 12 9 18 15"/></svg>
+      <span class="load-earlier-label">加载更早的 ${hidden} 条消息</span>
+    </button>
+  `;
+}
+
+/** 当前会话的消息窗口大小（「加载更早」按会话独立累计，切换会话不丢失） */
+export function getActiveMessageWindowSize(): number {
+  const winKey = conversationInstanceKey(
+    appState.activeConversationId || 'pending',
+    appState.activeConversationSourcePath,
+  );
+  return appState.messageWindowSizeByConversation.get(winKey) ?? MAX_VISIBLE_MESSAGES;
+}
+
+/** 确保当前会话有窗口记录（幂等），返回其窗口大小 */
+export function ensureMessageWindowForActiveConversation(): number {
+  const winKey = conversationInstanceKey(
+    appState.activeConversationId || 'pending',
+    appState.activeConversationSourcePath,
+  );
+  const existing = appState.messageWindowSizeByConversation.get(winKey);
+  if (existing) return existing;
+  appState.messageWindowSizeByConversation.set(winKey, MAX_VISIBLE_MESSAGES);
+  return MAX_VISIBLE_MESSAGES;
+}
+
+/** 点击「加载更早」：扩大当前会话的消息窗口并返回新值 */
+export function incrementActiveMessageWindow(step: number): number {
+  const winKey = conversationInstanceKey(
+    appState.activeConversationId || 'pending',
+    appState.activeConversationSourcePath,
+  );
+  const size = getActiveMessageWindowSize() + step;
+  appState.messageWindowSizeByConversation.set(winKey, size);
+  return size;
 }
 export function renderChatHeaderHtml(conversation: Conversation | undefined): string {
   const hasMessages = (conversation?.messages.length ?? 0) > 0;
@@ -126,8 +186,9 @@ export function buildDisplayMessages(conversation: Conversation | undefined): Me
       ? appState.activeToolsBySession.get('pending')
       : undefined);
   if (activeTools) {
+    const existingToolUseIds = collectToolUseIds(messages);
     for (const [toolUseId, tool] of activeTools) {
-      if (messagesHaveToolUseId(messages, toolUseId)) continue;
+      if (existingToolUseIds.has(toolUseId)) continue;
       const config = TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig();
       const isRunning = tool.status === 'running';
       messages.push({
@@ -156,8 +217,14 @@ export function buildDisplayMessages(conversation: Conversation | undefined): Me
 }
 
 export function renderConversationMessagesInnerHtml(messages: Message[]): string {
-  const messageHtml = renderMessageListHtml(messages);
-  if (messageHtml) return messageHtml;
+  // 确保当前会话有窗口记录（「加载更早」按会话独立累计）
+  ensureMessageWindowForActiveConversation();
+
+  // tail-N 窗口：只渲染尾部最多 MAX_VISIBLE_MESSAGES 条，顶部提供「加载更早」按钮
+  const { visible, totalHidden } = splitMessageWindow(messages, getActiveMessageWindowSize());
+  const loadEarlierHtml = totalHidden > 0 ? renderLoadEarlierButtonHtml(totalHidden) : '';
+  const messageHtml = renderMessageListHtml(visible);
+  if (loadEarlierHtml || messageHtml) return loadEarlierHtml + messageHtml;
 
   return `
     <div class="conversation-empty-state">

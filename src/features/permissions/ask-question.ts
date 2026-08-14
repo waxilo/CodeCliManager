@@ -1,5 +1,5 @@
 import { appState } from '../../state';
-import { shellApi } from '../../app/shell/api';
+import { scheduleUiRefresh, afterUiRefresh } from '../../ui';
 import type { PermissionRequestPayload, AskUserQuestionOption, AskUserQuestionItem, AskUserQuestionInput, QuestionDialogResult } from '../../types';
 import { syncMessageInputPlaceholder } from '../chat/session-context';
 export function parseAskUserQuestionInput(input: unknown): AskUserQuestionInput | null {
@@ -71,7 +71,7 @@ export function showQuestionDialog(
       // 清掉临时可点选卡；已选结果等会话历史回写后展示
       appState.pendingAskQuestions.delete(askKey);
       if (!appState.activeConversationId || askKey === appState.activeConversationId || askKey === 'pending') {
-        shellApi.refreshChatContent();
+        scheduleUiRefresh({ chat: true });
       }
       resolve(result);
     };
@@ -152,9 +152,9 @@ export function showQuestionDialog(
     document.addEventListener('keydown', onKey);
 
     if (!appState.activeConversationId || askKey === appState.activeConversationId || askKey === 'pending') {
-      shellApi.refreshChatContent();
-      // 滚到选择卡，便于直接点选
-      requestAnimationFrame(() => {
+      scheduleUiRefresh({ chat: true });
+      // 滚到选择卡，便于直接点选（调度器 flush 之后卡片才渲染出来）
+      afterUiRefresh(() => {
         document
           .querySelector(`.ask-card.is-interactive[data-ask-request-id="${CSS.escape(payload.requestId)}"]`)
           ?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });

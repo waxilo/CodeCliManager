@@ -3,7 +3,7 @@ import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
 import type { FileRef, WorkspaceGroup, PreparedCommand } from '../../types';
 import { escapeHtml } from '../../utils';
-import { showCopyToastMsg, showToast } from '../../ui';
+import { showCopyToastMsg, showToast, scheduleUiRefresh } from '../../ui';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getActiveChatModel } from './model-picker';
 import { getEffectiveProjectDir, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading, syncMessageInputPlaceholder } from './session-context';
@@ -15,7 +15,6 @@ import { clearStreamingState, commitStreamingAssistantToConversation } from './s
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshModelInfo } from './render-chat';
 import { hideSendingState } from './retry';
-import { refreshStreamingUI } from './streaming';
 import { isImageFile, stripFileRefTags, unwrapFileRef } from '../files/index';
 import { dismissMcpViewState } from '../mcp/mount';
 import { normalizeModelKey } from '../permissions/permission-mode';
@@ -388,10 +387,8 @@ export async function executePreparedCommand(
         clearStreamingState(conversationId);
       }
       if (appState.activeConversationId === conversationId) {
-        shellApi.refreshChatContent();
-        if (alreadyBusy && appState.streamingBySession.has(conversationId)) {
-          refreshStreamingUI(conversationId);
-        }
+        // 调度器执行器在聊天重建后自动恢复流式块，无需在此显式调用 refreshStreamingUI
+        scheduleUiRefresh({ chat: true });
       }
     } else {
       appState.sessionProcessModels.set('pending', nextModelKey);

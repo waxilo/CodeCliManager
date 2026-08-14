@@ -2,15 +2,13 @@ import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
 import { invalidateFileCache, restoreComposerDraft, stashComposerDraft } from '../files';
 import { isActiveConversationRunning, setSendButtonLoading } from '../chat/session-context';
-import { showPendingAssistantIndicator } from '../chat/retry';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
-import { refreshStreamingUI } from '../chat/streaming';
 import { refreshConversationFromBackend } from './load';
+import { scheduleUiRefresh, afterUiRefresh } from '../../ui';
 import { conversationInstanceKey } from './normalize';
 import { dismissMcpViewState } from '../mcp/mount';
 import { dismissSettingsViewState } from '../settings/mount';
 import { dismissKiroViewState } from '../kiro/mount';
-import { updateConversationListSpinner } from '../sidebar/render-list';
 import { renderChatAreaHtml } from '../chat/render-chat';
 import { syncQueuedPromptsUI } from '../chat/input-composer';
 import { clearInteractionHostUi, remountActiveInteractionPanel } from '../permissions/interaction-panel';
@@ -96,17 +94,16 @@ function finishSelectUi(id: string): void {
   const thisSessionRunning = isActiveConversationRunning();
   setSendButtonLoading(thisSessionRunning);
   syncQueuedPromptsUI();
-  updateConversationListSpinner();
+  // 注意：不在这里调 updateConversationListSpinner——纯点击不改变运行态，
+  // active 高亮已由 syncConversationActiveHighlight 单独处理；运行态同步由 session-events 驱动。
   syncInteractionPanelForConversation(id);
 
-  window.setTimeout(() => {
+  // 聊天刷新已改走中央调度器（RAF 合并）：置底放到 flush 之后执行，
+  // 避免 setTimeout(0) 先于重建运行导致滚动到旧 DOM。
+  afterUiRefresh(() => {
     if (appState.activeConversationId !== id) return;
     appState.answerScroller?.scrollToBottom();
-    if (thisSessionRunning && appState.streamingBySession.has(id)) {
-      showPendingAssistantIndicator();
-      refreshStreamingUI(id);
-    }
-  }, 0);
+  });
 }
 
 /** 用当前缓存立刻画出选中会话（Win 上避免整页 render） */
@@ -127,7 +124,8 @@ function paintSelectedConversation(id: string, sourcePath: string | null, wasMan
   }
 
   syncConversationActiveHighlight(id, sourcePath);
-  shellApi.refreshChatContent();
+  // 增量路径：聊天区重建走调度器合并（连点同一会话时指纹未变会自动跳过）
+  scheduleUiRefresh({ chat: true });
   finishSelectUi(id);
 }
 
@@ -180,7 +178,7 @@ export function selectConversation(id: string, sourcePath: string | null = null)
     ) return;
 
     if (document.querySelector('#message-list')) {
-      shellApi.refreshChatContent();
+      scheduleUiRefresh({ chat: true });
       finishSelectUi(id);
     } else {
       paintSelectedConversation(id, sourcePath, false);

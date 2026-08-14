@@ -3,6 +3,12 @@ import type { Conversation } from '../types';
 
 export type ConversationRaw = Conversation & { projectDir?: string | null };
 
+/** get_conversation 响应：conversation 为 null 表示版本未变（跳过重传，保留本地消息） */
+export interface ConversationFetchRaw {
+  conversation: ConversationRaw | null;
+  version: string;
+}
+
 export function getConversations(): Promise<ConversationRaw[]> {
   return invoke<ConversationRaw[]>('get_conversations');
 }
@@ -10,8 +16,13 @@ export function getConversations(): Promise<ConversationRaw[]> {
 export function getConversation(
   conversationId: string,
   sourcePath?: string | null,
-): Promise<ConversationRaw | null> {
-  return invoke<ConversationRaw | null>('get_conversation', { conversationId, sourcePath });
+  knownVersion?: string | null,
+): Promise<ConversationFetchRaw | null> {
+  return invoke<ConversationFetchRaw | null>('get_conversation', {
+    conversationId,
+    sourcePath,
+    knownVersion,
+  });
 }
 
 export function deleteConversation(args: {

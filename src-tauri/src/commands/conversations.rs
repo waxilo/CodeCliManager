@@ -1,11 +1,27 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use serde::Serialize;
+
 use crate::history::*;
+
+/// get_conversation 的响应：conversation 为 None 表示内容版本未变化（可跳过重传），
+/// 前端应保留已有消息；version 由前端回传，用于下一次跳过。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationFetch {
+    pub conversation: Option<Conversation>,
+    pub version: String,
+}
 
 #[tauri::command]
 pub fn get_conversations() -> Vec<Conversation> {
-    let state = load_app_state();
+    // 侧栏列表只需要摘要：去掉全部 messages，消除启动/刷新时 O(总消息数) 的 IPC 搬运。
+    // 点击会话时 get_conversation 才会拉取完整消息。
+    let mut state = load_app_state();
+    for conversation in &mut state.conversations {
+        conversation.messages.clear();
+    }
     state.conversations
 }
 
@@ -131,7 +147,8 @@ pub fn delete_workspace_conversations(project_dir: String) -> Result<u32, String
 pub fn get_conversation(
     conversation_id: String,
     source_path: Option<String>,
-) -> Option<Conversation> {
+    known_version: Option<String>,
+) -> Option<ConversationFetch> {
     let explicit_source = source_path.filter(|path| !path.trim().is_empty());
     let path = match explicit_source.as_deref() {
         Some(path) => validate_claude_source_path(Path::new(path)).ok(),
@@ -140,6 +157,14 @@ pub fn get_conversation(
     if let Some(path) = path {
         if !session_id_matches_path(&conversation_id, &path) {
             return None;
+        }
+        let version = conversation_version(&path);
+        // 内容版本未变（连点同一会话 / 回切已加载会话）：跳过整条克隆 + 序列化 + 搬运
+        if known_version.as_deref() == Some(version.as_str()) {
+            return Some(ConversationFetch {
+                conversation: None,
+                version,
+            });
         }
         if let Some(mut conversation) = parse_claude_session_cached(&path) {
             let overlay = load_overlay();
@@ -157,8 +182,19 @@ pub fn get_conversation(
             ) {
                 conversation.title = title.clone();
             }
-            return Some(conversation);
+            return Some(ConversationFetch {
+                conversation: Some(conversation),
+                version,
+            });
         }
+    }
+    // 无会话文件：回退持久化状态，同样按 state.json 版本跳过未变更的重复拉取
+    let version = persisted_state_version();
+    if known_version.as_deref() == Some(version.as_str()) {
+        return Some(ConversationFetch {
+            conversation: None,
+            version,
+        });
     }
     load_persisted_state()
         .conversations
@@ -166,6 +202,10 @@ pub fn get_conversation(
         .find(|conversation| {
             conversation.id == conversation_id
                 && source_path_matches(conversation.source_path.as_deref(), explicit_source.as_deref())
+        })
+        .map(|conversation| ConversationFetch {
+            conversation: Some(conversation),
+            version,
         })
 }
 

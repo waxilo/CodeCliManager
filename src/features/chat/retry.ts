@@ -1,7 +1,6 @@
 import { appState } from '../../state';
-import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
-import { showCopyToastMsg } from '../../ui';
+import { showCopyToastMsg, scheduleUiRefresh } from '../../ui';
 import { setSendButtonLoading, setAbortingUi, updateSendButtonState } from './session-context';
 import { clearStreamingState } from './streaming';
 import { abortSession, sendMessage } from './send';
@@ -54,7 +53,7 @@ export async function invokeRetryMessage(mode: 'regenerate' | 'undo') {
       // messages-updated 通常已更新 appState.conversations；再拉一次兜底
       await refreshConversationFromBackend(cid);
       if (appState.activeConversationId === cid) {
-        shellApi.refreshChatContent();
+        scheduleUiRefresh({ chat: true });
         updateConversationListSpinner();
       }
       showCopyToastMsg('已撤回');

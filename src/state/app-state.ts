@@ -18,6 +18,11 @@ import type {
 import { createRequestGuard } from '../utils';
 import type { ScrollController } from '../ui';
 
+/** 消息窗口封顶数；超过则只渲染尾部窗口，顶部提供「加载更早」按钮 */
+export const MAX_VISIBLE_MESSAGES = 200;
+/** 点击「加载更早」每次多取的消息条数 */
+export const LOAD_EARLIER_STEP = 200;
+
 /** 工具权限：ask=同工具首次询问，silent=静默自动允许 */
 export const PERMISSION_MODE_STORAGE_KEY = 'codemanager-permission-mode';
 
@@ -154,6 +159,10 @@ export const appState = {
   answerScroller: null as ScrollController | null,
   thinkingScrollers: new Map<string, ScrollController>(),
   activeInteractionPanel: null as ActiveInteractionPanel | null,
+  /** tail-N 消息窗口：conversationInstanceKey → 可见消息条数（「加载更早」按会话独立累计，切换不丢失） */
+  messageWindowSizeByConversation: new Map<string, number>(),
+  /** conversationInstanceKey → get_conversation 返回的版本号；用于回传 known_version 跳过未变更会话的重传 */
+  conversationVersions: new Map<string, string>(),
   _cachedFileList: null as string[] | null,
   _cachedProjectDir: '',
   composerDrafts: new Map<string, ComposerDraft>(),

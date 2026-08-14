@@ -274,41 +274,122 @@ export function mergeAdjacentSameRole(messages: Message[]): Message[] {
   return result;
 }
 
-/** 将 tool_use 和 tool_result 配对处理，生成内嵌工具消息 */
+interface ToolResultMeta {
+  text: string;
+  isError: boolean;
+  toolUseResult?: Record<string, unknown>;
+}
+
+/**
+ * 将 tool_use 和 tool_result 配对处理，生成内嵌工具消息。
+ *
+ * 结果驱动单遍配对：每个结果只解析一次，按流顺序配对其「之前最早、未配对、合规」的 tool_use，
+ * 替代原先对每个 tool_use 的前向扫描（工具密集会话最坏 O(N²) 次 extractToolResult）。
+ * 语义与原实现一致：带 id 的结果配同 id 或无 id 的 tool_use（取最早）；无 id 的结果配最早未配对的 tool_use。
+ */
 export function processToolMessages(messages: Message[]): Message[] {
   const result: Message[] = [];
-  const consumedResult = new Set<number>();
-  let i = 0;
 
-  while (i < messages.length) {
+  // —— 预扫描：结果索引（每个结果只解析一次）——
+  const resultMetaByIndex = new Map<number, ToolResultMeta>();
+  const resultIdByIndex = new Map<number, string>();
+  const resultById = new Map<string, number[]>();
+  for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
+    if (msg.role !== 'tool_result') continue;
+    const resData = extractToolResult(msg.content);
+    resultMetaByIndex.set(i, {
+      text: resData.text,
+      isError: resData.isError,
+      toolUseResult: resData.toolUseResult,
+    });
+    if (resData.toolUseId) {
+      resultIdByIndex.set(i, resData.toolUseId);
+      const arr = resultById.get(resData.toolUseId);
+      if (arr) arr.push(i);
+      else resultById.set(resData.toolUseId, [i]);
+    }
+  }
+
+  // —— 结果驱动配对 ——
+  const pairedToolUse = new Set<number>();
+  const resultForToolUse = new Map<number, ToolResultMeta>();
+  const toolUseById = new Map<string, number[]>(); // id -> 未配对 tool_use 下标（流顺序）
+  const idlessToolUses: number[] = []; // 无 id 的未配对 tool_use 下标（流顺序）
+  const allToolUses: number[] = []; // 全部 tool_use 下标（流顺序），供无 id 结果取最早
+  let idlessHead = 0;
+  let allHead = 0;
+  const byIdHead = new Map<string, number>();
+
+  const nextUnpaired = (arr: number[], head: number): number => {
+    while (head < arr.length && pairedToolUse.has(arr[head])) head++;
+    return head;
+  };
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role === 'tool_use') {
+      const tid = extractToolUseId(msg.content);
+      allToolUses.push(i);
+      if (tid) {
+        const arr = toolUseById.get(tid);
+        if (arr) arr.push(i);
+        else {
+          toolUseById.set(tid, [i]);
+          byIdHead.set(tid, 0);
+        }
+      } else {
+        idlessToolUses.push(i);
+      }
+      continue;
+    }
+    if (msg.role !== 'tool_result') continue;
+
+    const meta = resultMetaByIndex.get(i);
+    if (!meta) continue;
+    const tid = resultIdByIndex.get(i);
+
+    let bestIdx: number | null = null;
+    if (tid) {
+      // 带 id 的结果：同 id 的 tool_use 或任意无 id 的 tool_use，取流顺序最早者
+      const sameIdArr = toolUseById.get(tid);
+      if (sameIdArr) {
+        const h = nextUnpaired(sameIdArr, byIdHead.get(tid) ?? 0);
+        byIdHead.set(tid, h);
+        if (h < sameIdArr.length) bestIdx = sameIdArr[h];
+      }
+      const h2 = nextUnpaired(idlessToolUses, idlessHead);
+      idlessHead = h2;
+      if (h2 < idlessToolUses.length && (bestIdx === null || idlessToolUses[h2] < bestIdx)) {
+        bestIdx = idlessToolUses[h2];
+      }
+    } else {
+      // 无 id 的结果：配对最早未配对的 tool_use（任意 id）
+      const h = nextUnpaired(allToolUses, allHead);
+      allHead = h;
+      if (h < allToolUses.length) bestIdx = allToolUses[h];
+    }
+
+    if (bestIdx !== null) {
+      pairedToolUse.add(bestIdx);
+      resultForToolUse.set(bestIdx, meta);
+    }
+  }
+
+  // —— 输出：按流顺序，tool_use 位输出合并后的工具消息，tool_result 跳过 ——
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role === 'tool_result') continue;
 
     if (msg.role === 'tool_use') {
       const toolName = extractToolName(msg.content);
       const toolInput = extractToolInput(msg.content);
       const toolUseId = extractToolUseId(msg.content);
       const config = TOOL_CONFIG_MAP[toolName] || getDefaultToolConfig();
-
-      // 按 tool_use_id 向前查找配对结果（支持同轮多 Task）
-      let toolResult: string | undefined;
-      let isError = false;
-      let toolUseResult: Record<string, unknown> | undefined;
-      for (let j = i + 1; j < messages.length; j++) {
-        if (consumedResult.has(j)) continue;
-        if (messages[j].role !== 'tool_result') continue;
-        const resData = extractToolResult(messages[j].content);
-        const matches =
-          !toolUseId ||
-          !resData.toolUseId ||
-          resData.toolUseId === toolUseId ||
-          (j === i + 1 && !resData.toolUseId);
-        if (!matches) continue;
-        toolResult = resData.text;
-        isError = resData.isError;
-        toolUseResult = resData.toolUseResult;
-        consumedResult.add(j);
-        break;
-      }
+      const paired = resultForToolUse.get(i);
+      const toolResult = paired?.text;
+      const isError = paired?.isError ?? false;
+      const toolUseResult = paired?.toolUseResult;
 
       // AskUserQuestion：把 answers 并入 toolInput，供专用卡片渲染
       let mergedInput = toolInput;
@@ -340,18 +421,10 @@ export function processToolMessages(messages: Message[]): Message[] {
         },
       };
       result.push(toolMsg);
-      i++;
-      continue;
-    }
-
-    if (msg.role === 'tool_result') {
-      // 已配对或孤立的 tool_result，跳过
-      i++;
       continue;
     }
 
     result.push(msg);
-    i++;
   }
 
   return result;

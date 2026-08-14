@@ -17,7 +17,7 @@ import { captureScrollState, getStreamingAssistantText, restoreScrollState } fro
 import { refreshConversationFromBackend } from '../features/conversations/load';
 import { normalizeMessageForCompare } from '../features/files/index';
 import type { PermissionRequestPayload } from '../types';
-import { showCopyToastMsg } from '../ui';
+import { showCopyToastMsg, scheduleUiRefresh } from '../ui';
 import { syncQueuedPromptsUI } from '../features/chat/input-composer';
 
 interface QueuedPromptsUpdatedPayload {
@@ -32,21 +32,12 @@ interface QueuedPromptDispatchedPayload {
 
 /** 防止 init 被重复调用时重复注册，导致 text_delta 字字双份 */
 let eventListenersReady = false;
-const chatRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-/** 合并同一轮 messages-updated / turn-complete / queue 触发的重复全列表重建。 */
-function scheduleChatRefresh(sessionId: string, delay = 32): void {
-  const existing = chatRefreshTimers.get(sessionId);
-  if (existing) clearTimeout(existing);
-  chatRefreshTimers.set(sessionId, setTimeout(() => {
-    chatRefreshTimers.delete(sessionId);
-    if (appState.activeConversationId === sessionId) {
-      shellApi.refreshChatContent();
-      updateContextIndicator();
-      syncSubagentProgressUI();
-      syncTodoPanelUI();
-    }
-  }, delay));
+/** 合并同一轮 messages-updated / turn-complete / queue 触发的重复全列表重建（走中央调度器）。 */
+function scheduleChatRefresh(sessionId: string): void {
+  if (appState.activeConversationId !== sessionId) return;
+  updateContextIndicator();
+  scheduleUiRefresh({ chat: true, subagent: true, todo: true });
 }
 
 /** 从历史 payload 重建用量基线 + TodoList（进程增量在其上叠加；无数据时不动既有累计） */
@@ -355,11 +346,9 @@ export async function setupEventListeners() {
       if (refreshSessionId) {
         scheduleChatRefresh(refreshSessionId);
       } else {
-        shellApi.refreshChatContent();
         updateContextIndicator();
-        syncSubagentProgressUI();
-        syncTodoPanelUI();
         updateCostIndicator();
+        scheduleUiRefresh({ chat: true, subagent: true, todo: true });
       }
       if (wasUserAbort) {
         showCopyToastMsg('已停止');
@@ -424,12 +413,12 @@ export async function setupEventListeners() {
       updateConversationListSpinner();
       if (!isCurrentSession) return;
       updateContextIndicator();
-      syncSubagentProgressUI();
-      syncTodoPanelUI();
       updateCostIndicator();
-      if (appState.activeConversationId || appState.transientSessionError) {
-        shellApi.refreshChatContent();
-      }
+      scheduleUiRefresh({
+        chat: Boolean(appState.activeConversationId || appState.transientSessionError),
+        subagent: true,
+        todo: true,
+      });
     });
   });
 

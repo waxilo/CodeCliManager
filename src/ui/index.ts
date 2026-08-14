@@ -35,4 +35,12 @@ export {
   bindSidebarResponsive,
 } from './sidebar-layout';
 export { showConfirmDialog, showDeleteConfirm, type ConfirmDialogOptions } from './confirm-dialog';
+export {
+  scheduleUiRefresh,
+  afterUiRefresh,
+  flushUiRefreshNow,
+  registerUiRefreshExecutor,
+  type UiRefreshFlags,
+  type UiRefreshExecutor,
+} from './refresh-scheduler';
 export { showCopyToastMsg, showToast, type ToastVariant } from './toast';

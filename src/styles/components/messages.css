@@ -11,6 +11,35 @@
   scroll-behavior: smooth;
 }
 
+/* tail-N 消息窗口的「加载更早」按钮 */
+.load-earlier-btn {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.load-earlier-btn:hover {
+  background: var(--color-bg-hover, var(--color-bg-surface));
+  color: var(--color-text-primary);
+  border-color: var(--color-text-muted);
+}
+
+.load-earlier-icon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
 /* 已创建但消息被全部撤回后的轻量空状态 */
 .conversation-empty-state {
   flex: 1;

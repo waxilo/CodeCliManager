@@ -16,8 +16,7 @@ import { updateOrAddConversation, findConversationById, assistantTextCovers } fr
 import { updateConversationListSpinner } from '../sidebar';
 import { renderThinkingDetails, extractToolUseId, processToolMessages } from './render-messages';
 import { clearPendingRequestState, hideSendingState, removePendingAssistantIndicator, updatePendingStatus } from './retry';
-import { ScrollController } from '../../ui';
-import { syncSubagentProgressUI } from './subagent-progress';
+import { ScrollController, scheduleUiRefresh } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
 
 const TOOL_CHUNK_KINDS = new Set([
@@ -84,9 +83,8 @@ function findActiveTool(
 
 function refreshActiveToolUI(sessionId: string) {
   if (appState.activeConversationId === sessionId) {
-    shellApi.refreshChatContent();
-    syncSubagentProgressUI();
-    syncTodoPanelUI();
+    // 统一走中央调度器合并；聊天重建后由执行器负责恢复流式块
+    scheduleUiRefresh({ chat: true, subagent: true, todo: true });
   }
 }
 
@@ -692,21 +690,26 @@ export function handleSessionError(payload: SessionErrorPayload) {
 
   updateConversationListSpinner();
   if (isCurrentSession) {
+    // ensureChatViewVisible 内部已处理：无壳→同步 render；有壳→调度合并刷新
     ensureChatViewVisible();
-    shellApi.refreshChatContent();
   }
 }
 
-export function ensureChatViewVisible() {
+/**
+ * 确保聊天视图可见。返回是否走了全量渲染（true = DOM 已同步重建，调用方无需再安排刷新）；
+ * 否则已有 #message-list 时安排一次合并后的聊天刷新。
+ */
+export function ensureChatViewVisible(): boolean {
   // 全屏管理页占用主区域时，不因后台流式事件强制切回聊天视图
-  if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive || appState.isKiroViewActive) return;
+  if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive || appState.isKiroViewActive) return false;
   const mainContent = document.querySelector('.main-content');
-  if (!mainContent) return;
+  if (!mainContent) return false;
   if (!document.querySelector('#message-list')) {
     shellApi.render();
-    return;
+    return true;
   }
-  shellApi.refreshChatContent();
+  scheduleUiRefresh({ chat: true });
+  return false;
 }
 
 export function removeStreamingElements(sessionId?: string) {

@@ -54,7 +54,7 @@ export async function exportConversationToMarkdown(
   let full = conversation;
   try {
     const raw = await api.getConversation(id, conversation.source_path ?? null);
-    if (raw) full = normalizeConversation(raw);
+    if (raw?.conversation) full = normalizeConversation(raw.conversation);
   } catch (e) {
     console.warn('Failed to load full conversation for export:', e);
   }

@@ -8,6 +8,7 @@ import {
   initSidebarCollapsed,
   syncSidebarResponsiveState,
   bindSidebarResponsive,
+  registerUiRefreshExecutor,
 } from '../ui';
 import { shellApi } from './shell/api';
 import { render, syncTitlebarActions } from './shell/render';
@@ -33,6 +34,9 @@ import {
 } from '../features/chat/session-context';
 import { hideSendingState } from '../features/chat/retry';
 import { updateConversationListSpinner, refreshConversationListDom } from '../features/sidebar';
+import { refreshStreamingUI } from '../features/chat/streaming';
+import { syncSubagentProgressUI } from '../features/chat/subagent-progress';
+import { syncTodoPanelUI } from '../features/chat/todo-panel';
 import {
   invalidateFileCache,
   bindDragDropFileRefs,
@@ -173,6 +177,28 @@ export async function init(): Promise<void> {
   appInitialized = true;
 
   wireShellApi();
+  registerUiRefreshExecutor((flags) => {
+    let chatRebuilt = false;
+    if (flags.chat) {
+      chatRebuilt = refreshChatContent();
+    }
+    if (flags.sidebar) {
+      updateConversationListSpinner();
+    }
+    if (flags.subagent) {
+      syncSubagentProgressUI();
+    }
+    if (flags.todo) {
+      syncTodoPanelUI();
+    }
+    // refreshChatContent 会抹掉流式块；当前会话在流式时按 appState 恢复，避免空白卡死
+    if (chatRebuilt) {
+      const sid = appState.activeConversationId;
+      if (sid && appState.streamingBySession.has(sid)) {
+        refreshStreamingUI(sid);
+      }
+    }
+  });
   initPlatformClass();
   initTheme();
   initSidebarWidth();
