@@ -1,6 +1,7 @@
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 import hljs from 'highlight.js';
+import { escapeHtml } from './utils/escape-html';
 
 // 使用 GitHub Dark 风格主题
 import 'highlight.js/styles/github-dark.css';
@@ -17,32 +18,21 @@ const renderer = new marked.Renderer();
 renderer.code = function (codeObj: { text: string; lang?: string; escaped?: boolean }): string {
   const code = codeObj.text;
   const lang = (codeObj.lang || '').trim();
-  let highlighted: string;
-
-  if (lang && hljs.getLanguage(lang)) {
-    try {
-      highlighted = hljs.highlight(code, { language: lang }).value;
-    } catch {
-      highlighted = hljs.highlightAuto(code).value;
-    }
-  } else {
-    highlighted = hljs.highlightAuto(code).value;
-  }
-
-  const escapedCode = escapeAttr(code);
   // 语言标签来自围栏内容，用户/模型可控；转义后再拼入类名与角标，防止属性注入
   const langLabel = escapeAttr(lang) || 'text';
   const langBadge = lang && lang !== 'text'
     ? `<span class="code-lang-badge">${langLabel}</span>`
     : '';
 
+  // 语法高亮已移出渲染关键路径：这里只输出转义纯文本 + data-hl-lang 占位标记，
+  // 由 scheduleHighlighting 在 DOM 插入后分片空闲补高亮（Win 冷首渲卡顿根因修复）。
   return `
     <div class="code-block-wrapper">
       <div class="code-block-header">
         ${langBadge}
-        ${renderCodeCopyButton(escapedCode)}
+        ${renderCodeCopyButton(escapeAttr(code))}
       </div>
-      <pre><code class="hljs language-${langLabel}">${highlighted}</code></pre>
+      <pre><code class="hljs language-${langLabel}" data-hl-lang="${escapeAttr(lang)}">${escapeHtml(code)}</code></pre>
     </div>
   `;
 };
@@ -145,15 +135,14 @@ function tryFormatJson(text: string): string | null {
   try {
     const parsed = JSON.parse(trimmed);
     const formatted = JSON.stringify(parsed, null, 2);
-    const highlighted = hljs.highlight(formatted, { language: 'json' }).value;
-    const escapedCode = escapeAttr(formatted);
+    // JSON 高亮同样延迟到 scheduleHighlighting 空闲循环
     return `
       <div class="code-block-wrapper json-block">
         <div class="code-block-header">
           <span class="code-lang-badge">json</span>
-          ${renderCodeCopyButton(escapedCode)}
+          ${renderCodeCopyButton(escapeAttr(formatted))}
         </div>
-        <pre><code class="hljs language-json">${highlighted}</code></pre>
+        <pre><code class="hljs language-json" data-hl-lang="json">${escapeHtml(formatted)}</code></pre>
       </div>
     `;
   } catch {
@@ -172,7 +161,8 @@ export function renderMarkdown(text: string): string {
   const raw = marked.parse(text, { async: false }) as string;
   return DOMPurify.sanitize(raw, {
     USE_PROFILES: { html: true },
-    ADD_ATTR: ['data-code', 'data-bound', 'target', 'rel', 'class'],
+    // data-hl-lang 是代码块占位标记（延迟高亮定位用），需在 sanitize 后存活
+    ADD_ATTR: ['data-code', 'data-bound', 'data-hl-lang', 'target', 'rel', 'class'],
   });
 }
 
@@ -192,4 +182,110 @@ export function renderMarkdownCached(src: string): string {
   }
   _mdCache.set(src, html);
   return html;
+}
+
+// ---- 延迟语法高亮 ----
+// 代码块以纯文本占位渲染（renderer.code / tryFormatJson 输出 data-hl-lang 标记），
+// DOM 插入后由本队列分片空闲补高亮，避免在渲染关键路径同步跑 hljs。
+// 已知语言 → hljs.highlight；未知语言小块 → hljs.highlightAuto；大块 → 跳过（留纯文本）。
+const _pendingCodeBlocks = new Set<HTMLElement>();
+let _hlScheduled = false;
+const _hlResultCache = new Map<string, string>();
+const _HL_CACHE_MAX = 500;
+/** 未知语言大块阈值：超过则跳过 highlightAuto（其是 277ms/op 级开销） */
+const _HL_AUTO_MAX_CHARS = 8000;
+/** 超过该大小的块整体跳过高亮，把单次空闲片开销封顶（长输出/日志类大块高亮价值低） */
+const _HL_MAX_CHARS = 100_000;
+/** 超过该大小的高亮结果不入缓存（避免大字符串常驻内存） */
+const _HL_CACHE_SKIP_CHARS = 50_000;
+/** 每个空闲片的时间预算（ms） */
+const _HL_SLICE_BUDGET_MS = 8;
+
+function scheduleIdle(cb: () => void): void {
+  const rIC = (globalThis as { requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => void })
+    .requestIdleCallback;
+  if (rIC) {
+    rIC(cb, { timeout: 1000 });
+  } else {
+    setTimeout(cb, 0);
+  }
+}
+
+function highlightBlock(code: HTMLElement): void {
+  const lang = code.dataset.hlLang || '';
+  const raw = code.textContent ?? '';
+  const cacheKey = `${lang}\u0000${raw}`;
+
+  let highlighted: string | undefined;
+  if (raw.length <= _HL_MAX_CHARS) {
+    const cacheable = raw.length <= _HL_CACHE_SKIP_CHARS;
+    if (cacheable) {
+      highlighted = _hlResultCache.get(cacheKey);
+    }
+    if (highlighted === undefined) {
+      if (lang && hljs.getLanguage(lang)) {
+        highlighted = hljs.highlight(raw, { language: lang }).value;
+      } else if (raw.length <= _HL_AUTO_MAX_CHARS) {
+        highlighted = hljs.highlightAuto(raw).value;
+      } else {
+        highlighted = '';
+      }
+      if (highlighted && cacheable) {
+        _hlResultCache.set(cacheKey, highlighted);
+        if (_hlResultCache.size > _HL_CACHE_MAX) {
+          const firstKey = _hlResultCache.keys().next().value;
+          if (firstKey !== undefined) _hlResultCache.delete(firstKey);
+        }
+      }
+    }
+  }
+
+  if (highlighted) {
+    code.innerHTML = highlighted;
+  }
+  code.classList.add('hljs');
+  delete code.dataset.hlLang;
+  code.dataset.hlDone = '1';
+}
+
+function processHighlightQueue(): void {
+  _hlScheduled = false;
+  const start = performance.now();
+  for (const code of [..._pendingCodeBlocks]) {
+    _pendingCodeBlocks.delete(code);
+    if (!code.isConnected) continue; // 已被重建摘下的旧节点
+    if (performance.now() - start >= _HL_SLICE_BUDGET_MS) {
+      _pendingCodeBlocks.add(code); // 放回队列，下一片再处理
+      break;
+    }
+    highlightBlock(code);
+  }
+  if (_pendingCodeBlocks.size > 0) {
+    scheduleIdle(processHighlightQueue);
+  }
+}
+
+/**
+ * 收集 container 内待高亮代码块（data-hl-lang 占位）并启动分片空闲补高亮。
+ * 应在 DOM 插入后调用，与 initCodeCopyButtons 的调用点保持一致。
+ */
+export function scheduleHighlighting(container: HTMLElement): void {
+  container.querySelectorAll<HTMLElement>('pre > code[data-hl-lang]').forEach((code) => {
+    if (code.dataset.hlDone !== '1') {
+      _pendingCodeBlocks.add(code);
+    }
+  });
+  if (!_hlScheduled) {
+    _hlScheduled = true;
+    scheduleIdle(processHighlightQueue);
+  }
+}
+
+/** 仅测试用：同步清空待高亮队列（jsdom 无 requestIdleCallback） */
+export function flushHighlighting(): void {
+  for (const code of [..._pendingCodeBlocks]) {
+    _pendingCodeBlocks.delete(code);
+    if (code.isConnected) highlightBlock(code);
+  }
+  _hlScheduled = false;
 }

@@ -26,7 +26,6 @@ import { syncSubagentProgressUI } from '../../features/chat/subagent-progress';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { refreshStreamingUI } from '../../features/chat/streaming';
-import { syncActiveToolCardsInMessageList } from '../../features/chat/render-chat';
 import {
   resetChatRenderKey,
   getLastCommittedChatRenderKey,
@@ -324,14 +323,13 @@ export function exitManagementView(): boolean {
     scheduleUiRefresh({ chat: true, sidebar: true });
   } else {
     // 内容未变：保留挂回的 DOM，不重建聊天区。
-    // 仅当会话仍在流式时增量恢复流式块（离开期间可能持续推进）；
-    // 进行中工具卡片按活状态增量同步（运行中 → 已完成），不触发整列表重建。
+    // 仅当会话仍在流式时增量恢复流式块（离开期间可能持续推进）。
+    // 进行中子代理（Task）卡不在主流程，由右侧子代理清单栏独立同步，无需此处增量更新。
     scheduleUiRefresh({ sidebar: true });
     const sid = appState.activeConversationId;
     if (sid && appState.streamingBySession.has(sid)) {
       refreshStreamingUI(sid);
     }
-    syncActiveToolCardsInMessageList();
   }
   return true;
 }

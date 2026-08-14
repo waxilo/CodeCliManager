@@ -86,6 +86,10 @@ export function renderSubagentProgressHtml(): string {
     </aside>`;
 }
 
+/**
+ * 面板是否可见：有子代理即展示（右侧子代理清单栏是子代理的唯一主页面载体）。
+ * 传入的 hasSubagents 决定面板 DOM 的增删与布局 class 的显隐。
+ */
 function applySubagentLayoutState(hasSubagents: boolean): void {
   document
     .querySelector('.app-container')
@@ -123,5 +127,5 @@ export function syncSubagentProgressUI(): void {
     // 再统一加 has-subagent-panel / 收起侧边栏，触发两侧宽度过渡动画。
     void (container as HTMLElement).offsetWidth;
   }
-  applySubagentLayoutState(true);
+  applySubagentLayoutState(hasSubagents);
 }

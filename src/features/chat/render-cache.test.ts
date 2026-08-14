@@ -58,7 +58,7 @@ describe('renderCacheKey（按会话渲染缓存键）', () => {
     expect(renderCacheKey(c)).toBe(renderCacheKey(c));
   });
 
-  it('工具转态改变 full key 但不改变「已提交内容」key（管理页退出不因工具转态重建）', () => {
+  it('工具转态不改变任何 key（子代理卡已不在主流程，无需因转态重建列表）', () => {
     appState.conversations = [conv('c1', 100)];
     appState.activeConversationId = 'c1';
     appState.activeConversationSourcePath = null;
@@ -78,12 +78,11 @@ describe('renderCacheKey（按会话渲染缓存键）', () => {
     };
     appState.activeToolsBySession.set('c1', new Map([['t1', task]]));
 
-    // full key 变（activeToolsSignature 进入）……
-    expect(getCurrentChatRenderKey()).not.toBe(fullBefore);
-    // ……但已提交内容 key 不变（工具签名被排除）
+    // 主列表不承载子代理卡：full key 与 committed key 都不因工具转态变化
+    expect(getCurrentChatRenderKey()).toBe(fullBefore);
     expect(getCurrentCommittedChatRenderKey()).toBe(committedBefore);
 
-    // 已提交内容变化（新消息落盘）才让 committed key 变化
+    // 已提交内容变化（新消息落盘）才让 key 变化
     const active = appState.conversations[0];
     active.messages.push({ id: 'm2', role: 'assistant', content: 'x', timestamp: 2 });
     expect(getCurrentCommittedChatRenderKey()).not.toBe(committedBefore);

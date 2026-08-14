@@ -9,7 +9,7 @@ import type {
   ActiveToolState,
   TodoItem,
 } from '../../types';
-import { renderMarkdownCached as renderMarkdown, initCodeCopyButtons } from '../../markdown';
+import { renderMarkdownCached as renderMarkdown, initCodeCopyButtons, scheduleHighlighting } from '../../markdown';
 import { getThinkingScroller } from './thinking-scroller';
 import { updateSendButtonState, setSendButtonLoading } from './session-context';
 import { updateOrAddConversation, findConversationById, assistantTextCovers } from '../conversations';
@@ -837,6 +837,7 @@ export function refreshStreamingUI(sessionId: string) {
         const mdBody = existingEl.querySelector('.markdown-body');
         if (mdBody && updateStreamingTextBody(mdBody as HTMLElement, block)) {
           initCodeCopyButtons(existingEl);
+          scheduleHighlighting(existingEl);
         }
       } else {
         existingEl?.remove();
@@ -853,6 +854,7 @@ export function refreshStreamingUI(sessionId: string) {
         const mdBody = el.querySelector<HTMLElement>('.markdown-body');
         if (mdBody && updateStreamingTextBody(mdBody, block)) {
           initCodeCopyButtons(el);
+          scheduleHighlighting(el);
         }
         existingEls.set(idx, el);
       }

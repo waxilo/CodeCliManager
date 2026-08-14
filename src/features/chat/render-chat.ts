@@ -2,25 +2,12 @@ import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
 import type { Message, Conversation } from '../../types';
 import { escapeHtml } from '../../utils';
 import * as api from '../../api';
-import { renderMessageListHtml, renderToolMessageHtml, TOOL_CONFIG_MAP, getDefaultToolConfig, extractToolUseId } from './render-messages';
-import { initCodeCopyButtons } from '../../markdown';
+import { renderMessageListHtml } from './render-messages';
 import { getEffectiveProjectDir } from './session-context';
 import { renderCopyIconHtml, renderInputComposerHtml } from './input-composer';
 import { getActiveChatModelForRender } from './model-picker';
 import { dedupeAdjacentDuplicateMessages, getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
 import { normalizeMessageForCompare } from '../files/index';
-
-/** 单遍收集历史中已存在的 tool_use_id（替代对每个进行中工具重跑 processToolMessages 的 O(T·N)） */
-function collectToolUseIds(messages: Message[]): Set<string> {
-  const ids = new Set<string>();
-  for (const msg of messages) {
-    if (msg.role === 'tool_use' || msg.role === 'tool') {
-      const id = msg.toolData?.toolUseId || extractToolUseId(msg.content);
-      if (id) ids.add(id);
-    }
-  }
-  return ids;
-}
 
 /** tail-N 消息窗口：只保留尾部 windowSize 条；窗口起点是 tool_result 时回退纳入其 tool_use，避免结果无来源 */
 export function splitMessageWindow(
@@ -131,7 +118,12 @@ export function renderChatHeaderHtml(conversation: Conversation | undefined): st
 }
 
 export function buildDisplayMessages(conversation: Conversation | undefined): Message[] {
-  const messages = [...(conversation?.messages ?? [])];
+  // 子代理（Task）不在主输出页面展示：主页面只显示用户/助手对话与普通工具卡，
+  // 子代理执行态由右侧子代理清单栏（#subagent-progress）承载；已提交的 Task 卡同样过滤，
+  // 避免历史里混排「子代理」卡片（会话数据完整保留，仅不渲染）。
+  const messages = [...(conversation?.messages ?? [])].filter(
+    (m) => !(m.role === 'tool' && m.toolData?.toolName === 'Task'),
+  );
   // 只有当 appState.pendingUserMessage 属于当前会话时才显示（防止串会话）
   const pendingBelongsToThisConv = appState.pendingUserMessage &&
     (appState.pendingUserMessageConvId === appState.activeConversationId || (!appState.pendingUserMessageConvId && !appState.activeConversationId));
@@ -152,126 +144,14 @@ export function buildDisplayMessages(conversation: Conversation | undefined): Me
     });
   }
 
-  // 进行中的 AskUserQuestion：可点选卡片（已选结果由会话历史展示）
-  const askKey = appState.activeConversationId || 'pending';
-  const pendingAsk =
-    appState.pendingAskQuestions.get(askKey) ||
-    (appState.activeConversationId ? appState.pendingAskQuestions.get('pending') : undefined);
-  if (pendingAsk?.finish && !pendingAsk.answers) {
-    const toolInput = {
-      questions: pendingAsk.input.questions,
-    };
-    messages.push({
-      id: `pending-ask-${pendingAsk.requestId}`,
-      role: 'tool',
-      content: JSON.stringify(toolInput),
-      timestamp: Math.floor(Date.now() / 1000),
-      toolData: {
-        toolName: 'AskUserQuestion',
-        toolInput,
-        displayMode: 'collapsible',
-        colorScheme: {
-          border: '#58a6ff',
-          icon: '#58a6ff',
-          primary: '#58a6ff',
-        },
-      },
-    });
-  }
+  // 进行中的 AskUserQuestion 不再注入消息流：可点选卡片由 syncPendingAskToInteractionHost
+  // 钉到输入框上方（#interaction-host），避免长输出会话中「选择卡」与正文混排、滚动被顶走。
+  // 已选结果由会话历史回写展示。
 
-  // 进行中的 Task（Subagent）：历史尚未落盘时注入卡片（含刚完成、等历史合并）
-  const toolsKey = appState.activeConversationId || 'pending';
-  const activeTools =
-    appState.activeToolsBySession.get(toolsKey) ||
-    (appState.activeConversationId
-      ? appState.activeToolsBySession.get('pending')
-      : undefined);
-  if (activeTools) {
-    const existingToolUseIds = collectToolUseIds(messages);
-    for (const [toolUseId, tool] of activeTools) {
-      if (existingToolUseIds.has(toolUseId)) continue;
-      const config = TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig();
-      const isRunning = tool.status === 'running';
-      messages.push({
-        id: `pending-tool-${toolUseId}`,
-        role: 'tool',
-        content: JSON.stringify(tool.input || {}),
-        timestamp: Math.floor(tool.startedAt / 1000) || Math.floor(Date.now() / 1000),
-        toolData: {
-          toolName: tool.toolName,
-          toolInput: tool.input || {},
-          toolUseId,
-          toolResult: isRunning ? undefined : tool.toolResult ?? '',
-          isError: tool.isError,
-          displayMode: config.displayMode,
-          colorScheme: {
-            border: config.borderColor,
-            icon: config.iconColor,
-            primary: config.borderColor,
-          },
-        },
-      });
-    }
-  }
+  // 进行中的 Task（Subagent）同样不注入消息流：运行中子代理由右侧子代理清单栏
+  // （#subagent-progress）承载，主输出页面只保留用户/助手正文。
 
   return dedupeAdjacentDuplicateMessages(messages);
-}
-
-/**
- * 增量同步进行中工具卡片：管理页退出走「已提交内容未变」路径时，DOM 里的 pending 工具卡片
- * 仍是 stash 时的旧状态（如运行中 → 已完成）。逐个按 data-tool-use-id 定位并重渲染，
- * 只替换状态真正变化的卡片，避免整列表 innerHTML 重建（运行中会话每次退出的 Win 卡顿主因）。
- */
-export function syncActiveToolCardsInMessageList(): void {
-  const messageList = document.querySelector<HTMLDivElement>('#message-list');
-  if (!messageList) return;
-  const sid = appState.activeConversationId || 'pending';
-  const tools =
-    appState.activeToolsBySession.get(sid) ||
-    (appState.activeConversationId
-      ? appState.activeToolsBySession.get('pending')
-      : undefined);
-  if (!tools || tools.size === 0) return;
-
-  for (const [toolUseId, tool] of tools) {
-    if (!toolUseId) continue;
-    const card = messageList.querySelector<HTMLElement>(
-      `.tool-card[data-tool-use-id="${toolUseId}"]`,
-    );
-    if (!card) continue;
-    const isRunningLive = tool.status === 'running';
-    const isRunningInDom = !!card.querySelector('.tool-status-running');
-    if (isRunningLive === isRunningInDom) continue;
-
-    const config = TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig();
-    const msg: Message = {
-      id: `pending-tool-${toolUseId}`,
-      role: 'tool',
-      content: JSON.stringify(tool.input || {}),
-      timestamp: Math.floor(tool.startedAt / 1000) || Math.floor(Date.now() / 1000),
-      toolData: {
-        toolName: tool.toolName,
-        toolInput: tool.input || {},
-        toolUseId,
-        toolResult: isRunningLive ? undefined : tool.toolResult ?? '',
-        isError: tool.isError,
-        displayMode: config.displayMode,
-        colorScheme: {
-          border: config.borderColor,
-          icon: config.iconColor,
-          primary: config.borderColor,
-        },
-      },
-    };
-    const parent = card.parentElement;
-    card.outerHTML = renderToolMessageHtml(msg);
-    const newCard = parent?.querySelector<HTMLElement>(
-      `.tool-card[data-tool-use-id="${toolUseId}"]`,
-    );
-    if (newCard) {
-      initCodeCopyButtons(newCard);
-    }
-  }
 }
 
 export function renderConversationMessagesInnerHtml(messages: Message[]): string {

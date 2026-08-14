@@ -21,4 +21,5 @@ export {
   parseAskUserQuestionInput,
   showQuestionDialog,
   bindInteractiveAskCards,
+  syncPendingAskToInteractionHost,
 } from './ask-question';

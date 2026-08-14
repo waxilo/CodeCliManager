@@ -1,7 +1,7 @@
 import { appState, LOAD_EARLIER_STEP } from '../../state';
 import type { Conversation } from '../../types';
-import { initCodeCopyButtons, copyToClipboard } from '../../markdown';
-import { bindInteractiveAskCards } from '../permissions';
+import { initCodeCopyButtons, scheduleHighlighting, copyToClipboard } from '../../markdown';
+import { bindInteractiveAskCards, syncPendingAskToInteractionHost } from '../permissions';
 import { renderConversationMessagesInnerHtml, buildDisplayMessages, ensureMessageWindowForActiveConversation, getActiveMessageWindowSize, incrementActiveMessageWindow } from './render-chat';
 import { bindSessionIdCopyEvents } from './input-composer';
 import { updateSendButtonState, isSendButtonLoading } from './session-context';
@@ -17,8 +17,14 @@ export function setupMessageListPostRender(container: HTMLElement): void {
   // 对话流内 AskUserQuestion 可点选卡片
   bindInteractiveAskCards(container);
 
+  // 进行中的 AskUserQuestion 钉到输入框上方（可点选卡不再混排进消息流）
+  syncPendingAskToInteractionHost();
+
   // 初始化代码块复制按钮
   initCodeCopyButtons(container);
+
+  // 分片空闲补语法高亮（冷首渲不阻塞，首帧后填充）
+  scheduleHighlighting(container);
 
   // 绑定思考块折叠事件
   container.querySelectorAll('.thinking-block[data-thinking-id]').forEach((details) => {
@@ -140,25 +146,8 @@ export function getCurrentCommittedChatRenderKey(): string {
   return committedChatRenderKey(getActiveConversation());
 }
 
-/** 进行中工具的可见态签名：状态 / 是否错误 / 结果长度变化时也必须重建（否则卡片停留旧状态）。
- * 与 buildDisplayMessages 一致：当前会话无工具时回退到 'pending' 槽（发送中尚未落盘的工具）。 */
-function activeToolsSignature(sid: string): string {
-  const tools =
-    appState.activeToolsBySession.get(sid) ||
-    (appState.activeConversationId
-      ? appState.activeToolsBySession.get('pending')
-      : undefined);
-  if (!tools || tools.size === 0) return '';
-  const parts: string[] = [];
-  for (const [toolUseId, tool] of tools) {
-    parts.push(
-      `${toolUseId}:${tool.status}:${tool.isError ? 1 : 0}:${String(tool.toolResult ?? '').length}`,
-    );
-  }
-  return parts.join(',');
-}
-
-/** 进行中 AskUserQuestion 的 requestId 签名（含 'pending' 槽回退，对齐 buildDisplayMessages） */
+/** 进行中 AskUserQuestion 的 requestId 签名（含 'pending' 槽回退，对齐 syncPendingAskToInteractionHost）。
+ * 问答出现/消失会改变该签名 → 触发一次聊天重建，setupMessageListPostRender 里同步输入框上方的问卡。 */
 function pendingAskSignature(sid: string): string {
   const direct = appState.pendingAskQuestions.get(sid)?.requestId ?? '';
   if (direct) return direct;
@@ -184,15 +173,13 @@ function chatRenderKey(conversation: Conversation | undefined): string {
     appState.pendingUserMessage ? 'p' : '',
     appState.transientSessionError ? 'e' : '',
     pendingAskSignature(sid),
-    activeToolsSignature(sid),
   ].join('|');
 }
 
 /**
- * 「已提交内容」指纹：比 chatRenderKey 少 activeToolsSignature。
- * 工具签名在运行中会随 tool_use_start/end/result/task_progress 频繁变化，
- * 但工具卡片是「已提交消息」里的内容，由下次落盘重建 / 增量面板刷新恢复——
- * 管理页退出若按 full key 门控，运行中会话每次进出都会强制整列表 innerHTML 重建（Win 卡顿）。
+ * 「已提交内容」指纹：与 chatRenderKey 一致（不含工具签名）。
+ * 子代理（Task）卡不在主输出页面展示，运行中工具转态不需要重建主消息列表——
+ * 主列表只随已提交内容 / 流式块变化，进行中子代理由右侧子代理清单栏独立同步。
  */
 function committedChatRenderKey(conversation: Conversation | undefined): string {
   const msgs = conversation?.messages ?? [];

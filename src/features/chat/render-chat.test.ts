@@ -6,7 +6,6 @@ import {
   getActiveMessageWindowSize,
   incrementActiveMessageWindow,
   renderChatAreaHtml,
-  syncActiveToolCardsInMessageList,
 } from './render-chat';
 import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
 import type { Conversation, Message } from '../../types';
@@ -134,96 +133,3 @@ describe('renderChatAreaHtml shellOnly（全量渲染聊天壳不序列化消息
   });
 });
 
-describe('syncActiveToolCardsInMessageList（管理页退出增量同步工具卡片）', () => {
-  beforeEach(() => {
-    document.body.innerHTML = '';
-    appState.activeConversationId = 'conv-1';
-    appState.activeConversationSourcePath = null;
-    appState.messageWindowSizeByConversation.clear();
-    appState.runningSessions.clear();
-    appState.pendingUserMessage = null;
-    appState.pendingUserMessageConvId = null;
-    appState.transientSessionError = null;
-    appState.pendingAskQuestions.clear();
-    appState.activeToolsBySession.clear();
-  });
-
-  function buildRunningToolCard(): void {
-    const toolMsg: Message = {
-      id: 'pending-tool-t1',
-      role: 'tool',
-      content: JSON.stringify({ description: '子任务' }),
-      timestamp: 1,
-      toolData: {
-        toolName: 'Task',
-        toolInput: { description: '子任务' },
-        toolUseId: 't1',
-        toolResult: undefined,
-        displayMode: 'collapsible',
-        colorScheme: { border: '#f0883e', icon: '#f0883e', primary: '#f0883e' },
-      },
-    };
-    document.body.innerHTML = `<div id="message-list">${renderConversationMessagesInnerHtml([toolMsg])}</div>`;
-  }
-
-  it('工具运行中 → 已完成：卡片状态徽标更新，不重建整列表', () => {
-    buildRunningToolCard();
-    const card = document.querySelector<HTMLElement>('.tool-card[data-tool-use-id="t1"]');
-    expect(card).not.toBeNull();
-    expect(card!.querySelector('.tool-status-running')).not.toBeNull();
-    const listEl = document.querySelector('#message-list') as HTMLElement;
-    const originalListEl = listEl;
-    // 其他消息节点作为哨兵：确认整列表未被 innerHTML 重建
-    listEl.appendChild(document.createElement('div')).id = 'sentinel';
-
-    // 工具在管理页停留期间完成
-    appState.activeToolsBySession.set('conv-1', new Map([[
-      't1',
-      {
-        toolUseId: 't1',
-        toolName: 'Task',
-        input: { description: '子任务' },
-        status: 'done',
-        isError: false,
-        toolResult: '子任务完成',
-        startedAt: 1_000,
-      },
-    ]]));
-
-    syncActiveToolCardsInMessageList();
-
-    const card2 = document.querySelector<HTMLElement>('.tool-card[data-tool-use-id="t1"]');
-    expect(card2).not.toBeNull();
-    expect(card2!.querySelector('.tool-status-running')).toBeNull();
-    expect(card2!.querySelector('.tool-status-done')).not.toBeNull();
-    // 整列表节点未被替换
-    expect(document.querySelector('#message-list')).toBe(originalListEl);
-    expect(document.querySelector('#sentinel')).not.toBeNull();
-  });
-
-  it('状态未变时不动卡片', () => {
-    buildRunningToolCard();
-    const card = document.querySelector<HTMLElement>('.tool-card[data-tool-use-id="t1"]');
-    const originalCard = card;
-
-    appState.activeToolsBySession.set('conv-1', new Map([[
-      't1',
-      {
-        toolUseId: 't1',
-        toolName: 'Task',
-        input: { description: '子任务' },
-        status: 'running',
-        startedAt: 1_000,
-      },
-    ]]));
-
-    syncActiveToolCardsInMessageList();
-
-    expect(document.querySelector('.tool-card[data-tool-use-id="t1"]')).toBe(originalCard);
-  });
-
-  it('无进行中工具时不报错', () => {
-    buildRunningToolCard();
-    expect(() => syncActiveToolCardsInMessageList()).not.toThrow();
-  });
-});

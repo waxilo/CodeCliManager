@@ -5,7 +5,7 @@ import { relaunch } from '@tauri-apps/plugin-process';
 import { appState } from '../../state';
 import { escapeHtml } from '../../utils';
 import { showCopyToastMsg } from '../../ui';
-import { renderMarkdownCached as renderMarkdown } from '../../markdown';
+import { renderMarkdownCached as renderMarkdown, scheduleHighlighting } from '../../markdown';
 import { shouldShowClaudeUpdateBadge } from './claude-update';
 import { renderSettingsUpdateSectionIfOpen } from './claude-update';
 import { stopAllSessions } from '../../api/session';
@@ -242,6 +242,8 @@ export function renderAppUpdatePopoverBody(): string {
 export function bindAppUpdatePopoverEvents(panel: Element) {
   // 管理壳节点缓存复用：二次挂载时跳过重绑，避免同节点上监听叠加
   const el = panel as HTMLElement;
+  // innerHTML 每次都被重设，changelog 代码块需重新分片补高亮（不受 bound 门控影响）
+  scheduleHighlighting(el);
   if (el.dataset.bound === '1') return;
   el.dataset.bound = '1';
 
