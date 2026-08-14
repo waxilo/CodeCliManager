@@ -49,10 +49,6 @@ export function showQuestionDialog(
   return new Promise((resolve) => {
     const askKey = payload.conversationId || 'pending';
     let settled = false;
-    let usedComposerForOther = false;
-
-    const mainInput = () =>
-      document.querySelector<HTMLTextAreaElement>('#message-input');
 
     const finish = (result: QuestionDialogResult) => {
       if (settled) return;
@@ -61,13 +57,6 @@ export function showQuestionDialog(
       appState.activeQuestionEnterHandler = null;
       appState.activeAskQuestionCleanup = null;
       appState.questionOtherInputActive = false;
-      if (result.action === 'submit' && usedComposerForOther) {
-        const input = mainInput();
-        if (input) {
-          input.value = '';
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-        }
-      }
       syncMessageInputPlaceholder();
 
       // 清掉临时可点选卡；已选结果等会话历史回写后展示
@@ -82,7 +71,6 @@ export function showQuestionDialog(
 
     const collectAnswersFromCard = (card: HTMLElement): Record<string, string> | null => {
       const answers: Record<string, string> = {};
-      const composerText = (mainInput()?.value || '').trim();
       const errorEl = card.querySelector('.ask-error') as HTMLElement | null;
 
       for (let qIndex = 0; qIndex < parsed.questions.length; qIndex++) {
@@ -103,18 +91,20 @@ export function showQuestionDialog(
         const values: string[] = [];
         for (const input of selected) {
           if (input.dataset.other === '1') {
-            if (!composerText) {
+            // 自定义回答用卡片内联输入框，不占用下方大输入框
+            const customInput = block.querySelector<HTMLInputElement>(
+              `input[data-ask-other-input="1"][data-q-index="${qIndex}"]`,
+            );
+            const customText = (customInput?.value || '').trim();
+            if (!customText) {
               if (errorEl) {
                 errorEl.hidden = false;
-                errorEl.textContent = `请在下方输入框填写「其他」内容：${q.question}`;
+                errorEl.textContent = `请填写「其他」内容：${q.question}`;
               }
-              appState.questionOtherInputActive = true;
-              syncMessageInputPlaceholder();
-              mainInput()?.focus();
+              customInput?.focus();
               return null;
             }
-            usedComposerForOther = true;
-            values.push(composerText);
+            values.push(customText);
           } else {
             values.push(input.value);
           }
@@ -182,14 +172,18 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
     const state = [...appState.pendingAskQuestions.values()].find((s) => s.requestId === requestId);
     if (!state?.finish) return;
 
-    const mainInput = () =>
-      document.querySelector<HTMLTextAreaElement>('#message-input');
-
-    const syncOtherComposerMode = () => {
-      const otherOn = !!card.querySelector('input[data-other="1"]:checked');
-      appState.questionOtherInputActive = otherOn;
-      syncMessageInputPlaceholder();
-      if (otherOn) mainInput()?.focus();
+    const syncOtherInputVisibility = () => {
+      // 勾选「其他」时显示对应卡片内联输入框并聚焦
+      card.querySelectorAll<HTMLElement>('.ask-other-input').forEach((wrap) => {
+        const qIndex = wrap.dataset.qIndex || '';
+        const otherOn = !!card.querySelector<HTMLInputElement>(
+          `input[data-other="1"][data-q-index="${qIndex}"]:checked`,
+        );
+        wrap.hidden = !otherOn;
+        if (otherOn) {
+          wrap.querySelector<HTMLInputElement>('input[data-ask-other-input="1"]')?.focus();
+        }
+      });
     };
 
     card.querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]').forEach((input) => {
@@ -199,7 +193,17 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
           const inp = opt.querySelector('input');
           opt.classList.toggle('is-selected', !!inp?.checked);
         });
-        syncOtherComposerMode();
+        syncOtherInputVisibility();
+      });
+    });
+
+    // 卡片内联「其他」输入框：Enter 直接提交（与下方大输入框解耦）
+    card.querySelectorAll<HTMLInputElement>('input[data-ask-other-input="1"]').forEach((input) => {
+      input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          appState.activeQuestionEnterHandler?.();
+        }
       });
     });
 
@@ -210,7 +214,7 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
       appState.activeQuestionEnterHandler?.();
     });
 
-    syncOtherComposerMode();
+    syncOtherInputVisibility();
   });
 }
 

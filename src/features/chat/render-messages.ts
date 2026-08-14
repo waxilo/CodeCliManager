@@ -196,8 +196,17 @@ export function renderAskUserQuestionCardHtml(
                 <div class="ask-option-top">
                   <span class="ask-option-label">其他</span>
                 </div>
-                <div class="ask-option-desc">在下方输入框填写</div>
+                <div class="ask-option-desc">自定义回答</div>
               </label>
+              <div class="ask-other-input" data-q-index="${qIndex}" hidden>
+                <input
+                  type="text"
+                  data-q-index="${qIndex}"
+                  data-ask-other-input="1"
+                  placeholder="输入自定义回答…"
+                  autocomplete="off"
+                />
+              </div>
             `;
           })()
         : otherAnswer

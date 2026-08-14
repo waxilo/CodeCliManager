@@ -100,6 +100,40 @@ describe('AskUserQuestion 完整交互流程', () => {
     expect(appState.pendingAskQuestions.size).toBe(0);
   });
 
+  it('勾选「其他」后显示卡片内联输入框，空值提交被拦截，填写后提交自定义回答', async () => {
+    const p = handlePermissionRequest(askPayload());
+    const c = card()!;
+    const otherWrap = c.querySelector<HTMLElement>('.ask-other-input')!;
+    const otherInput = c.querySelector<HTMLInputElement>('input[data-ask-other-input="1"]')!;
+
+    // 默认内联输入框隐藏（不占地方）
+    expect(otherWrap.hidden).toBe(true);
+
+    // 勾选「其他」→ 内联输入框出现
+    (c.querySelector<HTMLInputElement>('input[data-other="1"]')!).click();
+    expect(otherWrap.hidden).toBe(false);
+
+    // 内联输入为空时提交被拦截（不发送响应）
+    (c.querySelector('[data-ask-action="submit"]') as HTMLButtonElement).click();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(respondMock).not.toHaveBeenCalled();
+    const err = c.querySelector<HTMLElement>('.ask-error')!;
+    expect(err.hidden).toBe(false);
+
+    // 在卡片内联输入框填写后提交成功，不再读取下方大输入框
+    otherInput.value = '自定义回答内容';
+    (c.querySelector('[data-ask-action="submit"]') as HTMLButtonElement).click();
+    await p;
+    expect(respondMock).toHaveBeenCalledTimes(1);
+    const [args] = respondMock.mock.calls[0] as [
+      { requestId: string; behavior: string; updatedInput: unknown },
+    ];
+    const updated = args.updatedInput as { questions: unknown; answers: Record<string, string> };
+    expect(updated.answers).toEqual({ '选择运行方式？': '自定义回答内容' });
+    expect(card()).toBeNull();
+  });
+
   it('未选任何选项时提交被拦截（不发送响应，等待用户继续作答）', async () => {
     // promise 会保持 pending（等待用户作答），此处仅触发处理流程
     void handlePermissionRequest(askPayload());

@@ -370,8 +370,8 @@
 }
 
 .ask-options {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  display: flex;
+  flex-direction: column;
   gap: 8px;
 }
 
@@ -419,6 +419,36 @@
   color: var(--color-status-running);
   font-weight: 700;
   font-size: 12px;
+}
+
+/* 「其他」内联自定义输入：卡片内填写，不占用下方大输入框 */
+.ask-other-input {
+  margin: 0 0 2px;
+}
+
+.ask-other-input[hidden] {
+  display: none;
+}
+
+.ask-other-input input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid var(--color-composer-border);
+  border-radius: 8px;
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+.ask-other-input input:focus {
+  border-color: var(--color-status-running);
+}
+
+.ask-other-input input::placeholder {
+  color: var(--color-text-muted);
 }
 
 /* 已答完：未选项淡化，突出已选 */
