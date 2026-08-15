@@ -380,7 +380,7 @@
   color: var(--color-text-secondary);
 }
 
-/* 会话数量 badge：小尺寸胶囊 */
+/* 会话数量 badge：小尺寸胶囊，常驻卡片右端；hover 时让位给 ⋮ 操作按钮 */
 .workspace-count {
   flex-shrink: 0;
   font-size: 10.5px;
@@ -399,8 +399,7 @@
 }
 
 .workspace-header:hover .workspace-count {
-  background: var(--sidebar-badge-bg);
-  color: var(--color-text-secondary);
+  display: none;
 }
 
 /* 元信息行：AI 模型标签 + 最近使用时间 */
@@ -467,26 +466,16 @@
 
 /* @keyframes sidebar-pulse → utilities/animations.css */
 
-/* ── 卡片操作区：默认隐藏，hover 项目时出现 ─────────────────────── */
+/* ── 卡片操作区：常驻显示会话数量；hover 时数量让位给 ⋮ 按钮 ────── */
 .workspace-actions {
   flex-shrink: 0;
   display: flex;
   align-items: center;
   gap: 2px;
-  opacity: 0;
-  transform: translateX(2px);
-  transition: opacity 0.15s ease, transform 0.15s ease;
-  pointer-events: none;
-}
-
-.workspace-header:hover .workspace-actions,
-.workspace-header:focus-within .workspace-actions {
-  opacity: 1;
-  transform: none;
-  pointer-events: auto;
 }
 
 .ws-icon-btn {
+  flex-shrink: 0;
   width: 22px;
   height: 22px;
   padding: 0;
@@ -495,10 +484,15 @@
   background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
-  display: inline-flex;
+  display: none;
   align-items: center;
   justify-content: center;
   transition: background 0.15s ease, color 0.15s ease;
+}
+
+.workspace-header:hover .ws-icon-btn,
+.workspace-header:focus-within .ws-icon-btn {
+  display: inline-flex;
 }
 
 .ws-icon-btn:hover {

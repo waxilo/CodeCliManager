@@ -634,10 +634,8 @@ a.claude-update-action {
     display: none;
   }
 
-  .workspace-actions {
-    opacity: 1;
-    transform: none;
-    pointer-events: auto;
+  .ws-icon-btn {
+    display: inline-flex;
   }
 
   .ws-icon-btn,

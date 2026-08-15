@@ -206,11 +206,11 @@ export function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: bo
         <span class="workspace-main">
           <span class="workspace-name-row">
             <span class="workspace-name">${escapeHtml(ws.displayName)}</span>
-            <span class="workspace-count">${ws.conversations.length}</span>
           </span>
           <span class="workspace-meta">${renderWorkspaceMetaInnerHtml(ws)}</span>
         </span>
         <span class="workspace-actions">
+          <span class="workspace-count">${ws.conversations.length}</span>
           <button type="button" class="ws-icon-btn" data-action="workspace-more" data-workspace="${key}" title="项目操作" aria-label="项目操作">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
           </button>
