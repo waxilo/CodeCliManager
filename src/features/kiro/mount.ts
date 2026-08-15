@@ -111,6 +111,11 @@ export async function mountKiroView() {
   appState.kiroEscapeHandler = onEscapeKey;
   document.addEventListener('keydown', onEscapeKey);
 
+  // 管理壳节点缓存复用：按钮监听已在首次挂载绑定，二次挂载只重绑 Escape。
+  // 与 api-config/mcp 的 dataset 守卫一致，避免同一节点重复 addEventListener。
+  if (view.dataset.kiroMounted === '1') return;
+  view.dataset.kiroMounted = '1';
+
   view.querySelector('.settings-close-btn')?.addEventListener('click', close);
   view.querySelector('.settings-close-footer')?.addEventListener('click', close);
   view.querySelector('.kiro-toggle-btn')?.addEventListener('click', () => {

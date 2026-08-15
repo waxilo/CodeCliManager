@@ -167,20 +167,42 @@ export function renderMarkdown(text: string): string {
 }
 
 // Markdown 渲染缓存：避免对相同内容重复调用 marked.parse + DOMPurify
+// 同时限制总内存：单条超大（长工具结果/报告）不入缓存，缓存总量有字节预算，
+// 避免长会话反复渲染把数百 MB HTML 常驻内存拖垮 WebView2（GC 停顿）。
 const _mdCache = new Map<string, string>();
 const _MD_CACHE_MAX = 3000;
+/** 单条渲染结果超过该字节数不入缓存（长内容重复渲染价值低、内存占用高） */
+const _MD_CACHE_MAX_ENTRY_BYTES = 200_000;
+/** 缓存总量字节预算：超出后清掉最旧一半，给长会话留出空间又不至于无限膨胀 */
+const _MD_CACHE_BUDGET_BYTES = 32 * 1024 * 1024;
+let _mdCacheBytes = 0;
 
-/** 带 LRU 缓存的 Markdown 渲染 */
+/** 带 LRU + 字节预算缓存的 Markdown 渲染 */
 export function renderMarkdownCached(src: string): string {
   const cached = _mdCache.get(src);
-  if (cached !== undefined) return cached;
+  if (cached !== undefined) {
+    // 命中提升到队尾（真 LRU）：Map 迭代序=插入序，不提升的话高频内容也会被「清最旧一半」误清
+    _mdCache.delete(src);
+    _mdCache.set(src, cached);
+    return cached;
+  }
+
   const html = renderMarkdown(src);
-  if (_mdCache.size >= _MD_CACHE_MAX) {
-    // 简单 LRU：删除最早的条目
-    const firstKey = _mdCache.keys().next().value;
-    if (firstKey !== undefined) _mdCache.delete(firstKey);
+  // 超大结果不缓存：即使命中价值也低，且会显著推高常驻内存
+  if (html.length > _MD_CACHE_MAX_ENTRY_BYTES) return html;
+  if (_mdCache.size >= _MD_CACHE_MAX || _mdCacheBytes + html.length > _MD_CACHE_BUDGET_BYTES) {
+    // 预算超限：清掉最旧一半条目（LRU），把字节预算让给最新内容
+    const toEvict = Math.ceil(_mdCache.size / 2);
+    for (let i = 0; i < toEvict; i++) {
+      const firstKey = _mdCache.keys().next().value;
+      if (firstKey === undefined) break;
+      const evicted = _mdCache.get(firstKey);
+      _mdCache.delete(firstKey);
+      if (evicted !== undefined) _mdCacheBytes -= evicted.length;
+    }
   }
   _mdCache.set(src, html);
+  _mdCacheBytes += html.length;
   return html;
 }
 

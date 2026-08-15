@@ -15,7 +15,7 @@ import { syncTodoPanelUI, extractLatestTodos } from '../features/chat/todo-panel
 import { abortSession } from '../features/chat/send';
 import { getStreamingAssistantText } from '../features/chat/streaming';
 import { refreshConversationFromBackend } from '../features/conversations/load';
-import { refreshChatContent } from '../features/chat/refresh';
+import { refreshChatContent, afterChatMounted } from '../features/chat/refresh';
 import { normalizeMessageForCompare } from '../features/files/index';
 import type { PermissionRequestPayload } from '../types';
 import { showCopyToastMsg, scheduleUiRefresh } from '../ui';
@@ -139,10 +139,11 @@ export async function setupEventListeners() {
       // 输出结束后重建消息列表：走渲染缓存 + 指纹跳过，不再整页 innerHTML 重建。
       // refreshChatContent 的 applyChatDom 内部已做滚动快照/恢复，
       // 若用户此前已上滑阅读上方消息，重建后保持原位。
+      // 长列表分块挂载期间 DOM 未就绪：流式块恢复挂到 afterChatMounted。
       refreshChatContent();
       const sid = appState.activeConversationId;
       if (sid && appState.streamingBySession.has(sid)) {
-        refreshStreamingUI(sid);
+        afterChatMounted(() => refreshStreamingUI(sid));
       }
       updateConversationListSpinner();
       setTimeout(() => {

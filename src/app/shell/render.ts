@@ -51,7 +51,7 @@ import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { loadData } from '../../features/conversations';
 import { newChat } from '../../features/chat/send';
 import { handleSendButtonClick } from '../../features/chat/retry';
-import { handleKeydown, refreshChatContent, resetChatRenderKey } from '../../features/chat/refresh';
+import { handleKeydown, refreshChatContent, resetChatRenderKey, afterChatMounted } from '../../features/chat/refresh';
 import { bindChatModelPickerEvents } from '../../features/chat/model-picker';
 import {
   handlePaste,
@@ -151,9 +151,10 @@ function performRender() {
     // 全量重绘不包含进行中的流式块（buildDisplayMessages 只取已提交消息）。
     // 从设置/API 配置等页面返回时，立即按 appState 恢复流式 DOM，
     // 避免模型在思考/子代理静默期聊天区看起来「空白卡死」。
+    // 长列表分块挂载期间 DOM 未就绪：流式块恢复挂到 afterChatMounted。
     const sid = appState.activeConversationId;
     if (sid && appState.streamingBySession.has(sid)) {
-      refreshStreamingUI(sid);
+      afterChatMounted(() => refreshStreamingUI(sid));
     }
     // 同步左侧「子代理」tab 内容 / 角标 / 自动切换（全量 HTML 已嵌入时也要补）
     syncSubagentProgressUI();
@@ -240,12 +241,15 @@ export function attachEventListeners() {
 
   const listEl = document.querySelector('#conversation-list');
   if (listEl) {
-    listEl.removeEventListener('click', handleConversationListClick);
-    listEl.addEventListener('click', handleConversationListClick);
-    listEl.removeEventListener('contextmenu', handleConversationListContextMenu);
-    listEl.addEventListener('contextmenu', handleConversationListContextMenu);
-    listEl.removeEventListener('keydown', handleConversationListKeydown);
-    listEl.addEventListener('keydown', handleConversationListKeydown);
+    // dataset.bound 守卫：全量 render 每次重建节点，只需绑一次；
+    // 若未来改为复用节点，也能避免同一节点监听叠加（removeEventListener 前置在新建节点上是无效操作）。
+    const listElBound = listEl as HTMLElement & { dataset: DOMStringMap };
+    if (listElBound.dataset.bound !== '1') {
+      listElBound.dataset.bound = '1';
+      listEl.addEventListener('click', handleConversationListClick);
+      listEl.addEventListener('contextmenu', handleConversationListContextMenu);
+      listEl.addEventListener('keydown', handleConversationListKeydown);
+    }
   }
 
   const textarea = document.querySelector('#message-input') as HTMLTextAreaElement;

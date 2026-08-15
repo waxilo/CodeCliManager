@@ -2,7 +2,7 @@ import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
 import type { Message, Conversation } from '../../types';
 import { escapeHtml } from '../../utils';
 import * as api from '../../api';
-import { renderMessageListHtml, extractToolName, extractToolUseId, extractToolResult } from './render-messages';
+import { renderMessageListHtml, renderMessageHtmlChunks, type RenderedMessageChunk, extractToolName, extractToolUseId, extractToolResult } from './render-messages';
 import { getEffectiveProjectDir } from './session-context';
 import { renderCopyIconHtml, renderInputComposerHtml } from './input-composer';
 import { getActiveChatModelForRender } from './model-picker';
@@ -194,6 +194,42 @@ export function renderConversationMessagesInnerHtml(messages: Message[]): string
       <span>在下方输入消息，重新开始这段会话</span>
     </div>
   `;
+}
+
+/**
+ * 同 renderConversationMessagesInnerHtml，但返回「消息级 HTML 块数组 + 头部块」，
+ * 供 applyChatDom 键控 diff 挂载——复用未变消息节点，避免长会话一次性
+ * innerHTML 写入阻塞 WebView2 主线程。语义与拼接版完全一致：
+ * `loadEarlier + chunks.map(c => c.html).join('')` 即拼接版结果。
+ */
+export function renderConversationMessageChunks(messages: Message[]): {
+  loadEarlier: string;
+  chunks: RenderedMessageChunk[];
+  empty: string | null;
+} {
+  ensureMessageWindowForActiveConversation();
+
+  const { visible, totalHidden } = splitMessageWindow(messages, getActiveMessageWindowSize());
+  const loadEarlier = totalHidden > 0 ? renderLoadEarlierButtonHtml(totalHidden) : '';
+  const chunks = renderMessageHtmlChunks(visible);
+  if (loadEarlier || chunks.length > 0) {
+    return { loadEarlier, chunks, empty: null };
+  }
+  return {
+    loadEarlier: '',
+    chunks: [],
+    empty: `
+      <div class="conversation-empty-state">
+        <span class="conversation-empty-state-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H8l-5 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+        </span>
+        <strong>会话内容已撤回</strong>
+        <span>在下方输入消息，重新开始这段会话</span>
+      </div>
+    `,
+  };
 }
 
 export function renderChatContent(): string {

@@ -524,36 +524,16 @@ a.claude-update-action {
   color: var(--color-accent);
 }
 
-/* ── 会话左侧聊天图标（三级状态） ── */
-.conversation-chat-icon {
-  flex-shrink: 0;
-  color: var(--color-text-muted);
-  opacity: 0.5;
-  transition: opacity 0.15s ease, color 0.15s ease;
-}
-
-.conversation-item:hover .conversation-chat-icon {
-  opacity: 0.8;
-  color: var(--color-text-secondary);
-}
-
-.conversation-item.active .conversation-chat-icon {
-  color: var(--color-accent);
-  opacity: 1;
-}
-
-/* 状态图标常驻容器：聊天图标 + 运行圆点同时渲染，按 .running 切换显隐 */
+/* ── 会话左侧状态图标位（固定占位；非运行态为空，运行态显示脉冲圆点） ── */
 .conversation-state-icon {
   flex-shrink: 0;
+  width: 13px;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
 }
 
 .conversation-state-icon .conversation-status-dot {
-  display: none;
-}
-
-.conversation-item.running .conversation-state-icon .conversation-chat-icon {
   display: none;
 }
 
@@ -561,7 +541,7 @@ a.claude-update-action {
   display: inline-flex;
 }
 
-/* 运行中状态：脉冲圆点替代聊天图标 */
+/* 运行中状态：脉冲圆点 */
 .conversation-status-dot {
   flex-shrink: 0;
   width: 13px;

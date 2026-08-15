@@ -97,8 +97,13 @@ export async function refreshMainBalanceBar(): Promise<void> {
   }
 }
 
+/** 已排队的余额条刷新定时器：合并同帧内多次进入主页面触发的刷新，避免退出管理页连点排 N 个 setTimeout + 2N 发 IPC */
+let pendingBalanceRefresh: ReturnType<typeof setTimeout> | null = null;
+
 export function scheduleMainBalanceBar(): void {
-  window.setTimeout(() => {
+  if (pendingBalanceRefresh !== null) return;
+  pendingBalanceRefresh = window.setTimeout(() => {
+    pendingBalanceRefresh = null;
     if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive || appState.isKiroViewActive) return;
     void refreshGitBranch();
     void refreshMainBalanceBar();

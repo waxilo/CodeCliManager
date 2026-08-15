@@ -268,10 +268,12 @@ export function renderAskUserQuestionCardHtml(
   `;
 }
 
-/** 合并相邻的同类型消息（连续 assistant 文本或连续 thinking） */
+/** 合并相邻的同类型消息（连续 assistant 文本或连续 thinking）。
+ *  不修改入参数组/消息对象：拼接产生新对象，避免污染会话数据
+ *  （splitMessageWindow 的 slice 是浅拷贝，原地 += 会改写 conversation.messages 里的原对象）。 */
 export function mergeAdjacentSameRole(messages: Message[]): Message[] {
   if (messages.length === 0) return [];
-  const result: Message[] = [messages[0]];
+  const result: Message[] = [{ ...messages[0] }];
 
   for (let i = 1; i < messages.length; i++) {
     const prev = result[result.length - 1];
@@ -282,13 +284,13 @@ export function mergeAdjacentSameRole(messages: Message[]): Message[] {
       prev.role === 'assistant' && curr.role === 'assistant'
       && !prev.thinking && !curr.thinking
     ) {
-      prev.content = prev.content + '\n\n' + curr.content;
+      result[result.length - 1] = { ...prev, content: prev.content + '\n\n' + curr.content };
       continue;
     }
 
     // 相邻 thinking 消息 → 合并
     if (prev.role === 'thinking' && curr.role === 'thinking') {
-      prev.content = prev.content + '\n' + curr.content;
+      result[result.length - 1] = { ...prev, content: prev.content + '\n' + curr.content };
       continue;
     }
 
@@ -527,7 +529,7 @@ export function renderThinkingDetails(thinking: string, label: string, expanded:
 }
 
 /** 渲染工具消息 HTML */
-export function renderToolMessageHtml(msg: Message): string {
+export function renderToolMessageHtml(msg: Message, msgIdAttr = ''): string {
   const td = msg.toolData;
   if (!td) return '';
 
@@ -561,7 +563,7 @@ export function renderToolMessageHtml(msg: Message): string {
     const secondaryHtml = secondary ? `<span class="tool-secondary">${escapeHtml(secondary)}</span>` : '';
 
     const toolContent = `
-      <div class="tool-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" style="border-left-color: ${colorScheme.border}">
+      <div class="tool-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" ${msgIdAttr} style="border-left-color: ${colorScheme.border}">
         <div class="tool-card-header">
           <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
           <span class="tool-label">${escapeHtml(config.label)}</span>
@@ -598,7 +600,7 @@ export function renderToolMessageHtml(msg: Message): string {
       : '';
     const report = tn.result?.trim();
     return `
-      <div class="tool-card subagent-task-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" style="border-left-color: ${colorScheme.border}">
+      <div class="tool-card subagent-task-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" ${msgIdAttr} style="border-left-color: ${colorScheme.border}">
         <details class="tool-collapsible"${report ? ' open' : ''}>
           <summary class="tool-card-header tool-collapsible-summary">
             <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
@@ -643,7 +645,7 @@ export function renderToolMessageHtml(msg: Message): string {
 
   const expanded = isRunning ? ' open' : '';
   const toolContent = `
-    <div class="tool-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" style="border-left-color: ${colorScheme.border}">
+    <div class="tool-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" ${msgIdAttr} style="border-left-color: ${colorScheme.border}">
       <details class="tool-collapsible"${expanded}>
         <summary class="tool-card-header tool-collapsible-summary">
           <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
@@ -666,6 +668,7 @@ export function renderToolMessageHtml(msg: Message): string {
 }
 
 export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = false): string {
+  const msgIdAttr = `data-message-id="${escapeHtml(msg.id)}"`;
   if (msg.role === 'tool') {
     if (msg.toolData?.toolName === 'AskUserQuestion') {
       const input = msg.toolData.toolInput || {};
@@ -676,7 +679,7 @@ export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = fa
       const isPending = msg.id.startsWith('pending-ask-') && !answers;
       const requestId = isPending ? msg.id.replace(/^pending-ask-/, '') : '';
       const interactive = isPending && !!requestId;
-      return `<div class="message tool ask-message">${renderAskUserQuestionCardHtml(
+      return `<div class="message tool ask-message" ${msgIdAttr}>${renderAskUserQuestionCardHtml(
         input,
         answers,
         isPending,
@@ -684,12 +687,12 @@ export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = fa
         requestId,
       )}</div>`;
     }
-    return renderToolMessageHtml(msg);
+    return renderToolMessageHtml(msg, msgIdAttr);
   }
 
   if (msg.role === 'error') {
     return `
-      <div class="message error">
+      <div class="message error" ${msgIdAttr}>
         <div class="message-content message-error-content">
           <div class="message-error-title">调用失败</div>
           <div class="markdown-body">${renderMarkdown(msg.content)}</div>
@@ -756,7 +759,7 @@ export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = fa
   // 助手/思考消息：全宽布局，无头像
   if (msg.role === 'assistant' || isThinking) {
     return `
-      <div class="message ${roleClass}${groupedClass}">
+      <div class="message ${roleClass}${groupedClass}" ${msgIdAttr}>
         <div class="message-content">
           ${thinkingHtml}
           ${contentHtml}
@@ -780,7 +783,7 @@ export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = fa
       </svg>
     </button>` : '';
   return `
-    <div class="message ${roleClass}${groupedClass}">
+    <div class="message ${roleClass}${groupedClass}" ${msgIdAttr}>
       <div class="message-content">
         ${userRefs}
         ${thinkingHtml}
@@ -795,8 +798,48 @@ export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = fa
   `;
 }
 
-/** 完整消息处理管线：处理工具 → 过滤不可见 → 合并相邻助手（含去重）→ 渲染 HTML */
-export function renderMessageListHtml(messages: Message[]): string {
+/**
+ * 消息级渲染指纹：用于键控 DOM diff——内容/状态未变时复用既有节点，
+ * 变化时整条重建。必须覆盖所有影响 renderMessageHtml 输出的输入：
+ * content/thinking、工具运行态与结果、思考块展开态、运行态（撤回按钮显隐）、
+ * 相邻角色（grouped 视觉）与「是否最后一条用户消息」（撤回按钮归属）。
+ */
+export function messageRenderKey(
+  msg: Message,
+  showUndo: boolean,
+  prevRole?: string,
+): string {
+  const thinkingExpanded = appState.expandedThinkingBlocks.has(msg.id);
+  const td = msg.toolData;
+  const tdSig = td
+    ? `${td.toolName}|${td.toolResult === undefined ? 'p' : `d:${td.toolResult.length}`}|${td.isError ? 'err' : 'ok'}|${td.toolUseId ?? ''}`
+    : '';
+  return [
+    msg.id,
+    msg.role,
+    msg.content.length,
+    msg.content.slice(-64),
+    msg.thinking?.length ?? 0,
+    thinkingExpanded ? 'e' : 'c',
+    showUndo ? 'u' : '',
+    prevRole || '',
+    tdSig,
+  ].join('|');
+}
+
+/** 单条消息渲染结果：id（diff 键）+ renderKey（内容指纹）+ HTML */
+export interface RenderedMessageChunk {
+  id: string;
+  renderKey: string;
+  html: string;
+}
+
+/**
+ * 完整消息处理管线：处理工具 → 过滤不可见 → 合并相邻助手（含去重）→ 渲染 HTML。
+ * 返回消息级 chunks（带 id / renderKey）：供 applyChatDom 键控 diff 挂载——
+ * 复用未变节点、只重建变化消息，避免整列表 innerHTML 写入阻塞 WebView2 主线程。
+ */
+export function renderMessageHtmlChunks(messages: Message[]): RenderedMessageChunk[] {
   const isRunning = appState.activeConversationId ? appState.runningSessions.has(appState.activeConversationId) : false;
   // 先处理/过滤工具，再合并相邻助手，避免「助手-工具-助手」过滤后露出重复答案
   const processed = mergeAdjacentSameRole(
@@ -804,14 +847,21 @@ export function renderMessageListHtml(messages: Message[]): string {
   );
   // 提前计算最后一条用户消息索引，避免在 .map() 内部 O(n²) 重复计算
   const lastUserIdx = processed.map(m => m.role).lastIndexOf('user');
-  return processed
-    .map((msg, idx, arr) => {
-      // 撤回按钮始终显示在最后一条用户消息上，即使后面还有 AI 回复
-      // 点击撤回会删除该用户提问 + 所有后续回答
-      const showUndo = !isRunning && idx === lastUserIdx;
-      return renderMessageHtml(msg, idx > 0 ? arr[idx - 1].role : undefined, showUndo);
-    })
-    .join('');
+  return processed.map((msg, idx, arr) => {
+    // 撤回按钮始终显示在最后一条用户消息上，即使后面还有 AI 回复
+    // 点击撤回会删除该用户提问 + 所有后续回答
+    const showUndo = !isRunning && idx === lastUserIdx;
+    const prevRole = idx > 0 ? arr[idx - 1].role : undefined;
+    return {
+      id: msg.id,
+      renderKey: messageRenderKey(msg, showUndo, prevRole),
+      html: renderMessageHtml(msg, prevRole, showUndo),
+    };
+  });
+}
+
+export function renderMessageListHtml(messages: Message[]): string {
+  return renderMessageHtmlChunks(messages).map((c) => c.html).join('');
 }
 
 export function renderFileRefChipsHtml(refs: FileRef[]): string {

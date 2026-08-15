@@ -152,16 +152,13 @@ export function buildSidebarWorkspaceViews(
 const CHEVRON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
 
-const CONVERSATION_CHAT_ICON_SVG =
-  '<svg class="conversation-chat-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
-
 const CONVERSATION_RUNNING_DOT_HTML =
   '<span class="conversation-status-dot" title="运行中" aria-label="运行中"></span>';
 
-/** 状态图标常驻容器：聊天图标 + 运行圆点同时渲染，CSS 按 .running 切换显隐，
+/** 状态图标常驻容器：仅运行圆点；非运行态整容器不占位（CSS 控制），
  *  避免运行时 outerHTML 替换节点触发侧栏行样式重算。 */
 const CONVERSATION_STATE_ICON =
-  `<span class="conversation-state-icon">${CONVERSATION_CHAT_ICON_SVG}${CONVERSATION_RUNNING_DOT_HTML}</span>`;
+  `<span class="conversation-state-icon">${CONVERSATION_RUNNING_DOT_HTML}</span>`;
 
 /** 项目卡片元信息（最近使用时间 / 运行中状态）的内部 HTML */
 export function renderWorkspaceMetaInnerHtml(ws: SidebarWorkspaceView): string {
@@ -325,6 +322,9 @@ export function toggleWorkspaceExpanded(key: string): void {
   }
 }
 
+/** 每个 workspace 卡片最近写入的 meta HTML；无变化时跳过 innerHTML 写入，避免每次退出管理页全量重写 */
+const lastWorkspaceMetaHtml = new Map<string, string>();
+
 export function updateConversationListSpinner() {
   // 会话行：运行中显示脉冲点，否则回到聊天图标。
   // 图标已常驻 DOM（CONVERSATION_STATE_ICON），只切 .running class，
@@ -343,7 +343,18 @@ export function updateConversationListSpinner() {
   cards.forEach((card) => {
     const ws = card.dataset.workspaceKey ? viewByKey.get(card.dataset.workspaceKey) : undefined;
     const meta = card.querySelector<HTMLElement>('.workspace-meta');
-    if (ws && meta) meta.innerHTML = renderWorkspaceMetaInnerHtml(ws);
+    if (!ws || !meta) return;
+    const key = ws.key;
+    const html = renderWorkspaceMetaInnerHtml(ws);
+    // 内容未变时跳过：避免归档工作区多时每次切回主页面 O(cards) 次 innerHTML 写入 + 布局失效
+    if (lastWorkspaceMetaHtml.get(key) === html) return;
+    lastWorkspaceMetaHtml.set(key, html);
+    meta.innerHTML = html;
   });
+
+  // 清理已不存在工作区的缓存键，避免会话列表增删后 Map 无限残留
+  for (const key of [...lastWorkspaceMetaHtml.keys()]) {
+    if (!viewByKey.has(key)) lastWorkspaceMetaHtml.delete(key);
+  }
 }
 

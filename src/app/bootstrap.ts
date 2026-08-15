@@ -13,7 +13,7 @@ import {
 import { shellApi } from './shell/api';
 import { render, syncTitlebarActions } from './shell/render';
 import { enterManagementView, exitManagementView } from './shell/management-view';
-import { refreshChatContent } from '../features/chat/refresh';
+import { refreshChatContent, afterChatMounted } from '../features/chat/refresh';
 import { initPlatformClass, setupExternalLinkInterceptor } from './shell/platform';
 import { syncPermissionModeToBackend } from '../features/permissions/permission-mode';
 import { loadData } from '../features/conversations';
@@ -194,11 +194,12 @@ export async function init(): Promise<void> {
     if (flags.todo) {
       syncTodoPanelUI();
     }
-    // refreshChatContent 会抹掉流式块；当前会话在流式时按 appState 恢复，避免空白卡死
+    // refreshChatContent 会抹掉流式块；当前会话在流式时按 appState 恢复，避免空白卡死。
+    // 长列表分块挂载期间 DOM 未就绪：流式块恢复挂到 afterChatMounted，挂载完成后执行。
     if (chatRebuilt) {
       const sid = appState.activeConversationId;
       if (sid && appState.streamingBySession.has(sid)) {
-        refreshStreamingUI(sid);
+        afterChatMounted(() => refreshStreamingUI(sid));
       }
     }
   });

@@ -2,14 +2,14 @@ import { appState, LOAD_EARLIER_STEP } from '../../state';
 import type { Conversation } from '../../types';
 import { initCodeCopyButtons, scheduleHighlighting, copyToClipboard } from '../../markdown';
 import { bindInteractiveAskCards, syncPendingAskToInteractionHost } from '../permissions';
-import { renderConversationMessagesInnerHtml, buildDisplayMessages, ensureMessageWindowForActiveConversation, getActiveMessageWindowSize, incrementActiveMessageWindow } from './render-chat';
+import { renderConversationMessageChunks, buildDisplayMessages, ensureMessageWindowForActiveConversation, getActiveMessageWindowSize, incrementActiveMessageWindow, renderChatHeaderHtml } from './render-chat';
+import type { RenderedMessageChunk } from './render-messages';
 import { bindSessionIdCopyEvents } from './input-composer';
 import { updateSendButtonState, isSendButtonLoading } from './session-context';
 import { sendMessage } from './send';
 import { handleRetryClick, handleUndoClick } from './retry';
 import { refreshRunStatusStrip } from './run-status';
 import { initAnswerScroller, captureScrollState, restoreScrollState } from './streaming';
-import { renderChatHeaderHtml } from './render-chat';
 import { canSendMessage } from './session-context';
 import { getActiveSuggestionIndex, getFileSuggestionsContainer } from '../files/index';
 import { getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
@@ -178,8 +178,13 @@ function chatRenderKey(conversation: Conversation | undefined): string {
 }
 
 /**
- * 「已提交内容」指纹：与 chatRenderKey 一致（不含工具签名）。
- * 子代理（Task）卡不在主输出页面展示，运行中工具转态不需要重建主消息列表——
+ * 「已提交内容」指纹：只跟踪真实消息列表变化，供管理页退出时判断是否整列表重建。
+ * - 剔除运行标志：turn-continued / queued-prompt-dispatched 只改 runningSessions 不改消息，
+ *   否则运行中会话每次进出管理页都误判 contentChanged 强制重建聊天区（Win 切回卡顿主因）。
+ * - 剔除 updated_at：后台 messages-updated 可能只前移时间戳而消息未变，会误判重建。
+ * - 剔除 pendingAskSignature：问卡钉在 #interaction-host（不在消息列表），由
+ *   syncPendingAskToInteractionHost 独立同步，不需要重建消息列表。
+ * 子代理（Task）卡不在主输出页面展示，运行中工具转态也不需要重建主消息列表——
  * 主列表只随已提交内容 / 流式块变化，进行中子代理由右侧子代理清单栏独立同步。
  */
 function committedChatRenderKey(conversation: Conversation | undefined): string {
@@ -188,22 +193,21 @@ function committedChatRenderKey(conversation: Conversation | undefined): string 
   return [
     appState.activeConversationId || '',
     appState.activeConversationSourcePath || '',
-    conversation?.updated_at ?? '',
     msgs.length,
     last?.id ?? '',
     last?.timestamp ?? '',
     getActiveMessageWindowSize(),
-    appState.runningSessions.has(appState.activeConversationId) ? 'r' : '',
     appState.pendingUserMessage ? 'p' : '',
     appState.transientSessionError ? 'e' : '',
-    pendingAskSignature(appState.activeConversationId || 'pending'),
   ].join('|');
 }
 
 interface RenderedConversationEntry {
   renderKey: string;
   topbarHtml: string;
-  chatHtml: string;
+  loadEarlier: string;
+  chunks: RenderedMessageChunk[];
+  empty: string | null;
 }
 
 /**
@@ -219,8 +223,131 @@ export function renderCacheKey(conversation: Conversation | undefined): string {
   return `${chatRenderKey(conversation)}|t:${thinkingSignature}`;
 }
 
-/** 把已生成的 topbar / 消息列表 HTML 写入 DOM，并重绑事件、恢复滚动状态 */
-function applyChatDom(topbarHtml: string, chatHtml: string): void {
+// ── 键控 DOM diff 挂载：消息节点级复用，根治整列表 innerHTML 重建 ──
+// applyChatDom 把「新渲染的 chunks」与「#message-list 现有节点」做键控 diff：
+//  - id + renderKey 未变 → 复用既有节点（保留事件监听、思考块展开态、工具卡折叠态、滚动位置），
+//    仅做 DOM 移动，零解析零重建；
+//  - 内容/状态变化 → 只重建该条消息（单条 template 解析）；
+//  - 已移除的消息 → 删除节点。
+// 这样管理页切回 / 消息落盘时，绝大多数节点原样保留，不再 MB 级 innerHTML 写入。
+// 仅当「首次渲染 / 切换会话（无现成节点）」或「新建节点过多」时回退到分块挂载，
+// 批间 requestAnimationFrame 让出主线程。
+const CHUNK_ASYNC_CHUNK_THRESHOLD = 80;
+/** 消息 HTML 总长超过该字节数即分块（≈ MB 级解析临界） */
+const CHUNK_ASYNC_BYTES_THRESHOLD = 300_000;
+const CHUNK_BATCH = 20;
+/** 挂载代数：异步分块期间若发生新的重建（切会话/重渲染），旧挂载的剩余批立即放弃 */
+let mountGeneration = 0;
+
+/** 挂载完成后的回调队列（bootstrap / render / session-events 注册流式块恢复等） */
+let mountedCallbacks: Array<() => void> = [];
+/** true = 无进行中的挂载；此时 afterChatMounted 立即执行 */
+let mountedCallbacksIdle = true;
+
+/**
+ * 在消息列表挂载完成后执行回调。
+ * 同步挂载立即执行；异步分块挂载在最后一批插入完成后执行。
+ * 用于替代调用方在 refreshChatContent() 返回后直接 refreshStreamingUI——
+ * 长列表分块期间 DOM 未就绪，流式块恢复必须等挂载完成。
+ */
+export function afterChatMounted(cb: () => void): void {
+  if (mountedCallbacksIdle) {
+    cb();
+    return;
+  }
+  mountedCallbacks.push(cb);
+}
+
+function fireMountedCallbacks(): void {
+  const cbs = mountedCallbacks;
+  mountedCallbacks = [];
+  mountedCallbacksIdle = true;
+  for (const cb of cbs) {
+    try {
+      cb();
+    } catch (e) {
+      console.error('[chat-mount] 挂载完成回调异常:', e);
+    }
+  }
+}
+
+/** 单条 chunk HTML → 元素（复用 stream 挂载的 template 解析） */
+function createElementFromHtml(html: string): HTMLElement | null {
+  const tmp = document.createElement('template');
+  tmp.innerHTML = html;
+  return tmp.content.firstElementChild as HTMLElement | null;
+}
+
+interface ChatMountSlot {
+  kind: 'reuse' | 'create';
+  node: HTMLElement | null; // reuse 时有效
+  chunk?: RenderedMessageChunk; // create 时有效
+}
+
+/** 同步执行槽位：按序 append，复用节点零解析，新建节点单条解析 */
+function syncMountSlots(messageList: HTMLElement, slots: ChatMountSlot[]): void {
+  for (const slot of slots) {
+    if (slot.kind === 'reuse' && slot.node) {
+      messageList.appendChild(slot.node);
+    } else if (slot.kind === 'create' && slot.chunk) {
+      const el = createElementFromHtml(slot.chunk.html);
+      if (el) {
+        el.dataset.renderKey = slot.chunk.renderKey;
+        messageList.appendChild(el);
+      }
+    }
+  }
+}
+
+/** 异步分块挂载（仅新建节点）：批间让出主线程，完成后统一后处理 + 滚动恢复 */
+function asyncMountCreateSlots(
+  messageList: HTMLElement,
+  slots: ChatMountSlot[],
+  scrollSnap: { autoScroll: boolean; scrollTop: number } | null,
+  gen: number,
+): void {
+  let index = 0;
+  const mountNextBatch = () => {
+    // 已被新重建取代，或管理页摘走了 message-list（脱离文档）：放弃剩余批
+    if (gen !== mountGeneration) return;
+    if (!messageList.isConnected) {
+      fireMountedCallbacks();
+      return;
+    }
+    const frag = document.createDocumentFragment();
+    const end = Math.min(index + CHUNK_BATCH, slots.length);
+    for (; index < end; index++) {
+      const slot = slots[index];
+      if (slot.kind === 'reuse' && slot.node) {
+        frag.append(slot.node);
+      } else if (slot.kind === 'create' && slot.chunk) {
+        const el = createElementFromHtml(slot.chunk.html);
+        if (el) {
+          el.dataset.renderKey = slot.chunk.renderKey;
+          frag.append(el);
+        }
+      }
+    }
+    messageList.appendChild(frag);
+    if (index < slots.length) {
+      requestAnimationFrame(mountNextBatch);
+      return;
+    }
+    // 全部插入完成：后处理 + 滚动恢复 + 完成回调（流式块恢复等）
+    setupMessageListPostRender(messageList);
+    restoreScrollState(scrollSnap);
+    fireMountedCallbacks();
+  };
+  requestAnimationFrame(mountNextBatch);
+}
+
+/** 把已生成的 topbar / 消息列表写入 DOM（键控 diff + 分块保底），并重绑事件、恢复滚动状态 */
+function applyChatDom(
+  topbarHtml: string,
+  loadEarlier: string,
+  chunks: RenderedMessageChunk[],
+  empty: string | null,
+): void {
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   const topbarMain = document.querySelector<HTMLDivElement>('.main-topbar-main');
 
@@ -232,15 +359,79 @@ function applyChatDom(topbarHtml: string, chatHtml: string): void {
   updateSendButtonState();
   // 输入框下方状态条不随消息列表重建（composer 常驻），但全量渲染后需同步一次
   refreshRunStatusStrip();
-  if (messageList) {
-    // 重建前记录滚动状态：输出结束时若用户在阅读上方消息，重建后不应强制跳回底部
-    const scrollSnap = captureScrollState();
-    messageList.innerHTML = chatHtml;
-    // 后处理：代码复制按钮、思考块折叠事件、消息复制控件
-    setupMessageListPostRender(messageList);
-    // 恢复滚动状态
-    restoreScrollState(scrollSnap);
+
+  if (!messageList) {
+    // 管理页停留期间 message-list 被摘下：无 DOM 可写，直接完成回调
+    fireMountedCallbacks();
+    return;
   }
+
+  // 重建前记录滚动状态：输出结束时若用户在阅读上方消息，重建后不应强制跳回底部
+  const scrollSnap = captureScrollState();
+  const gen = ++mountGeneration;
+  mountedCallbacks = [];
+  mountedCallbacksIdle = false;
+
+  // 空状态：无消息时
+  if (chunks.length === 0) {
+    messageList.innerHTML = loadEarlier + (empty ?? '');
+    setupMessageListPostRender(messageList);
+    restoreScrollState(scrollSnap);
+    fireMountedCallbacks();
+    return;
+  }
+
+  // ── 键控 diff：索引现有消息节点 ──
+  const existingById = new Map<string, HTMLElement>();
+  messageList.querySelectorAll<HTMLElement>('.message[data-message-id]').forEach((el) => {
+    const id = el.dataset.messageId;
+    if (id && !existingById.has(id)) existingById.set(id, el);
+  });
+
+  // 规划槽位：复用（id+renderKey 相同）/ 新建
+  const slots: ChatMountSlot[] = [];
+  let createCount = 0;
+  let totalBytes = loadEarlier.length;
+  for (const chunk of chunks) {
+    totalBytes += chunk.html.length;
+    const existing = existingById.get(chunk.id);
+    if (existing && existing.dataset.renderKey === chunk.renderKey) {
+      slots.push({ kind: 'reuse', node: existing });
+    } else {
+      slots.push({ kind: 'create', node: null, chunk });
+      createCount += 1;
+    }
+  }
+
+  // 旧节点不再需要：先摘除（复用节点在挂载时被重新 append，顺序由 slots 决定）
+  existingById.forEach((el) => {
+    if (el.parentElement === messageList) el.remove();
+  });
+  // 移除旧的「加载更早」按钮与空状态（头部/空态由本次渲染重写）
+  messageList.querySelector('.load-earlier-btn')?.remove();
+  messageList.querySelector('.conversation-empty-state')?.remove();
+  // 流式块由 refreshStreamingUI 在 afterChatMounted 重建，此处清掉避免残留
+  messageList.querySelectorAll('[id^="streaming-block-"]').forEach((el) => el.remove());
+  // 其余非消息节点（问卡残留等）一并清掉，保证列表结构纯净
+  Array.from(messageList.children).forEach((child) => {
+    if (!(child as HTMLElement).classList?.contains('message')) child.remove();
+  });
+
+  if (loadEarlier) {
+    messageList.insertAdjacentHTML('afterbegin', loadEarlier);
+  }
+
+  // 新建节点少 → 同步 diff 挂载（复用节点零解析，仅新建单条解析）
+  if (createCount === 0 || (createCount <= CHUNK_ASYNC_CHUNK_THRESHOLD && totalBytes <= CHUNK_ASYNC_BYTES_THRESHOLD)) {
+    syncMountSlots(messageList, slots);
+    setupMessageListPostRender(messageList);
+    restoreScrollState(scrollSnap);
+    fireMountedCallbacks();
+    return;
+  }
+
+  // 新建节点多（首次渲染长会话 / 大规模变化）→ 分块挂载让出主线程
+  asyncMountCreateSlots(messageList, slots, scrollSnap, gen);
 }
 
 /**
@@ -285,20 +476,20 @@ export function refreshChatContent(): boolean {
   if (cached && cached.renderKey === renderKey) {
     renderCache.delete(cacheKey);
     renderCache.set(cacheKey, cached);
-    applyChatDom(cached.topbarHtml, cached.chatHtml);
+    applyChatDom(cached.topbarHtml, cached.loadEarlier, cached.chunks, cached.empty);
     return true;
   }
 
   // 完整渲染
   const topbarHtml = renderChatHeaderHtml(conversation);
   const messages = buildDisplayMessages(conversation);
-  const chatHtml = renderConversationMessagesInnerHtml(messages);
-  applyChatDom(topbarHtml, chatHtml);
+  const { loadEarlier, chunks, empty } = renderConversationMessageChunks(messages);
+  applyChatDom(topbarHtml, loadEarlier, chunks, empty);
 
   // 缓存本次渲染结果（运行中会话也缓存）：chatRenderKey 只在落盘/工具转态/回合切换时变化，
   // 非流式每帧。缓存的是「已提交消息」快照；流式块由 refreshStreamingUI 增量补回，
   // 回切/管理页返回时复用快照，跳过整条渲染管线（流式中途返回的最坏情况）。
-  renderCache.set(cacheKey, { renderKey, topbarHtml, chatHtml });
+  renderCache.set(cacheKey, { renderKey, topbarHtml, loadEarlier, chunks, empty });
   if (renderCache.size > RENDER_CACHE_MAX) {
     const oldest = renderCache.keys().next().value;
     if (oldest !== undefined) renderCache.delete(oldest);
