@@ -169,20 +169,40 @@ pub(crate) fn read_installed_claude_version() -> Result<(String, String), String
     Ok((version, claude_bin.display().to_string()))
 }
 
+/// npm registry 版本查询源：官方 registry 优先，npmmirror 兜底（国内直连 npmjs 常超时）。
+const NPM_LATEST_CANDIDATES: &[&str] = &[
+    "https://registry.npmjs.org/@anthropic-ai/claude-code/latest",
+    "https://registry.npmmirror.com/@anthropic-ai/claude-code/latest",
+];
+
 pub(crate) fn fetch_latest_claude_version() -> Result<String, String> {
     let client = reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(12))
+        .timeout(Duration::from_secs(10))
+        .connect_timeout(Duration::from_secs(5))
         .user_agent("CodeCliManager")
         .build()
         .map_err(|e| format!("创建 HTTP 客户端失败: {}", e))?;
 
+    let mut last_err: Option<String> = None;
+    for url in NPM_LATEST_CANDIDATES {
+        match fetch_npm_latest(&client, url) {
+            Ok(version) => return Ok(version),
+            Err(e) => {
+                last_err = Some(format!("{url}: {e}"));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "查询 npm 最新版本失败".to_string()))
+}
+
+fn fetch_npm_latest(client: &reqwest::blocking::Client, url: &str) -> Result<String, String> {
     let response = client
-        .get("https://registry.npmjs.org/@anthropic-ai/claude-code/latest")
+        .get(url)
         .send()
-        .map_err(|e| format!("查询 npm 最新版本失败: {}", e))?;
+        .map_err(|e| format!("请求失败: {}", e))?;
 
     if !response.status().is_success() {
-        return Err(format!("查询 npm 最新版本失败: HTTP {}", response.status()));
+        return Err(format!("HTTP {}", response.status()));
     }
 
     #[derive(Deserialize)]

@@ -149,8 +149,10 @@ export async function checkAppUpdate(force = false): Promise<void> {
 
   appState.appUpdateCheckPromise = (async () => {
     try {
-      // 本机清单代理会改写 GitHub 下载地址为镜像；超时放宽避免慢网误判
-      const update = await checkAppUpdateRemote({ timeout: 60_000 });
+      // 本机清单代理会改写 GitHub 下载地址为镜像，并在直连失败时回退镜像；
+      // 超时按 endpoint 逐个生效（插件内每个请求都带该超时），
+      // 收紧到 25s 避免 4 个 endpoint 全挂时界面干等数分钟。
+      const update = await checkAppUpdateRemote({ timeout: 25_000 });
       appState.appUpdate = update;
       appState.appUpdateInfo.updateAvailable = Boolean(update);
       // updater 在当前版本已是最新时返回 null，此时最新版本就是当前版本。
