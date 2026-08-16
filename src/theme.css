@@ -112,7 +112,7 @@
   --sidebar-item-hover: #1c2128;
   --sidebar-item-active-from: rgba(68, 147, 248, 0.2);
   --sidebar-item-active-to: rgba(68, 147, 248, 0.05);
-  --sidebar-item-active-shadow: inset 2px 0 0 var(--color-accent);
+  --sidebar-item-active-shadow: none;
   --sidebar-badge-bg: rgba(255, 255, 255, 0.08);
   --sidebar-badge-text: #aeb8c5;
   --sidebar-divider: rgba(255, 255, 255, 0.08);
@@ -242,7 +242,7 @@
   --sidebar-item-hover: rgba(27, 31, 36, 0.05);
   --sidebar-item-active-from: #d6e7fb;
   --sidebar-item-active-to: #eef4fc;
-  --sidebar-item-active-shadow: inset 2px 0 0 var(--color-accent);
+  --sidebar-item-active-shadow: none;
   --sidebar-badge-bg: #eef1f4;
   --sidebar-badge-text: #59636e;
   --sidebar-divider: rgba(27, 31, 36, 0.08);

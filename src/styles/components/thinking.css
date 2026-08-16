@@ -124,12 +124,6 @@
   padding: 0;
 }
 
-/* 流式输出中的消息：左侧蓝色指示条（进行中内容标识；状态文案已移到输入框下方状态条） */
-.message.streaming .message-content .markdown-body {
-  border-left: 2px solid var(--color-accent);
-  padding-left: 10px;
-}
-
 /* ---- 错误消息 ---- */
 .message.error {
   padding: 0 12px;

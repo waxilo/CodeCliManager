@@ -461,7 +461,7 @@ a.claude-update-action {
   background: var(--sidebar-item-hover);
 }
 
-/* Active：渐变浅色背景 + 左侧 3px 高亮条 + 轻微阴影 */
+/* Active：渐变浅色背景 + 轻微阴影 */
 .conversation-item.active,
 .conversation-item.active:hover {
   background: linear-gradient(
@@ -470,23 +470,6 @@ a.claude-update-action {
     var(--sidebar-item-active-to) 100%
   );
   box-shadow: var(--sidebar-item-active-shadow);
-}
-
-/* 左侧高亮条 */
-.conversation-rail {
-  position: absolute;
-  left: 3px;
-  top: 50%;
-  width: 3px;
-  height: 0;
-  border-radius: 999px;
-  background: var(--color-accent);
-  transform: translateY(-50%);
-  transition: height 0.15s ease;
-}
-
-.conversation-item.active .conversation-rail {
-  height: 60%;
 }
 
 /* 内容主区 */
@@ -587,10 +570,6 @@ a.claude-update-action {
 .workspace-conversations .conversation-item.active:hover {
   background: transparent;
   box-shadow: none;
-}
-
-.workspace-conversations .conversation-item.active .conversation-rail {
-  left: -27px; /* 4px 卡片边距 - 31px 缩进 */
 }
 
 .conversation-state-icon .conversation-status-dot {

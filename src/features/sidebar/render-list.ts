@@ -65,7 +65,6 @@ export function renderConversationItemHtml(c: Conversation): string {
 
   return `
     <div class="${classNames}" data-id="${idAttr}" data-source-path="${sourcePath}" title="${escapeHtml(c.title)}">
-      <span class="conversation-rail" aria-hidden="true"></span>
       ${isEditing ? `
         <div class="conversation-edit-row">
           <input type="text"
