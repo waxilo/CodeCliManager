@@ -15,42 +15,7 @@ export function getWorkspaceDisplayName(path: string): string {
   return parts[parts.length - 1] || path;
 }
 
-// ── 侧边栏展示辅助（项目 icon / 时间 / 模型标签）─────────────────────
-
-/** 稳定字符串哈希，用于给项目 icon 分配固定色相 */
-export function hashString(input: string): number {
-  let hash = 0;
-  for (let i = 0; i < input.length; i++) {
-    hash = (hash << 5) - hash + input.charCodeAt(i);
-    hash |= 0;
-  }
-  return Math.abs(hash);
-}
-
-/** 项目 icon 色相：同一路径始终得到同一颜色 */
-export function getWorkspaceHue(path: string): number {
-  return hashString(path) % 360;
-}
-
-/** 项目 icon 文字：取目录名的 1~2 个有效字符 */
-export function getWorkspaceInitials(displayName: string): string {
-  const cleaned = displayName.replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
-  if (!cleaned) return '#';
-
-  const words = cleaned.split(/\s+/);
-  if (words.length >= 2) {
-    return (words[0][0] + words[1][0]).toUpperCase();
-  }
-
-  const word = words[0];
-  // CamelCase：取首字母 + 第二个大写字母（CodeCliManager → CC）
-  const camel = word.match(/^(\p{Lu})[\p{Ll}\p{N}]*(\p{Lu})/u);
-  if (camel) {
-    return (camel[1] + camel[2]).toUpperCase();
-  }
-  // 中文取首字，其他取前两位
-  return /\p{Script=Han}/u.test(word) ? word[0] : word.slice(0, 2).toUpperCase();
-}
+// ── 侧边栏展示辅助（时间 / 模型标签）─────────────────────────────
 
 /** 把模型 ID 压缩成短标签：claude-sonnet-4-5-20250929 → Sonnet 4.5 */
 export function formatModelLabel(model: string | null | undefined): string {

@@ -2,14 +2,14 @@ import { appState, LOAD_EARLIER_STEP } from '../../state';
 import type { Conversation } from '../../types';
 import { initCodeCopyButtons, scheduleHighlighting, copyToClipboard } from '../../markdown';
 import { bindInteractiveAskCards, syncPendingAskToInteractionHost } from '../permissions';
-import { renderConversationMessageChunks, buildDisplayMessages, ensureMessageWindowForActiveConversation, getActiveMessageWindowSize, incrementActiveMessageWindow, renderChatHeaderHtml } from './render-chat';
+import { renderConversationMessageChunks, buildDisplayMessages, renderStreamingBlocksChunks, renderLiveToolChunks, mergeStreamBlocks, ensureMessageWindowForActiveConversation, getActiveMessageWindowSize, incrementActiveMessageWindow, renderChatHeaderHtml } from './render-chat';
 import type { RenderedMessageChunk } from './render-messages';
 import { bindSessionIdCopyEvents } from './input-composer';
 import { updateSendButtonState, isSendButtonLoading } from './session-context';
 import { sendMessage } from './send';
 import { handleRetryClick, handleUndoClick } from './retry';
 import { refreshRunStatusStrip } from './run-status';
-import { initAnswerScroller, captureScrollState, restoreScrollState, syncActiveToolCardsInMessageList } from './streaming';
+import { initAnswerScroller, captureScrollState, restoreScrollState, syncStreamingBlocksInPlace } from './streaming';
 import { canSendMessage } from './session-context';
 import { getActiveSuggestionIndex, getFileSuggestionsContainer } from '../files/index';
 import { getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
@@ -45,11 +45,6 @@ export function setupMessageListPostRender(container: HTMLElement): void {
 
   // 初始化 Answer 区域滚动控制器
   initAnswerScroller();
-
-  // 主消息流实时工具卡：挂载完成后同步进行中的工具（Bash/Read/Edit…）
-  if (appState.activeConversationId) {
-    syncActiveToolCardsInMessageList(appState.activeConversationId);
-  }
 
   // 「加载更早」按钮：扩大当前会话的消息窗口（按会话独立累计）
   container.querySelectorAll<HTMLElement>('.load-earlier-btn').forEach((btn) => {
@@ -163,6 +158,32 @@ function pendingAskSignature(sid: string): string {
   return '';
 }
 
+/** 当前会话流式状态的轻量签名：块数 + 各块内容长度/时长/完成标记 + 思考结束标记 + 工具卡状态/进度。
+ *  并入 chatRenderKey——流式 delta / 工具转态 / 子代理进度时内容变化，统一 diff 需感知。 */
+function streamingSignature(): string {
+  const sid = appState.activeConversationId || 'pending';
+  const state = appState.streamingBySession.get(sid);
+  const blocksSig = state
+    ? (state.thinkingDone ? 'D' : 'd') +
+      state.blocks
+        .map((b) =>
+          b.type === 'text'
+            ? `t:${b.content.length}:${b.durationMs ?? 0}:${b.finalized ? 'f' : 'p'}`
+            : `h:${b.content.length}:${b.durationMs ?? 0}`,
+        )
+        .join(',')
+    : '';
+  const tools = appState.activeToolsBySession.get(sid);
+  const toolsSig = tools
+    ? [...tools.entries()]
+        .map(([id, t]) =>
+          `${id}:${t.status}:${(t.toolResult || '').length}:${t.isError ? 'E' : ''}:${t.progress?.totalTokens ?? 0}:${t.progress?.toolUses ?? 0}:${t.progress?.durationMs ?? 0}`,
+        )
+        .join(',')
+    : '';
+  return `${blocksSig}|${toolsSig}`;
+}
+
 function chatRenderKey(conversation: Conversation | undefined): string {
   const msgs = conversation?.messages ?? [];
   const last = msgs[msgs.length - 1];
@@ -179,6 +200,7 @@ function chatRenderKey(conversation: Conversation | undefined): string {
     appState.pendingUserMessage ? 'p' : '',
     appState.transientSessionError ? 'e' : '',
     pendingAskSignature(sid),
+    streamingSignature(),
   ].join('|');
 }
 
@@ -222,6 +244,14 @@ interface RenderedConversationEntry {
  */
 const renderCache = new Map<string, RenderedConversationEntry>();
 const RENDER_CACHE_MAX = 6;
+
+/** 历史消息部分（不含流式块/工具卡）的渲染缓存：
+ *  流式 tick（100ms）中已提交内容未变 → 直接复用上次的 chunk HTML，
+ *  跳过整条历史渲染管线（工具配对 / markdown 缓存查找 / 逐消息拼接），
+ *  长会话流式输出的 CPU 开销从「每次全量重建」降到「只算流式块 + diff」。
+ *  键 = committedKey + 思考块展开签名 + 运行标记（showUndo 依赖）。 */
+const historyRenderCache = new Map<string, { loadEarlier: string; chunks: RenderedMessageChunk[]; empty: string | null }>();
+const HISTORY_RENDER_CACHE_MAX = 8;
 
 export function renderCacheKey(conversation: Conversation | undefined): string {
   const thinkingSignature = [...appState.expandedThinkingBlocks].sort().join(',');
@@ -346,6 +376,9 @@ function asyncMountCreateSlots(
   requestAnimationFrame(mountNextBatch);
 }
 
+/** 最近写入的 topbar HTML：流式 tick 中顶栏未变则跳过重写（避免重置下拉等交互状态） */
+let lastTopbarHtml = '';
+
 /** 把已生成的 topbar / 消息列表写入 DOM（键控 diff + 分块保底），并重绑事件、恢复滚动状态 */
 function applyChatDom(
   topbarHtml: string,
@@ -356,8 +389,9 @@ function applyChatDom(
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   const topbarMain = document.querySelector<HTMLDivElement>('.main-topbar-main');
 
-  if (topbarMain) {
+  if (topbarMain && topbarHtml !== lastTopbarHtml) {
     topbarMain.innerHTML = topbarHtml;
+    lastTopbarHtml = topbarHtml;
     bindSessionIdCopyEvents();
   }
 
@@ -386,10 +420,10 @@ function applyChatDom(
     return;
   }
 
-  // ── 键控 diff：索引现有消息节点 ──
+  // ── 键控 diff：索引现有消息节点（历史消息 data-message-id / 流式块与工具卡 data-stream-id） ──
   const existingById = new Map<string, HTMLElement>();
-  messageList.querySelectorAll<HTMLElement>('.message[data-message-id]').forEach((el) => {
-    const id = el.dataset.messageId;
+  messageList.querySelectorAll<HTMLElement>('.message[data-stream-id], .message[data-message-id]').forEach((el) => {
+    const id = el.dataset.streamId || el.dataset.messageId;
     if (id && !existingById.has(id)) existingById.set(id, el);
   });
 
@@ -415,8 +449,8 @@ function applyChatDom(
   // 移除旧的「加载更早」按钮与空状态（头部/空态由本次渲染重写）
   messageList.querySelector('.load-earlier-btn')?.remove();
   messageList.querySelector('.conversation-empty-state')?.remove();
-  // 流式块由 refreshStreamingUI 在 afterChatMounted 重建，此处清掉避免残留
-  messageList.querySelectorAll('[id^="streaming-block-"]').forEach((el) => el.remove());
+  // 流式块 / 实时工具卡已纳入统一 diff（data-stream-id 索引）：不在新序列中的自然被摘除，
+  // 不再单独清理，避免「清掉 → 重建」的闪烁。
   // 其余非消息节点（问卡残留等）一并清掉，保证列表结构纯净
   Array.from(messageList.children).forEach((child) => {
     if (!(child as HTMLElement).classList?.contains('message')) child.remove();
@@ -437,6 +471,51 @@ function applyChatDom(
 
   // 新建节点多（首次渲染长会话 / 大规模变化）→ 分块挂载让出主线程
   asyncMountCreateSlots(messageList, slots, scrollSnap, gen);
+}
+
+/**
+ * 流式块 + 实时工具卡穿插成单一序列：
+ * 工具卡插到「工具开始时的流式块」之后（blockIndexAtStart 是原始块序号，
+ * 先经 mergeStreamBlocks 的 rawStart/rawEnd 换算到合并后块索引），
+ * 无锚点的工具卡（早期进入的会话）按序排到所有流式块之后。
+ */
+function interleaveStreamAndToolChunks(
+  chunks: RenderedMessageChunk[],
+  streamChunks: RenderedMessageChunk[],
+  toolChunks: RenderedMessageChunk[],
+): RenderedMessageChunk[] {
+  if (toolChunks.length === 0) return [...chunks, ...streamChunks];
+
+  const sid = appState.activeConversationId || 'pending';
+  const state = appState.streamingBySession.get(sid);
+  const merged = state ? mergeStreamBlocks(state.blocks) : [];
+  const rawToMerged = (raw: number): number => {
+    for (let i = 0; i < merged.length; i++) {
+      if (raw >= merged[i].rawStart && raw <= merged[i].rawEnd) return i;
+    }
+    return -1;
+  };
+
+  const anchored: Array<{ idx: number; chunk: RenderedMessageChunk }> = [];
+  const tail: RenderedMessageChunk[] = [];
+  for (const tc of toolChunks) {
+    const mi = tc.anchorBlockIndex != null ? rawToMerged(tc.anchorBlockIndex) : -1;
+    if (mi >= 0) anchored.push({ idx: mi, chunk: tc });
+    else tail.push(tc);
+  }
+
+  // renderLiveToolChunks 已按锚点排序，anchored 天然有序；同锚点多个工具保持顺序
+  const out: RenderedMessageChunk[] = [];
+  let ai = 0;
+  for (let i = 0; i < streamChunks.length; i++) {
+    out.push(streamChunks[i]);
+    while (ai < anchored.length && anchored[ai].idx === i) {
+      out.push(anchored[ai].chunk);
+      ai += 1;
+    }
+  }
+  for (; ai < anchored.length; ai++) out.push(anchored[ai].chunk);
+  return [...chunks, ...out, ...tail];
 }
 
 /**
@@ -485,15 +564,55 @@ export function refreshChatContent(): boolean {
     return true;
   }
 
-  // 完整渲染
+  // 完整渲染：历史消息 + 流式块 + 实时工具卡统一为一个序列，同一 diff 挂载。
+  // 流式块/工具卡带稳定 id 与 renderKey：delta 更新时只重建对应块，
+  // 历史消息节点复用——不再「清流式块 → 重建 → 重建流式块」导致闪烁。
   const topbarHtml = renderChatHeaderHtml(conversation);
-  const messages = buildDisplayMessages(conversation);
-  const { loadEarlier, chunks, empty } = renderConversationMessageChunks(messages);
-  applyChatDom(topbarHtml, loadEarlier, chunks, empty);
+  // 历史消息渲染缓存命中（流式 tick 已提交内容未变）：复用上次 chunk HTML。
+  // 键含 updated_at：后台可能原地编辑既有消息（长度/末条不变），此时强制重渲染保正确。
+  const thinkingSig = [...appState.expandedThinkingBlocks].sort().join(',');
+  const historyKey =
+    committedKey + '|u:' + (conversation?.updated_at ?? '') + '|t:' + thinkingSig + '|r:' +
+    (appState.runningSessions.has(appState.activeConversationId) ? '1' : '0');
+  let loadEarlier: string;
+  let chunks: RenderedMessageChunk[];
+  let empty: string | null;
+  const historyCached = historyRenderCache.get(historyKey);
+  if (historyCached) {
+    ({ loadEarlier, chunks, empty } = historyCached);
+  } else {
+    const messages = buildDisplayMessages(conversation);
+    ({ loadEarlier, chunks, empty } = renderConversationMessageChunks(messages));
+    historyRenderCache.set(historyKey, { loadEarlier, chunks, empty });
+    if (historyRenderCache.size > HISTORY_RENDER_CACHE_MAX) {
+      const oldest = historyRenderCache.keys().next().value;
+      if (oldest !== undefined) historyRenderCache.delete(oldest);
+    }
+  }
 
-  // 缓存本次渲染结果（运行中会话也缓存）：chatRenderKey 只在落盘/工具转态/回合切换时变化，
-  // 非流式每帧。缓存的是「已提交消息」快照；流式块由 refreshStreamingUI 增量补回，
-  // 回切/管理页返回时复用快照，跳过整条渲染管线（流式中途返回的最坏情况）。
+  const sid = appState.activeConversationId || 'pending';
+  const streamState = appState.streamingBySession.get(sid);
+  const streamChunks = streamState
+    ? renderStreamingBlocksChunks(streamState.blocks, streamState.thinkingDone)
+    : [];
+  const tools = appState.activeToolsBySession.get(sid);
+  const toolChunks = tools && tools.size > 0 ? renderLiveToolChunks([...tools.values()]) : [];
+
+  // 流式块 + 实时工具卡统一为一个序列：工具卡插到「工具开始时的流式块」之后，
+  // 与历史消息同一 diff 挂载（思考-工具-思考按真实顺序穿插，参考 DSH/Codex）。
+  const allChunks = interleaveStreamAndToolChunks(chunks, streamChunks, toolChunks);
+  applyChatDom(topbarHtml, loadEarlier, allChunks, empty);
+
+  // diff 挂载完成后补一次流式块内容同步：
+  // 新建/重建的 text 占位块在此填充内容、thinking scroller 挂载。
+  // 同步挂载 → afterChatMounted 立即执行；分块异步挂载 → 最后一批完成后执行。
+  // 幂等（text 按 dataset 增量追加），覆盖「diff 之后无后续流式事件」的终态重建。
+  if (streamState || (tools && tools.size > 0)) {
+    afterChatMounted(() => syncStreamingBlocksInPlace(sid));
+  }
+
+  // 缓存本次渲染结果（不含流式块的「已提交消息」快照）：renderKey 含流式签名，
+  // 流式更新时 miss → 走完整 diff（历史复用）；会话快照仍供回切 A→B→A 复用。
   renderCache.set(cacheKey, { renderKey, topbarHtml, loadEarlier, chunks, empty });
   if (renderCache.size > RENDER_CACHE_MAX) {
     const oldest = renderCache.keys().next().value;

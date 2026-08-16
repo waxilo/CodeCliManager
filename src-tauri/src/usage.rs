@@ -31,6 +31,9 @@ static SESSION_USAGE: Mutex<Option<HashMap<String, SessionUsage>>> = Mutex::new(
 /// 已下发到前端的用量（用于计算增量）
 static LAST_EMITTED_USAGE: Mutex<Option<HashMap<String, SessionUsage>>> = Mutex::new(None);
 
+/// 用量注册表容量上限：每个会话一条；超限清空防长期运行内存无限增长。
+const USAGE_REGISTRY_MAX: usize = 512;
+
 fn with_registry<T>(
     store: &'static Mutex<Option<HashMap<String, SessionUsage>>>,
     f: impl FnOnce(&mut HashMap<String, SessionUsage>) -> T,
@@ -38,6 +41,13 @@ fn with_registry<T>(
     let mut guard = store.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
     f(map)
+}
+
+/// 写入前检查容量：超限清空（写入路径专用；读取路径不可清，否则破坏增量语义）。
+fn trim_registry_if_needed(map: &mut HashMap<String, SessionUsage>) {
+    if map.len() >= USAGE_REGISTRY_MAX {
+        map.clear();
+    }
 }
 
 pub(crate) fn accumulate_session_usage(
@@ -51,6 +61,7 @@ pub(crate) fn accumulate_session_usage(
         return;
     }
     with_registry(&SESSION_USAGE, |map| {
+        trim_registry_if_needed(map);
         let entry = map.entry(sid.to_string()).or_default();
         entry.input_tokens += input_tokens;
         entry.output_tokens += output_tokens;
@@ -65,6 +76,7 @@ pub(crate) fn add_session_cost(sid: &str, cost_usd: f64) {
         return;
     }
     with_registry(&SESSION_USAGE, |map| {
+        trim_registry_if_needed(map);
         let entry = map.entry(sid.to_string()).or_default();
         *entry.cost_usd.get_or_insert(0.0) += cost_usd;
     });
@@ -93,6 +105,7 @@ pub(crate) fn take_session_usage_delta(sid: &str) -> Option<SessionUsage> {
     }
 
     with_registry(&LAST_EMITTED_USAGE, |map| {
+        trim_registry_if_needed(map);
         map.insert(sid.to_string(), current);
     });
 

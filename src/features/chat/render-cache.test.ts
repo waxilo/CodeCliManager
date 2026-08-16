@@ -58,7 +58,7 @@ describe('renderCacheKey（按会话渲染缓存键）', () => {
     expect(renderCacheKey(c)).toBe(renderCacheKey(c));
   });
 
-  it('工具转态不改变任何 key（子代理卡已不在主流程，无需因转态重建列表）', () => {
+  it('工具转态改变 full key、不改变 committed key（实时工具卡已纳入统一 diff）', () => {
     appState.conversations = [conv('c1', 100)];
     appState.activeConversationId = 'c1';
     appState.activeConversationSourcePath = null;
@@ -78,11 +78,16 @@ describe('renderCacheKey（按会话渲染缓存键）', () => {
     };
     appState.activeToolsBySession.set('c1', new Map([['t1', task]]));
 
-    // 主列表不承载子代理卡：full key 与 committed key 都不因工具转态变化
-    expect(getCurrentChatRenderKey()).toBe(fullBefore);
+    // 实时工具卡在主流程：full key 感知转态（统一 diff 需重建工具卡）；
+    // committed key 只跟踪已提交消息，不因工具转态变化
+    expect(getCurrentChatRenderKey()).not.toBe(fullBefore);
     expect(getCurrentCommittedChatRenderKey()).toBe(committedBefore);
 
-    // 已提交内容变化（新消息落盘）才让 key 变化
+    // 工具被 reconcile 清掉（历史落盘接管）→ full key 回到无工具状态
+    appState.activeToolsBySession.delete('c1');
+    expect(getCurrentChatRenderKey()).toBe(fullBefore);
+
+    // 已提交内容变化（新消息落盘）才让 committed key 变化
     const active = appState.conversations[0];
     active.messages.push({ id: 'm2', role: 'assistant', content: 'x', timestamp: 2 });
     expect(getCurrentCommittedChatRenderKey()).not.toBe(committedBefore);

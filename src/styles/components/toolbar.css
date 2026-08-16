@@ -437,7 +437,10 @@ a.claude-update-action {
   border-radius: var(--radius-lg);
   cursor: pointer;
   user-select: none;
-  transition: background 0.15s ease, box-shadow 0.15s ease;
+  /* margin/padding 过渡：归档会话选中时负 margin 左移铺满背景，
+     切换会话时平滑过渡而非瞬间跳变 */
+  transition: background 0.15s ease, box-shadow 0.15s ease,
+    margin 0.15s ease, padding 0.15s ease;
 }
 
 .conversation-item.editing {
@@ -531,6 +534,63 @@ a.claude-update-action {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+/* 归档分组内：会话标题从文件夹名称列开始（左侧状态占位并入标题流），
+   运行态圆点绝对定位到文件夹图标列，与分组图标垂直对齐。
+   31px = header 4px padding + 20px 图标位 + 7px gap（名称起点）；
+   -23.5px = 名称起点 31 - 图标中心 14 - 半宽 6.5。 */
+.workspace-conversations .conversation-item {
+  padding-left: 0;
+}
+
+.workspace-conversations .conversation-item .conversation-state-icon {
+  position: absolute;
+  left: -23.5px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* 归档分组内选中高亮：背景用 ::before 伪元素铺到卡片左缘（覆盖 31px 外层缩进），
+   item 自身位置恒定（无 margin 动画、无布局跳动），切换会话时背景以 opacity 平滑过渡。
+   伪元素常驻（opacity 0 → 1），渐变从卡片 4px 边距处开始，与活跃会话整条高亮一致。 */
+.workspace-conversations .conversation-item {
+  z-index: 0;
+}
+
+.workspace-conversations .conversation-item::before {
+  content: '';
+  position: absolute;
+  left: -31px;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    var(--sidebar-item-active-from) 0%,
+    var(--sidebar-item-active-to) 100%
+  );
+  box-shadow: var(--sidebar-item-active-shadow);
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: -1;
+  pointer-events: none;
+}
+
+.workspace-conversations .conversation-item.active::before,
+.workspace-conversations .conversation-item.active:hover::before {
+  opacity: 1;
+}
+
+.workspace-conversations .conversation-item.active,
+.workspace-conversations .conversation-item.active:hover {
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-conversations .conversation-item.active .conversation-rail {
+  left: -27px; /* 4px 卡片边距 - 31px 缩进 */
 }
 
 .conversation-state-icon .conversation-status-dot {

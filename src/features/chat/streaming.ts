@@ -16,10 +16,6 @@ import { updateSendButtonState, setSendButtonLoading } from './session-context';
 import { updateOrAddConversation, findConversationById, assistantTextCovers } from '../conversations';
 import { updateConversationListSpinner, refreshActiveTabContent } from '../sidebar';
 import {
-  renderThinkingDetails,
-  renderToolMessageHtml,
-  TOOL_CONFIG_MAP,
-  getDefaultToolConfig,
   extractToolUseId,
   processToolMessages,
 } from './render-messages';
@@ -32,7 +28,7 @@ import {
 } from './run-status';
 import { ScrollController, scheduleUiRefresh } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
-import { formatTokenCount } from './context-indicator';
+import { mergeStreamBlocks } from './render-chat';
 
 const TOOL_CHUNK_KINDS = new Set([
   'tool_use_start',
@@ -172,12 +168,16 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
     if (!id) return false;
     const tools = getActiveToolsMap(sid);
     const existing = tools.get(id);
+    // 记录工具开始时的流式块序号：实时渲染时把工具卡插到该块之后，
+    // 实现「思考-工具-思考」按真实顺序穿插（参考 DSH/Codex）。
+    const blockIndexAtStart = getStreamingState(sid).currentBlockIdx;
     tools.set(id, {
       toolUseId: id,
       toolName: name,
       input: existing?.input || {},
       status: 'running',
       startedAt: existing?.startedAt || Date.now(),
+      blockIndexAtStart,
     });
     // pending → 真实 session
     const pendingTools = appState.activeToolsBySession.get('pending');
@@ -750,7 +750,9 @@ export function ensureChatViewVisible(): boolean {
 export function removeStreamingElements(sessionId?: string) {
   // DOM 只代表当前可见会话；后台会话清理不能碰当前会话的流式节点。
   if (sessionId && sessionId !== appState.activeConversationId) return;
-  document.querySelectorAll('[id^="streaming-"]').forEach((el) => el.remove());
+  // 统一 diff 下的安全网：状态已清空时立刻摘掉残留的流式块/实时工具卡，
+  // 避免 abort 兜底等「无后续刷新」路径下残留块一直显示。
+  document.querySelectorAll('[data-stream-id^="streaming-"], [data-stream-id^="live-tool-"]').forEach((el) => el.remove());
 }
 
 function updateStreamingTextBody(mdBody: HTMLElement, block: StreamBlock): boolean {
@@ -784,150 +786,85 @@ function updateStreamingTextBody(mdBody: HTMLElement, block: StreamBlock): boole
   return false;
 }
 
-export function refreshStreamingUI(sessionId: string) {
-  // 只有当 sessionId 匹配当前会话时才更新
-  if (sessionId !== appState.activeConversationId && !(appState.pendingUserMessage && !appState.activeConversationId && !appState.pendingUserMessageConvId)) return;
-
+/**
+ * 就地同步已挂载的流式块内容（不重建 DOM）：
+ * - thinking 块：更新 <pre> 文本 / 标题 / 时长 / streaming-active 类 / 独立滚动
+ * - text 块：流式阶段纯文本追加，完成态渲染 markdown（幂等，按 dataset 增量）
+ * 块结构变化（新增块 / 工具卡穿插）由统一 diff（refreshChatContent）处理；
+ * 挂载完成后（diff 新建/重建的占位块）也调用本函数填充内容。
+ */
+export function syncStreamingBlocksInPlace(sessionId: string): void {
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   if (!messageList) return;
-
-  const state = getStreamingState(sessionId);
-
-  // 先合并相邻的同类型块（thinking-thinking, text-text）
-  const merged: StreamBlock[] = [];
-  for (const block of state.blocks) {
-    const last = merged[merged.length - 1];
-    if (last && last.type === block.type && block.type === 'thinking') {
-      last.content = last.content + '\n' + block.content;
-      // 合并时保留后到块的时长（thinking_end 只落在最后一个块上）
-      if (block.durationMs != null) last.durationMs = block.durationMs;
-    } else if (last && last.type === block.type && block.type === 'text') {
-      last.content = last.content + '\n\n' + block.content;
-      last.finalized = Boolean(last.finalized && block.finalized);
-    } else {
-      merged.push({
-        type: block.type,
-        content: block.content,
-        finalized: block.finalized,
-        durationMs: block.durationMs,
-      });
-    }
-  }
-
-  // 收集现有流式块元素，按索引索引
-  const existingEls = new Map<number, HTMLElement>();
-  messageList.querySelectorAll<HTMLElement>('[id^="streaming-block-"]').forEach((el) => {
-    const idx = parseInt(el.id.replace('streaming-block-', ''), 10);
-    if (!isNaN(idx)) existingEls.set(idx, el);
-  });
-  const usedIndices = new Set<number>();
-
-  // 按合并后的块序列更新（就地更新已存在的元素，创建新元素）
+  // 只读状态：不创建空条目（纯工具会话 / 已清理会话不应残留空状态）
+  const state = appState.streamingBySession.get(sessionId);
+  if (!state) return;
+  // 与 renderStreamingBlocksChunks 内部 mergeStreamBlocks 语义一致
+  const merged = mergeStreamBlocks(state.blocks);
   merged.forEach((block, idx) => {
-    usedIndices.add(idx);
     const blockId = `streaming-block-${idx}`;
-    const existingEl = existingEls.get(idx);
+    const existingEl = messageList.querySelector<HTMLElement>(
+      `.message[data-stream-id="${blockId}"]`,
+    );
+    if (!existingEl) return; // 尚未挂载（diff 下一轮创建，届时挂载完成后再次同步）
 
     if (block.type === 'thinking') {
       const label = state.thinkingDone ? '思考过程' : '思考中...';
       const isStreaming = !state.thinkingDone;
-      const expanded = isStreaming || appState.expandedThinkingBlocks.has(sessionId);
-
-      if (existingEl && existingEl.classList.contains('thinking-msg')) {
-        // 就地更新：只更新 <pre> 文本和 <summary> 标签
-        const pre = existingEl.querySelector('.thinking-content pre');
-        const summary = existingEl.querySelector('.thinking-summary .thinking-label-text');
-        if (pre) pre.textContent = block.content;
-        if (summary) summary.textContent = label;
-        // 思考结束时写入时长（thinking_end 下发 duration_ms）
-        const durationEl = existingEl.querySelector('.thinking-summary .thinking-duration');
-        if (!isStreaming && durationEl && block.durationMs) {
-          durationEl.textContent = formatDuration(block.durationMs);
-        }
-        // 更新流式状态类
-        if (isStreaming) {
-          existingEl.querySelector('.thinking-block')?.classList.add('streaming-active');
-        } else {
-          existingEl.querySelector('.thinking-block')?.classList.remove('streaming-active');
-        }
-        // 思考内容独立滚动
-        const scrollEl = existingEl.querySelector<HTMLElement>('.thinking-content-scroll');
-        if (scrollEl) getThinkingScroller(scrollEl, blockId).onNewContent();
-      } else {
-        // 删除旧元素（类型不匹配或不存在）
-        existingEl?.remove();
-        const el = document.createElement('div');
-        el.id = blockId;
-        el.className = 'message assistant thinking-msg streaming';
-        el.innerHTML = `<div class="message-content">${renderThinkingDetails(block.content, label, expanded, undefined, isStreaming, block.durationMs)}</div>`;
-        messageList.appendChild(el);
-        const detailsEl = el.querySelector('.thinking-block');
-        if (detailsEl) {
-          detailsEl.addEventListener('toggle', () => {
-            if ((detailsEl as HTMLDetailsElement).open) {
-              appState.expandedThinkingBlocks.add(sessionId);
-            } else {
-              appState.expandedThinkingBlocks.delete(sessionId);
-            }
-          });
-        }
-        // 新创建的思考块：初始化独立 ScrollController
-        const scrollEl = el.querySelector<HTMLElement>('.thinking-content-scroll');
-        if (scrollEl) getThinkingScroller(scrollEl, blockId).scrollToBottom();
-        existingEls.set(idx, el);
+      const pre = existingEl.querySelector('.thinking-content pre');
+      const summary = existingEl.querySelector('.thinking-summary .thinking-label-text');
+      if (pre) pre.textContent = block.content;
+      if (summary) summary.textContent = label;
+      const durationEl = existingEl.querySelector('.thinking-summary .thinking-duration');
+      if (!isStreaming && durationEl && block.durationMs) {
+        durationEl.textContent = formatDuration(block.durationMs);
       }
-    } else if (block.type === 'text') {
-      if (existingEl && !existingEl.classList.contains('thinking-msg')) {
-        // 流式阶段仅追加纯文本；块完成后再做一次完整 Markdown 渲染。
-        const mdBody = existingEl.querySelector('.markdown-body');
-        if (mdBody && updateStreamingTextBody(mdBody as HTMLElement, block)) {
-          initCodeCopyButtons(existingEl);
-          scheduleHighlighting(existingEl);
-        }
-      } else {
-        existingEl?.remove();
-        const el = document.createElement('div');
-        el.id = blockId;
-        el.className = 'message assistant streaming';
-        el.innerHTML = `<div class="message-content">
-          <div class="markdown-body"></div>
-        </div>`;
-        messageList.appendChild(el);
-        const mdBody = el.querySelector<HTMLElement>('.markdown-body');
-        if (mdBody && updateStreamingTextBody(mdBody, block)) {
-          initCodeCopyButtons(el);
-          scheduleHighlighting(el);
-        }
-        existingEls.set(idx, el);
+      existingEl.querySelector('.thinking-block')?.classList.toggle('streaming-active', isStreaming);
+      const scrollEl = existingEl.querySelector<HTMLElement>('.thinking-content-scroll');
+      if (scrollEl) getThinkingScroller(scrollEl, blockId).onNewContent();
+    } else {
+      // text 块：就地追加文本（diff 的 renderKey 不含内容，节点稳定复用）
+      const mdBody = existingEl.querySelector<HTMLElement>('.markdown-body');
+      if (mdBody && updateStreamingTextBody(mdBody, block)) {
+        initCodeCopyButtons(existingEl);
+        scheduleHighlighting(existingEl);
       }
     }
   });
-
-  // 移除不再需要的旧流式元素（块数量减少时）
-  existingEls.forEach((el, idx) => {
-    if (!usedIndices.has(idx)) {
-      // 清理对应的 thinking scroller
-      const blockId = `streaming-block-${idx}`;
-      appState.thinkingScrollers.get(blockId)?.destroy();
-      appState.thinkingScrollers.delete(blockId);
-      el.remove();
-    }
-  });
-
   // Answer 区域自动置底
   appState.answerScroller?.onNewContent();
+}
+
+/**
+ * 流式 UI 刷新（统一渲染管线）：
+ * 1. 就地增量更新已挂载的流式块内容（不重建 DOM，避免闪烁）；
+ * 2. 调度 refreshChatContent：流式签名变化 → 同一 diff 创建/复用/移除块与工具卡，
+ *    历史消息与已挂载块按 id 复用（text renderKey 不含内容，节点稳定不重建）；
+ *    diff 挂载完成后会再次调用 syncStreamingBlocksInPlace 填充新建块。
+ */
+export function refreshStreamingUI(sessionId: string) {
+  // 只有当 sessionId 匹配当前会话时才更新
+  if (sessionId !== appState.activeConversationId && !(appState.pendingUserMessage && !appState.activeConversationId && !appState.pendingUserMessageConvId)) return;
+
+  // 先同步已挂载块（diff 前的即时反馈）
+  syncStreamingBlocksInPlace(sessionId);
 
   // 思考中/输入中状态同步到输入框下方状态条
   refreshRunStatusStrip();
 
-  // 主消息流实时工具卡：进行中的工具（Bash/Read/Edit…）在列表尾部展示
-  syncActiveToolCardsInMessageList(sessionId);
+  // 触发统一 diff：流式签名变化 → refreshChatContent 重建序列，
+  // 历史消息 / 已挂载流式块复用，仅新增块 / 工具卡变化被处理。
+  scheduleUiRefresh({ chat: true });
 }
 
 /** 初始化 Answer 区域 ScrollController（#message-list） */
 export function initAnswerScroller(): void {
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   if (!messageList) return;
+
+  // 同一列表元素已绑定：跳过（流式 tick 的 applyChatDom 复用 #message-list，
+  // 不销毁/重建滚动控制器，避免按钮重建闪烁与 autoScroll 状态抖动）
+  if (appState.answerScroller?.el === messageList) return;
 
   // 销毁旧实例
   appState.answerScroller?.destroy();
@@ -957,99 +894,4 @@ export function restoreScrollState(snap: { autoScroll: boolean; scrollTop: numbe
   }
 }
 
-/**
- * 主消息流中的实时工具卡（参考 claudecodeui / Codex 的实时工具展示）。
- * 进行中的工具（Bash/Read/Edit/Write/Grep/Glob…）在消息列表尾部实时展示；
- * 子代理（Task/Agent）渲染为带实时进度的容器卡（description + 进度汇总），
- * 完成后由历史渲染接管（reconcile 删除 active 项）。
- * 按 `data-live-tool-id` 幂等定位，状态/输入变化时只更新对应卡片。
- */
-export function syncActiveToolCardsInMessageList(sessionId: string): void {
-  if (sessionId !== appState.activeConversationId) return;
-  const messageList = document.querySelector<HTMLDivElement>('#message-list');
-  if (!messageList) return;
-
-  const tools = appState.activeToolsBySession.get(sessionId);
-  const liveTools = tools ? [...tools.entries()].filter(([, t]) => t.status === 'running') : [];
-
-  // 现有实时工具卡：按 id 索引
-  const container = messageList.querySelector<HTMLDivElement>('#live-tool-cards');
-  if (liveTools.length === 0) {
-    container?.remove();
-    return;
-  }
-  if (!container) {
-    const div = document.createElement('div');
-    div.id = 'live-tool-cards';
-    messageList.appendChild(div);
-  }
-  const liveContainer = messageList.querySelector<HTMLDivElement>('#live-tool-cards')!;
-
-  // 移除已完成/已消失的卡
-  liveContainer.querySelectorAll<HTMLElement>('[data-live-tool-id]').forEach((el) => {
-    const id = el.dataset.liveToolId;
-    if (!id || !liveTools.some(([tid]) => tid === id)) el.remove();
-  });
-
-  // 更新/新增进行中的工具卡（dataset 遍历而非 CSS.escape 选择器：jsdom 缺 CSS.escape）
-  for (const [id, tool] of liveTools) {
-    let existing: HTMLElement | null = null;
-    liveContainer.querySelectorAll<HTMLElement>('[data-live-tool-id]').forEach((el) => {
-      if (el.dataset.liveToolId === id) existing = el;
-    });
-    const html = renderToolMessageHtml({
-      id: `live-tool-${id}`,
-      role: 'tool',
-      content: '',
-      timestamp: Math.floor(tool.startedAt / 1000),
-      toolData: {
-        toolName: tool.toolName,
-        toolInput: tool.input || {},
-        toolResult: undefined,
-        isError: false,
-        toolUseId: id,
-        displayMode: TOOL_CONFIG_MAP[tool.toolName]?.displayMode || 'one-line',
-        colorScheme: {
-          border: (TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig()).borderColor,
-          icon: (TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig()).iconColor,
-          primary: (TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig()).borderColor,
-        },
-        // 子代理实时进度（description / progress 汇总）
-        ...(tool.description ? { taskNotification: undefined } : {}),
-      },
-    });
-    const wrapper = existing
-      ? existing
-      : (() => {
-          const div = document.createElement('div');
-          div.className = 'message tool live-tool-card';
-          div.dataset.liveToolId = id;
-          liveContainer.appendChild(div);
-          return div;
-        })();
-    // 子代理卡：注入实时进度行（描述 + tokens/工具次数/耗时）
-    const progressLine =
-      tool.toolName === 'Task' || tool.toolName === 'Agent'
-        ? renderLiveSubagentProgressLine(tool)
-        : '';
-    const newHtml = `<div class="message-content">${html}${progressLine}</div>`;
-    if (wrapper.innerHTML !== newHtml) wrapper.innerHTML = newHtml;
-    wrapper.classList.add('streaming');
-  }
-}
-
-/** 运行中子代理的实时进度行（描述 + 进度汇总），参考 claudecodeui 子代理容器 */
-function renderLiveSubagentProgressLine(tool: ActiveToolState): string {
-  const parts: string[] = [];
-  if (tool.progress?.totalTokens) parts.push(`${formatTokenCount(tool.progress.totalTokens)} tokens`);
-  if (tool.progress?.toolUses) parts.push(`${tool.progress.toolUses} 次工具`);
-  if (tool.progress?.durationMs) parts.push(formatDuration(tool.progress.durationMs));
-  const meta = parts.length ? `<span class="tool-meta">${parts.join(' · ')}</span>` : '';
-  return `
-    <div class="live-subagent-progress">
-      ${meta}
-      <span class="tool-status tool-status-running">子代理执行中</span>
-    </div>
-  `;
-}
 

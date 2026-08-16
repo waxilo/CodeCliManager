@@ -1,8 +1,8 @@
 import { appState } from '../../state';
-import { escapeHtml, toMillis, formatRelativeTime, formatCompactTime } from '../../utils';
+import { escapeHtml, toMillis, formatCompactTime } from '../../utils';
 import type { Conversation } from '../../types';
 import { isConversationInstance } from '../conversations/normalize';
-import { groupConversationsByWorkspace, getWorkspaceHue, getWorkspaceInitials, formatModelLabel, saveExpandedWorkspaces } from './workspace-grouping';
+import { groupConversationsByWorkspace, formatModelLabel, saveExpandedWorkspaces } from './workspace-grouping';
 import { refreshActiveTabContent } from './sidebar-tabs';
 
 /** 未分类分组的固定 key */
@@ -154,6 +154,10 @@ export function buildSidebarWorkspaceViews(
 const CHEVRON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="9 18 15 12 9 6"/></svg>';
 
+/** 简单文件夹标签（线性图标，替代原色块头像） */
+const WORKSPACE_FOLDER_SVG =
+  '<svg class="workspace-folder-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7z"/></svg>';
+
 const CONVERSATION_RUNNING_DOT_HTML =
   '<span class="conversation-status-dot" title="运行中" aria-label="运行中"></span>';
 
@@ -162,17 +166,11 @@ const CONVERSATION_RUNNING_DOT_HTML =
 const CONVERSATION_STATE_ICON =
   `<span class="conversation-state-icon">${CONVERSATION_RUNNING_DOT_HTML}</span>`;
 
-/** 项目卡片元信息（最近使用时间 / 运行中状态）的内部 HTML */
+/** 项目卡片元信息（仅运行中状态；最近使用时间不再展示，保持分组简洁） */
 export function renderWorkspaceMetaInnerHtml(ws: SidebarWorkspaceView): string {
-  const relTime = formatRelativeTime(ws.latestActivity);
-
-  return [
-    ws.runningCount > 0
-      ? `<span class="workspace-live"><i class="workspace-live-dot" aria-hidden="true"></i>${ws.runningCount} 运行中</span>`
-      : relTime
-        ? `<span class="workspace-time">${escapeHtml(relTime)}</span>`
-        : '',
-  ].filter(Boolean).join('');
+  return ws.runningCount > 0
+    ? `<span class="workspace-live"><i class="workspace-live-dot" aria-hidden="true"></i>${ws.runningCount} 运行中</span>`
+    : '';
 }
 
 /** 渲染单个工作区卡片 */
@@ -185,12 +183,11 @@ export function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: bo
     ws.isUncategorized ? 'is-uncategorized' : '',
   ].filter(Boolean).join(' ');
 
-  const hue = ws.isUncategorized ? 220 : getWorkspaceHue(ws.path);
-  const initials = ws.isUncategorized ? '·' : getWorkspaceInitials(ws.displayName);
   const titleAttr = ws.isUncategorized ? '未归属工作目录的会话' : ws.path;
 
+  // 文件夹图标 + 展开箭头合并到同一占位：默认显示文件夹标签，悬浮/展开时切换为箭头。
   return `
-    <section class="${cardClasses}" data-workspace-key="${key}" style="--ws-hue: ${hue}">
+    <section class="${cardClasses}" data-workspace-key="${key}">
       <div
         class="workspace-header"
         data-action="toggle-workspace"
@@ -200,8 +197,10 @@ export function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: bo
         aria-expanded="${isExpanded}"
         title="${escapeHtml(titleAttr)}"
       >
-        <span class="workspace-arrow${isExpanded ? ' expanded' : ''}">${CHEVRON_SVG}</span>
-        <span class="workspace-avatar" aria-hidden="true">${escapeHtml(initials)}</span>
+        <span class="workspace-icon-slot" aria-hidden="true">
+          <span class="workspace-folder-icon">${WORKSPACE_FOLDER_SVG}</span>
+          <span class="workspace-arrow${isExpanded ? ' expanded' : ''}">${CHEVRON_SVG}</span>
+        </span>
         <span class="workspace-main">
           <span class="workspace-name-row">
             <span class="workspace-name">${escapeHtml(ws.displayName)}</span>
@@ -348,7 +347,9 @@ export function updateConversationListSpinner() {
     if (!ws || !meta) return;
     const key = ws.key;
     const html = renderWorkspaceMetaInnerHtml(ws);
-    // 内容未变时跳过：避免归档工作区多时每次切回主页面 O(cards) 次 innerHTML 写入 + 布局失效
+    // 内容未变时跳过：避免归档工作区多时每次切回主页面 O(cards) 次 innerHTML 写入 + 布局失效。
+    // 空内容不覆盖 DOM：保留首渲已写入的时间/模型标签，避免瞬时空快照把 meta 刷没。
+    if (!html && lastWorkspaceMetaHtml.get(key)) return;
     if (lastWorkspaceMetaHtml.get(key) === html) return;
     lastWorkspaceMetaHtml.set(key, html);
     meta.innerHTML = html;

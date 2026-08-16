@@ -194,8 +194,9 @@ export async function init(): Promise<void> {
     if (flags.todo) {
       syncTodoPanelUI();
     }
-    // refreshChatContent 会抹掉流式块；当前会话在流式时按 appState 恢复，避免空白卡死。
-    // 长列表分块挂载期间 DOM 未就绪：流式块恢复挂到 afterChatMounted，挂载完成后执行。
+    // 统一 diff 挂载后按 appState 恢复流式块内容（幂等；refreshChatContent 内部
+    // 已做挂载完成后的流式同步，此处为兜底）。长列表分块挂载期间 DOM 未就绪：
+    // 流式块恢复挂到 afterChatMounted，挂载完成后执行。
     if (chatRebuilt) {
       const sid = appState.activeConversationId;
       if (sid && appState.streamingBySession.has(sid)) {

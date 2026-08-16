@@ -1,17 +1,31 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { appState } from '../../state';
-import { syncActiveToolCardsInMessageList } from './streaming';
-import { handleMessageChunk } from './streaming';
+import { handleMessageChunk, syncStreamingBlocksInPlace } from './streaming';
+import { refreshChatContent, resetChatRenderKey } from './refresh';
 
 const SID = 'sess-1';
 
 function setupShell(): void {
   document.body.innerHTML = `
     <div class="main-content">
+      <div class="main-topbar"><div class="main-topbar-main"></div></div>
       <div id="message-list"></div>
-    </div>`;
+    </div>
+  `;
+  appState.conversations = [
+    {
+      id: SID,
+      title: 't',
+      platform: 'cli',
+      messages: [],
+      created_at: 0,
+      updated_at: 0,
+    },
+  ];
   appState.activeConversationId = SID;
   appState.activeConversationSourcePath = null;
+  appState.pendingUserMessage = null;
+  appState.transientSessionError = null;
   appState.activeToolsBySession.clear();
   appState.runningSessions.clear();
   appState.streamingBySession.clear();
@@ -19,32 +33,44 @@ function setupShell(): void {
   appState.streamRefreshBySession.clear();
   appState.pendingAskQuestions.clear();
   appState.todosBySession.clear();
+  appState.expandedThinkingBlocks.clear();
+  appState.messageWindowSizeByConversation.clear();
+  resetChatRenderKey();
 }
 
-describe('主消息流实时工具卡（参考 claudecodeui / Codex）', () => {
+describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载）', () => {
   beforeEach(() => {
     setupShell();
     vi.restoreAllMocks();
   });
 
-  it('运行中的普通工具渲染为实时卡，完成后移除', () => {
+  it('工具完成后卡片保留并显示完成态；active 项被清理后才移除', () => {
     // tool_use_start（Bash）→ 实时卡出现
     handleMessageChunk({
       conversation_id: SID,
       kind: 'tool_use_start',
       content: JSON.stringify({ id: 't1', name: 'Bash', index: 0 }),
     });
+    refreshChatContent();
     // tool_result 到达（完成态）
     handleMessageChunk({
       conversation_id: SID,
       kind: 'tool_result',
       content: JSON.stringify({ tool_use_id: 't1', content: 'ok', is_error: false }),
     });
+    refreshChatContent();
 
     const list = document.querySelector<HTMLElement>('#message-list')!;
-    const card = list.querySelector('[data-live-tool-id="t1"]');
-    // tool_result 后状态为 done：实时卡应移除（running 才显示）
-    expect(card).toBeNull();
+    const card = list.querySelector('[data-stream-id="live-tool-t1"]');
+    // tool_result 后状态为 done：卡片保留（等待历史落盘接管），并展示完成态而非运行中
+    expect(card).not.toBeNull();
+    expect(card!.textContent).toContain('完成');
+    expect(card!.classList.contains('streaming')).toBe(false);
+
+    // 历史落盘后 active 项被 reconcile 删除 → 实时卡随之移除（由历史渲染接管）
+    appState.activeToolsBySession.delete(SID);
+    refreshChatContent();
+    expect(list.querySelector('[data-stream-id="live-tool-t1"]')).toBeNull();
   });
 
   it('运行中的 Bash 工具卡展示命令', () => {
@@ -53,11 +79,12 @@ describe('主消息流实时工具卡（参考 claudecodeui / Codex）', () => {
         toolUseId: 't1', toolName: 'Bash', input: { command: 'npm test' }, status: 'running', startedAt: Date.now(),
       }],
     ]));
-    syncActiveToolCardsInMessageList(SID);
+    refreshChatContent();
     const list = document.querySelector<HTMLElement>('#message-list')!;
-    const card = list.querySelector('[data-live-tool-id="t1"]');
+    const card = list.querySelector('[data-stream-id="live-tool-t1"]');
     expect(card).not.toBeNull();
     expect(card!.textContent).toContain('npm test');
+    expect(card!.classList.contains('streaming')).toBe(true);
   });
 
   it('运行中的子代理（Task）渲染为实时容器卡并展示进度', () => {
@@ -67,17 +94,102 @@ describe('主消息流实时工具卡（参考 claudecodeui / Codex）', () => {
         progress: { status: 'running', totalTokens: 1200, toolUses: 3, durationMs: 4500 },
       }],
     ]));
-    syncActiveToolCardsInMessageList(SID);
+    refreshChatContent();
     const list = document.querySelector<HTMLElement>('#message-list')!;
-    const card = list.querySelector('[data-live-tool-id="task1"]');
+    const card = list.querySelector('[data-stream-id="live-tool-task1"]');
     expect(card).not.toBeNull();
     expect(card!.textContent).toContain('1K tokens');
     expect(card!.textContent).toContain('子代理执行中');
   });
 
-  it('无活动工具时清空实时卡容器', () => {
-    syncActiveToolCardsInMessageList(SID);
+  it('无活动工具时清空所有实时工具卡', () => {
+    appState.activeToolsBySession.set(SID, new Map([
+      ['t1', {
+        toolUseId: 't1', toolName: 'Bash', input: { command: 'ls' }, status: 'running', startedAt: Date.now(),
+      }],
+    ]));
+    refreshChatContent();
+    appState.activeToolsBySession.delete(SID);
+    refreshChatContent();
     const list = document.querySelector<HTMLElement>('#message-list')!;
-    expect(list.querySelector('#live-tool-cards')).toBeNull();
+    expect(list.querySelector('[data-stream-id^="live-tool-"]')).toBeNull();
+  });
+
+  it('工具卡插到开始时的流式块之后（思考-工具-思考穿插）', () => {
+    // 流式状态：thinking 块(0) + text 块(1)；工具在块 0 开始时启动
+    appState.streamingBySession.set(SID, {
+      blocks: [
+        { type: 'thinking', content: '思考中...' },
+        { type: 'text', content: '正文', finalized: false },
+      ],
+      thinkingDone: false,
+      currentBlockIdx: 0,
+    });
+    appState.activeToolsBySession.set(SID, new Map([
+      ['t1', {
+        toolUseId: 't1', toolName: 'Bash', input: { command: 'npm test' },
+        status: 'running', startedAt: Date.now(), blockIndexAtStart: 0,
+      }],
+    ]));
+    refreshChatContent();
+
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const block0 = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    const block1 = list.querySelector('[data-stream-id="streaming-block-1"]')!;
+    const card = list.querySelector('[data-stream-id="live-tool-t1"]')!;
+    // 工具卡应位于 block0 与 block1 之间（思考-工具-思考按真实顺序穿插）
+    const children = [...list.children];
+    expect(children.indexOf(block0)).toBeLessThan(children.indexOf(card));
+    expect(children.indexOf(card)).toBeLessThan(children.indexOf(block1));
+  });
+
+  it('text 块节点按 id 复用：delta 就地追加，不重建 DOM', () => {
+    appState.streamingBySession.set(SID, {
+      blocks: [{ type: 'text', content: 'hello', finalized: false }],
+      thinkingDone: true,
+      currentBlockIdx: 0,
+    });
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    expect(block.querySelector('.markdown-body')!.textContent).toBe('hello');
+
+    // 内容追加 → 同一节点，文本就地追加
+    const state = appState.streamingBySession.get(SID)!;
+    state.blocks[0].content = 'hello world';
+    refreshChatContent();
+    const blockAfter = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    expect(blockAfter).toBe(block);
+    expect(blockAfter.querySelector('.markdown-body')!.textContent).toBe('hello world');
+  });
+
+  it('思考块结束：renderKey 变化重建节点，内容与时长保留', () => {
+    appState.streamingBySession.set(SID, {
+      blocks: [{ type: 'thinking', content: '先想后做', durationMs: 1234 }],
+      thinkingDone: true,
+      currentBlockIdx: 0,
+    });
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    expect(block.classList.contains('streaming')).toBe(false);
+    expect(block.textContent).toContain('先想后做');
+    expect(block.textContent).toContain('2s');
+    // 思考块默认折叠（DSH 样式）
+    expect(block.querySelector('.thinking-block')!.hasAttribute('open')).toBe(false);
+  });
+
+  it('syncStreamingBlocksInPlace 幂等：text 块重复同步不重复追加', () => {
+    appState.streamingBySession.set(SID, {
+      blocks: [{ type: 'text', content: 'data', finalized: false }],
+      thinkingDone: true,
+      currentBlockIdx: 0,
+    });
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    syncStreamingBlocksInPlace(SID);
+    syncStreamingBlocksInPlace(SID);
+    const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    expect(block.querySelector('.markdown-body')!.textContent).toBe('data');
   });
 });

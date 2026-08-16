@@ -180,7 +180,9 @@ pub(crate) fn is_agent_session(path: &Path) -> bool {
 }
 
 // ── 会话解析缓存：按文件 mtime 缓存解析结果，避免每次点击全量重解析 ──────
+// 容量上限防无限增长：条目含完整 Conversation（全部消息），长期运行会累积内存。
 pub(crate) static SESSION_CACHE: Mutex<Option<HashMap<PathBuf, (i64, Conversation)>>> = Mutex::new(None);
+const SESSION_CACHE_MAX: usize = 256;
 
 pub(crate) fn file_mtime_secs(path: &Path) -> i64 {
     fs::metadata(path)
@@ -207,6 +209,11 @@ pub(crate) fn parse_claude_session_cached(path: &PathBuf) -> Option<Conversation
     let conv = parse_claude_session(path)?;
     let mut cache = SESSION_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let map = cache.get_or_insert_with(HashMap::new);
+    // 容量上限：超过时整体重建为仅含当前条目的缓存。
+    // 简单策略即可——会话文件数远小于上限，命中率损失可忽略，换取内存有界。
+    if map.len() >= SESSION_CACHE_MAX {
+        map.clear();
+    }
     map.insert(path.clone(), (mtime, conv.clone()));
     Some(conv)
 }
@@ -1173,7 +1180,9 @@ pub(crate) fn find_claude_session_file(session_id: &str) -> Option<PathBuf> {
         if is_agent_session(&path) {
             continue;
         }
-        if let Some(conv) = parse_claude_session(&path) {
+        // 用 mtime 缓存版解析：热路径（turn-complete 重试等）反复调用时，
+        // 已解析且未变更的文件直接命中缓存，避免每次全量读盘 + JSON 解析 O(全部历史)。
+        if let Some(conv) = parse_claude_session_cached(&path) {
             if conv.id == session_id {
                 return Some(path);
             }
@@ -1186,58 +1195,85 @@ pub(crate) fn find_claude_session_file(session_id: &str) -> Option<PathBuf> {
 /// 修改 JSONL 会话文件中所有 assistant 消息的 model 字段为新模型。
 /// 这样 CLI --resume 恢复会话时，对话历史中的模型名称与当前选择一致，
 /// 避免模型看到历史中的旧模型名而产生自我认知混乱。
+///
+/// 并发安全：CLI 进程可能在常驻会话中持续 append JSONL。
+/// 采用「读 → 改 → 重读校验未变 → 原子替换」的乐观循环：写入前若发现
+/// 文件被并发追加（长度/mtime 变化），丢弃本次结果重试，绝不覆盖新行。
+/// 最多重试 5 次，仍不稳定则放弃（返回 Err，调用方仅记录警告，不影响主流程）。
 pub(crate) fn rewrite_session_model(session_id: &str, new_model: &str) -> Result<bool, String> {
     let path = find_claude_session_file(session_id)
         .ok_or_else(|| format!("Session file not found for {}", session_id))?;
 
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read session file: {}", e))?;
+    for _attempt in 0..5 {
+        // 1) 读取并记录 (长度, mtime) 快照
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read session file: {}", e))?;
+        let len_before = content.len();
+        let mtime_before = file_mtime_secs(&path);
 
-    let mut modified = false;
-    let mut new_lines = Vec::new();
+        // 2) 内存中改写 model 字段
+        let mut modified = false;
+        let mut new_lines = Vec::with_capacity(content.lines().count());
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            new_lines.push(line.to_string());
-            continue;
-        }
+        for line in content.lines() {
+            if line.trim().is_empty() {
+                new_lines.push(line.to_string());
+                continue;
+            }
 
-        match serde_json::from_str::<serde_json::Value>(line) {
-            Ok(mut value) => {
-                // 检查是否为 assistant 消息且包含 model 字段
-                let is_assistant = value
-                    .get("message")
-                    .and_then(|m| m.get("role"))
-                    .and_then(|r| r.as_str())
-                    == Some("assistant");
+            match serde_json::from_str::<serde_json::Value>(line) {
+                Ok(mut value) => {
+                    // 检查是否为 assistant 消息且包含 model 字段
+                    let is_assistant = value
+                        .get("message")
+                        .and_then(|m| m.get("role"))
+                        .and_then(|r| r.as_str())
+                        == Some("assistant");
 
-                if is_assistant {
-                    if let Some(msg) = value.get_mut("message") {
-                        if let Some(obj) = msg.as_object_mut() {
-                            if let Some(current_model) = obj.get("model").and_then(|m| m.as_str())
-                            {
-                                if current_model != new_model {
-                                    obj.insert(
-                                        "model".to_string(),
-                                        serde_json::Value::String(new_model.to_string()),
-                                    );
-                                    modified = true;
+                    if is_assistant {
+                        if let Some(msg) = value.get_mut("message") {
+                            if let Some(obj) = msg.as_object_mut() {
+                                if let Some(current_model) =
+                                    obj.get("model").and_then(|m| m.as_str())
+                                {
+                                    if current_model != new_model {
+                                        obj.insert(
+                                            "model".to_string(),
+                                            serde_json::Value::String(new_model.to_string()),
+                                        );
+                                        modified = true;
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                new_lines.push(serde_json::to_string(&value).unwrap_or_else(|_| line.to_string()));
-            }
-            Err(_) => {
-                // 无法解析的行保持原样
-                new_lines.push(line.to_string());
+                    new_lines.push(
+                        serde_json::to_string(&value).unwrap_or_else(|_| line.to_string()),
+                    );
+                }
+                Err(_) => {
+                    // 无法解析的行保持原样
+                    new_lines.push(line.to_string());
+                }
             }
         }
-    }
 
-    if modified {
+        if !modified {
+            return Ok(false);
+        }
+
+        // 3) 写前重读校验：期间 CLI 若追加了新行，放弃本次结果重试，
+        //    避免原子替换把并发 append 的行覆盖掉（丢行竞态）。
+        let recheck = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to re-read session file: {}", e))?;
+        let len_after = recheck.len();
+        let mtime_after = file_mtime_secs(&path);
+        if len_before != len_after || mtime_before != mtime_after {
+            continue; // 文件被并发修改，重试
+        }
+
+        // 4) 文件未变：原子替换 + 失效缓存
         let new_content = new_lines.join("\n");
         atomic_write(&path, new_content.as_bytes())
             .map_err(|e| format!("Failed to write session file: {}", e))?;
@@ -1247,9 +1283,13 @@ pub(crate) fn rewrite_session_model(session_id: &str, new_model: &str) -> Result
             new_model,
             path.display()
         );
+        return Ok(true);
     }
 
-    Ok(modified)
+    Err(format!(
+        "Session file {} kept changing while rewriting model; giving up",
+        path.display()
+    ))
 }
 
 pub(crate) fn remove_path_if_exists(path: &Path) -> std::io::Result<()> {

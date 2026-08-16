@@ -842,6 +842,8 @@ export interface RenderedMessageChunk {
   id: string;
   renderKey: string;
   html: string;
+  /** 实时工具卡专用：工具开始时的流式块原始序号，供穿插排序（历史消息无此字段） */
+  anchorBlockIndex?: number;
 }
 
 /**

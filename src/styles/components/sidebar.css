@@ -294,21 +294,38 @@
   background: var(--sidebar-item-hover);
 }
 
-/* 折叠箭头：轻量指示器，不做树形样式 */
-.workspace-arrow {
+/* 图标位：文件夹标签 + 展开箭头合并（默认显示文件夹，悬浮/展开时切换为箭头） */
+.workspace-icon-slot {
   flex-shrink: 0;
-  width: 14px;
-  height: 14px;
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+}
+
+.workspace-folder-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   color: var(--color-text-muted);
-  opacity: 0.55;
-  transition: transform 0.2s ease, opacity 0.15s ease;
+  opacity: 0.75;
+  transition: opacity 0.15s ease;
 }
 
-.workspace-header:hover .workspace-arrow {
-  opacity: 1;
+.workspace-folder-svg {
+  width: 15px;
+  height: 15px;
+}
+
+/* 展开箭头：默认隐藏，仅悬浮时替换文件夹图标（展开/折叠态统一） */
+.workspace-arrow {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--color-text-secondary);
+  transition: transform 0.2s ease;
 }
 
 .workspace-arrow svg {
@@ -320,32 +337,12 @@
   transform: rotate(90deg);
 }
 
-/* 项目 icon：按路径生成稳定色相的首字母方块 */
-.workspace-avatar {
-  flex-shrink: 0;
-  width: 22px;
-  height: 22px;
-  border-radius: var(--radius-md);
+.workspace-header:hover .workspace-arrow {
   display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 10.5px;
-  font-weight: 650;
-  letter-spacing: 0.02em;
-  line-height: 1;
-  color: hsl(var(--ws-hue, 220) 70% var(--sidebar-avatar-text-lightness));
-  background: linear-gradient(
-    135deg,
-    hsl(var(--ws-hue, 220) 72% var(--sidebar-avatar-lightness)) 0%,
-    hsl(calc(var(--ws-hue, 220) + 26) 72% calc(var(--sidebar-avatar-lightness) - 8%)) 100%
-  );
-  filter: saturate(0.72);
-  opacity: 0.88;
 }
 
-.workspace-card.is-uncategorized .workspace-avatar {
-  background: var(--sidebar-badge-bg);
-  color: var(--color-text-muted);
+.workspace-header:hover .workspace-folder-icon {
+  display: none;
 }
 
 /* 标题主区：两行（名称 + 元信息） */
@@ -439,13 +436,6 @@
   opacity: 0.65;
 }
 
-.workspace-time {
-  flex-shrink: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
 /* 卡片内有运行中会话时的脉冲指示 */
 .workspace-live {
   display: inline-flex;
@@ -490,8 +480,7 @@
   transition: background 0.15s ease, color 0.15s ease;
 }
 
-.workspace-header:hover .ws-icon-btn,
-.workspace-header:focus-within .ws-icon-btn {
+.workspace-header:hover .ws-icon-btn {
   display: inline-flex;
 }
 
@@ -513,7 +502,9 @@
 }
 
 .workspace-conversations {
-  padding: 2px 8px 8px 25px;
+  /* 左缩进对齐文件夹名称起点（4px padding + 20px 图标位 + 7px gap）：
+     会话标题与分组名同一列；运行态圆点由会话行绝对定位到图标列 */
+  padding: 2px 8px 8px 31px;
   display: flex;
   flex-direction: column;
   gap: 1px;

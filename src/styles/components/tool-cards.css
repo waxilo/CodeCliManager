@@ -240,19 +240,13 @@
   box-shadow: none;
 }
 
-/* ── 实时工具卡（主消息流，参考 claudecodeui / Codex） ── */
-#live-tool-cards {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-#live-tool-cards .live-tool-card {
+/* ── 实时工具卡（主消息流，参考 claudecodeui / Codex / DSH） ── */
+.live-tool-card {
   margin: 0.15em 0;
 }
 
-#live-tool-cards .live-tool-card.streaming {
-  /* 实时卡片：左侧呼吸指示条，区分于已落盘的工具卡 */
+.live-tool-card.streaming {
+  /* 实时卡片：入场动画，区分于已落盘的工具卡 */
   animation: live-tool-card-in 0.2s ease both;
 }
 

@@ -87,6 +87,8 @@ export interface ActiveToolState {
   toolResult?: string;
   isError?: boolean;
   startedAt: number;
+  /** 工具开始时的流式块序号：实时渲染时工具卡插到该思考/文本块之后（思考-工具-思考穿插） */
+  blockIndexAtStart?: number;
   /** 子代理 Task：CLI task_id（与 tool_use_id 可能不同时用于匹配通知） */
   taskId?: string;
   /** 子代理 Task：执行描述（system/task_started 下发） */

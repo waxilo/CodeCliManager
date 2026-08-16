@@ -1,7 +1,19 @@
 import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
-import type { Message, Conversation } from '../../types';
-import { escapeHtml } from '../../utils';
-import { renderMessageListHtml, renderMessageHtmlChunks, type RenderedMessageChunk, extractToolName, extractToolUseId, extractToolResult } from './render-messages';
+import type { Message, Conversation, StreamBlock, ActiveToolState } from '../../types';
+import { escapeHtml, formatDuration } from '../../utils';
+import { formatTokenCount } from './context-indicator';
+import {
+  renderMessageListHtml,
+  renderMessageHtmlChunks,
+  renderThinkingDetails,
+  renderToolMessageHtml,
+  TOOL_CONFIG_MAP,
+  getDefaultToolConfig,
+  type RenderedMessageChunk,
+  extractToolName,
+  extractToolUseId,
+  extractToolResult,
+} from './render-messages';
 import { getEffectiveProjectDir } from './session-context';
 import { renderCopyIconHtml, renderInputComposerHtml } from './input-composer';
 import { dedupeAdjacentDuplicateMessages, getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
@@ -238,6 +250,171 @@ export function renderChatContent(): string {
   return `
     <div class="message-list" id="message-list">
       ${renderConversationMessagesInnerHtml(messages)}
+    </div>
+  `;
+}
+
+// ── 统一渲染管线：流式块 / 实时工具卡 → chunk（与历史消息同构，供同一 diff 挂载） ──
+
+/** 合并后的流式块：rawStart/rawEnd 记录覆盖的原始块索引区间，
+ *  供工具卡（blockIndexAtStart 为原始序号）换算到合并后的插入位置。 */
+export interface MergedStreamBlock extends StreamBlock {
+  rawStart: number;
+  rawEnd: number;
+}
+
+/** 合并相邻同类型流式块（thinking-thinking / text-text），语义与旧 refreshStreamingUI 一致 */
+export function mergeStreamBlocks(blocks: StreamBlock[]): MergedStreamBlock[] {
+  const merged: MergedStreamBlock[] = [];
+  let rawCursor = 0;
+  for (const block of blocks) {
+    const last = merged[merged.length - 1];
+    if (last && last.type === block.type && (block.type === 'thinking' || block.type === 'text')) {
+      if (block.type === 'thinking') {
+        last.content = last.content + '\n' + block.content;
+        if (block.durationMs != null) last.durationMs = block.durationMs;
+      } else {
+        last.content = last.content + '\n\n' + block.content;
+        last.finalized = Boolean(last.finalized && block.finalized);
+      }
+      last.rawEnd = rawCursor;
+    } else {
+      merged.push({
+        type: block.type,
+        content: block.content,
+        finalized: block.finalized,
+        durationMs: block.durationMs,
+        rawStart: rawCursor,
+        rawEnd: rawCursor,
+      });
+    }
+    rawCursor += 1;
+  }
+  return merged;
+}
+
+/**
+ * 把流式块（thinking / text）渲染为消息 chunk。
+ * id 使用稳定键 `streaming-block-{i}`：diff 挂载时按 id 复用节点，
+ * 内容变化（renderKey 变）只重建该块，避免整列表重建导致的闪烁。
+ * 根节点带 data-stream-id：与历史消息的 data-message-id 一并被 applyChatDom 索引。
+ */
+export function renderStreamingBlocksChunks(
+  blocks: StreamBlock[],
+  thinkingDone: boolean,
+): RenderedMessageChunk[] {
+  const merged = mergeStreamBlocks(blocks);
+  return merged.map((block, i) => {
+    const id = `streaming-block-${i}`;
+    // 思考块展开状态按块独立记录（expandedThinkingBlocks 键 = streaming-block-N），
+    // 修复旧实现「多个思考块共享 sessionId 展开态」的问题
+    const thinkingExpanded = appState.expandedThinkingBlocks.has(id);
+    if (block.type === 'thinking') {
+      const label = thinkingDone ? '思考过程' : '思考中...';
+      const isStreaming = !thinkingDone;
+      const html = `<div class="message assistant thinking-msg${isStreaming ? ' streaming' : ''}" data-stream-id="${escapeHtml(id)}">
+        <div class="message-content">${renderThinkingDetails(
+          block.content,
+          label,
+          thinkingExpanded,
+          id,
+          isStreaming,
+          block.durationMs,
+        )}</div>
+      </div>`;
+      return {
+        id,
+        // renderKey 不含内容：高频 delta 由 syncStreamingBlocksInPlace 就地更新 <pre>，
+        // diff 只在该块「思考结束 / 展开态」变化时重建（重建时内容已在 html 里）。
+        renderKey: `thinking|${thinkingDone ? 'd' : 's'}|${thinkingExpanded ? 'e' : 'c'}`,
+        html,
+      };
+    }
+    // text 块：diff 时按 finalized 状态复用节点（renderKey 不含内容——
+    // 高频 delta 由 syncStreamingBlocksInPlace 就地追加文本，避免每帧重建 DOM）。
+    // 内容经根节点 data-stream-id 定位，挂载完成后由同步函数填充。
+    const html = `<div class="message assistant${block.finalized ? '' : ' streaming'}" data-stream-id="${escapeHtml(id)}">
+      <div class="message-content">
+        <div class="markdown-body streaming-plain-text"></div>
+      </div>
+    </div>`;
+    return {
+      id,
+      renderKey: `text|${block.finalized ? 'f' : 'p'}`,
+      html,
+    };
+  });
+}
+
+/**
+ * 渲染运行中/刚完成的实时工具卡 chunk（id 稳定，按状态展示运行/完成/错误）。
+ * 子代理（Task/Agent）附带实时进度行；anchorBlockIndex 供 refresh 穿插到
+ * 工具开始时的流式块之后（思考-工具-思考按真实顺序，参考 DSH/Codex）。
+ */
+export function renderLiveToolChunks(tools: ActiveToolState[]): RenderedMessageChunk[] {
+  // 按「开始块序号 + 开始时间」稳定排序，保证穿插与展示顺序确定
+  const sorted = [...tools].sort((a, b) => {
+    const ai = a.blockIndexAtStart ?? Number.MAX_SAFE_INTEGER;
+    const bi = b.blockIndexAtStart ?? Number.MAX_SAFE_INTEGER;
+    if (ai !== bi) return ai - bi;
+    return a.startedAt - b.startedAt;
+  });
+  return sorted.map((tool) => {
+    const id = `live-tool-${tool.toolUseId}`;
+    const config = TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig();
+    const progressLine =
+      tool.toolName === 'Task' || tool.toolName === 'Agent'
+        ? renderLiveSubagentProgressLine(tool)
+        : '';
+    const html = `<div class="message tool live-tool-card${tool.status === 'running' ? ' streaming' : ''}" data-stream-id="${escapeHtml(id)}">
+      <div class="message-content">${renderToolMessageHtml({
+        id,
+        role: 'tool',
+        content: '',
+        timestamp: Math.floor(tool.startedAt / 1000),
+        toolData: {
+          toolName: tool.toolName,
+          toolInput: tool.input || {},
+          toolResult: tool.status === 'done' || tool.status === 'failed' ? tool.toolResult : undefined,
+          isError: tool.status === 'failed',
+          toolUseId: tool.toolUseId,
+          displayMode: config.displayMode,
+          colorScheme: {
+            border: config.borderColor,
+            icon: config.iconColor,
+            primary: config.borderColor,
+          },
+        },
+      })}${progressLine}</div>
+    </div>`;
+    return {
+      id,
+      anchorBlockIndex: tool.blockIndexAtStart,
+      // renderKey 含状态/结果/输入/进度签名：任一变化 → 重建该卡（进度行实时更新）
+      renderKey: `tool|${tool.status}|${(tool.toolResult || '').length}|${Object.keys(tool.input).length}|${tool.progress?.totalTokens ?? 0}:${tool.progress?.toolUses ?? 0}:${tool.progress?.durationMs ?? 0}`,
+      html,
+    };
+  });
+}
+
+/** 运行中子代理的实时进度行（tokens · 工具次数 · 耗时 + 状态徽标），
+ *  完成/失败后展示终态徽标，等待历史落盘接管（样式见 tool-cards.css）。 */
+function renderLiveSubagentProgressLine(tool: ActiveToolState): string {
+  const parts: string[] = [];
+  if (tool.progress?.totalTokens) parts.push(`${formatTokenCount(tool.progress.totalTokens)} tokens`);
+  if (tool.progress?.toolUses) parts.push(`${tool.progress.toolUses} 次工具`);
+  if (tool.progress?.durationMs) parts.push(formatDuration(tool.progress.durationMs));
+  const meta = parts.length ? `<span class="tool-meta">${parts.join(' · ')}</span>` : '';
+  const badge =
+    tool.status === 'failed'
+      ? '<span class="tool-status tool-status-error">子代理失败</span>'
+      : tool.status === 'done'
+        ? '<span class="tool-status tool-status-done">子代理完成</span>'
+        : '<span class="tool-status tool-status-running">子代理执行中</span>';
+  return `
+    <div class="live-subagent-progress">
+      ${meta}
+      ${badge}
     </div>
   `;
 }

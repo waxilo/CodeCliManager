@@ -694,6 +694,25 @@ struct ChannelReader {
     current: Vec<u8>,
     pos: usize,
     eof: bool,
+    /// 客户端断开信号：连接关闭导致本 reader 被丢弃时置位（通知 producer/心跳停止）。
+    client_gone: Option<Arc<AtomicBool>>,
+    /// 释放 dedup 条目所需引用：断开时立即 mark_failed，避免同 body 请求永久 429。
+    dedup_gone: Option<Arc<DedupStore>>,
+    entry_gone: Option<Arc<DedupEntry>>,
+}
+
+impl Drop for ChannelReader {
+    fn drop(&mut self) {
+        // 客户端连接关闭（正常 eof 或异常断开）：通知 producer 停止发送，
+        // 并把同 body 去重条目标记为 failed——否则条目停在 InFlight，
+        // 后续同 body 请求会永久 429（DedupLookup::Busy 等待后仍 429）。
+        if let Some(gone) = &self.client_gone {
+            gone.store(true, Ordering::Relaxed);
+        }
+        if let (Some(dedup), Some(entry)) = (&self.dedup_gone, &self.entry_gone) {
+            dedup.mark_failed(entry);
+        }
+    }
 }
 
 impl Read for ChannelReader {
@@ -1342,16 +1361,21 @@ fn respond_sse_stream_fetch(
     }
     // Miss：注册去重条目（可选，busy 降级时不再注册，避免覆盖原条目）
     let entry = dedup_key.map(|key| dedup.register(key));
+    // 供 reader Drop 时释放去重条目（producer 闭包会 move 走 dedup/entry，需先 clone）
+    let dedup_for_reader = dedup.clone();
+    let reader_entry = entry.clone();
 
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
+    // 客户端断开信号：reader 被丢弃（连接关闭）时置位，通知 producer/心跳停止，
+    // 并立即释放 dedup 条目（否则同 body 请求会永久 429，见 ChannelReader::drop）。
+    let client_gone = Arc::new(AtomicBool::new(false));
     // 心跳：producer 阻塞等 Kiro 首字节 / 事件间隙期间持续发 SSE 注释，防止连接空转被掐。
     let hb_tx = tx.clone();
-    let done = Arc::new(AtomicBool::new(false));
-    let hb_done = Arc::clone(&done);
+    let hb_gone = Arc::clone(&client_gone);
     thread::spawn(move || {
-        while !hb_done.load(Ordering::Relaxed) {
+        while !hb_gone.load(Ordering::Relaxed) {
             thread::sleep(SSE_HEARTBEAT_INTERVAL);
-            if hb_done.load(Ordering::Relaxed) {
+            if hb_gone.load(Ordering::Relaxed) {
                 break;
             }
             // try_send：通道满（说明数据在流动）时跳过，绝不阻塞心跳
@@ -1360,8 +1384,15 @@ fn respond_sse_stream_fetch(
     });
 
     let eof_tx = tx.clone();
+    let producer_gone = Arc::clone(&client_gone);
     let producer = thread::spawn(move || {
+        // 客户端断开（producer_gone 置位）后静默跳过发送：不再向已断开的连接写数据。
+        // 上游请求仍会读完（孤儿线程），但 handler 不被 join 卡住、dedup 条目已由
+        // ChannelReader::drop 释放，不会出现「同 body 永久 429」或线程堆积。
         let mut send = |chunk: String| {
+            if producer_gone.load(Ordering::Relaxed) {
+                return;
+            }
             if let Some(e) = &entry {
                 dedup.append(e, chunk.as_bytes());
             }
@@ -1403,7 +1434,6 @@ fn respond_sse_stream_fetch(
                 // 已提前 message_start：不可只发 error + message_stop（会触发 ede_diagnostic）
                 finish_sse_after_error(&mut send, &e);
                 let _ = eof_tx.send(Vec::new());
-                done.store(true, Ordering::Relaxed);
                 return;
             }
         };
@@ -1427,7 +1457,6 @@ fn respond_sse_stream_fetch(
                 .unwrap_or(text);
             finish_sse_after_error(&mut send, &message);
             let _ = eof_tx.send(Vec::new());
-            done.store(true, Ordering::Relaxed);
             return;
         }
 
@@ -1444,7 +1473,6 @@ fn respond_sse_stream_fetch(
             }
         }
         let _ = eof_tx.send(Vec::new());
-        done.store(true, Ordering::Relaxed);
     });
 
     let reader = ChannelReader {
@@ -1452,6 +1480,10 @@ fn respond_sse_stream_fetch(
         current: Vec::new(),
         pos: 0,
         eof: false,
+        // 客户端断开（reader 被丢弃）时通知 producer 停止并释放 dedup 条目
+        client_gone: Some(Arc::clone(&client_gone)),
+        dedup_gone: Some(dedup_for_reader),
+        entry_gone: reader_entry,
     };
     let mut headers = vec![
         Header::from_bytes("Content-Type", "text/event-stream; charset=utf-8").unwrap(),
@@ -1464,7 +1496,12 @@ fn respond_sse_stream_fetch(
         .with_chunked_threshold(0);
 
     let _ = request.respond(response);
-    let _ = producer.join();
+    // 有界等待 producer：客户端断开后（client_gone 已置位）最多再等一小段让线程收尾，
+    // 避免 handler 线程被最长 1500s 的上游请求永久卡住（旧实现直接 join）。
+    let join_deadline = Instant::now() + Duration::from_millis(500);
+    while !producer.is_finished() && Instant::now() < join_deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
 }
 
 /// 把已缓冲的完整 SSE 流原样回放给客户端（同 body 请求的复用路径，不产生新的 Kiro 生成）。
@@ -1921,10 +1958,45 @@ mod tests {
             current: Vec::new(),
             pos: 0,
             eof: false,
+            client_gone: None,
+            dedup_gone: None,
+            entry_gone: None,
         };
         let mut buf = String::new();
         reader.read_to_string(&mut buf).unwrap();
         assert_eq!(buf, "hello world");
+    }
+
+    #[test]
+    fn channel_reader_drop_releases_dedup_entry_and_sets_client_gone() {
+        // 模拟客户端断开：reader 被丢弃时，应置 client_gone 并把同 body 去重条目标记为 failed
+        let dedup = Arc::new(DedupStore::new());
+        let key = 42u64;
+        let entry = dedup.register(key);
+        assert!(matches!(
+            entry.status.lock().unwrap().clone(),
+            DedupStatus::InFlight
+        ));
+
+        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4);
+        let client_gone = Arc::new(AtomicBool::new(false));
+        let reader = ChannelReader {
+            rx,
+            current: Vec::new(),
+            pos: 0,
+            eof: false,
+            client_gone: Some(Arc::clone(&client_gone)),
+            dedup_gone: Some(Arc::clone(&dedup)),
+            entry_gone: Some(Arc::clone(&entry)),
+        };
+        drop(reader);
+
+        // 断开信号置位；去重条目已释放（Failed → lookup 视为 Miss，不再 429）
+        assert!(client_gone.load(Ordering::Relaxed));
+        assert!(matches!(
+            dedup.lookup(key),
+            DedupLookup::Miss
+        ));
     }
 
     #[test]
