@@ -80,7 +80,7 @@
   gap: 3px;
   flex-shrink: 0;
   padding-bottom: 8px;
-  border-bottom: 1px solid var(--color-bg-surface-hover);
+  border-bottom: 1px solid var(--color-border);
 }
 
 .settings-section-item {
@@ -91,7 +91,7 @@
   min-height: 36px;
   padding: 0 10px;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   font: inherit;

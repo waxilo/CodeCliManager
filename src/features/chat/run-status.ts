@@ -1,4 +1,5 @@
 import { appState } from '../../state';
+import { updateCostIndicator } from './cost-indicator';
 
 /**
  * 输入框下方状态条：由权威状态（runningSessions / streamingBySession /
@@ -71,7 +72,7 @@ export function getSessionRunStatus(sessionId: string): RunStatusInfo | null {
     }
     const runningTool = [...tools.values()].find((t) => t.status === 'running');
     if (runningTool) {
-      return { status: `正在执行工具 ${runningTool.toolName}`, elapsedMs, busy: true };
+      return { status: describeToolStatus(runningTool), elapsedMs, busy: true };
     }
   }
 
@@ -90,6 +91,37 @@ export function getSessionRunStatus(sessionId: string): RunStatusInfo | null {
 
   if (running) return { status: '正在处理…', elapsedMs, busy: true };
   return null;
+}
+
+/** 运行中工具的动作描述（参考 claudecodeui ClaudeStatus / Codex 工具状态文案） */
+function describeToolStatus(tool: { toolName: string; input?: Record<string, unknown> }): string {
+  const input = tool.input || {};
+  const short = (v: unknown): string => {
+    const s = String(v ?? '').trim();
+    if (!s) return '';
+    // 单行截断：命令/路径等只取首行前 60 字符
+    const line = s.split('\n')[0].trim();
+    return line.length > 60 ? line.slice(0, 60) + '…' : line;
+  };
+  switch (tool.toolName) {
+    case 'Bash':
+      return short(input.command) ? `正在执行: ${short(input.command)}` : '正在执行命令';
+    case 'Read':
+      return short(input.file_path) ? `正在读取: ${short(input.file_path)}` : '正在读取文件';
+    case 'Edit':
+      return short(input.file_path) ? `正在编辑: ${short(input.file_path)}` : '正在编辑文件';
+    case 'Write':
+      return short(input.file_path) ? `正在写入: ${short(input.file_path)}` : '正在写入文件';
+    case 'Grep':
+      return short(input.pattern) ? `正在搜索: ${short(input.pattern)}` : '正在搜索代码';
+    case 'Glob':
+      return short(input.pattern) ? `正在匹配: ${short(input.pattern)}` : '正在匹配文件';
+    case 'Task':
+    case 'Agent':
+      return '子代理执行中';
+    default:
+      return `正在执行 ${tool.toolName}`;
+  }
 }
 
 /** 记录本轮运行起点。总是覆盖：每次新的执行（发送/重试/追问派发/续跑）都从 0 重新计时。 */
@@ -235,10 +267,16 @@ export function startRunStatusTicker(): void {
   tickerStarted = true;
   setInterval(() => {
     const row = document.querySelector<HTMLElement>('#composer-status-row');
-    if (!row) return;
-    if (row.hidden && !getSessionRunStatus(appState.activeConversationId || 'pending') && !transientStatus) {
-      return;
+    const statusActive =
+      !row ||
+      (!row.hidden && !getSessionRunStatus(appState.activeConversationId || 'pending') && !transientStatus);
+    // 状态条活动（运行中）或正在计时时刷新：顺带更新成本栏耗时（运行中才有意义）
+    if (statusActive) {
+      refreshRunStatusStrip();
     }
-    refreshRunStatusStrip();
+    // 运行中：成本栏的「⏱耗时」需要持续刷新
+    if (appState.runningSessions.has(appState.activeConversationId || 'pending')) {
+      updateCostIndicator();
+    }
   }, 250);
 }

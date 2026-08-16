@@ -4,7 +4,7 @@ import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
 import { showConfirmDialog } from '../../ui';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
-import { refreshModelInfo } from '../chat/render-chat';
+import { refreshModelInfo } from '../chat/model-picker';
 import { invalidateFileCache, stashComposerDraft } from '../files/index';
 import { dismissMcpViewState } from '../mcp/mount';
 import { dismissSettingsViewState } from '../settings/mount';
@@ -155,4 +155,3 @@ export async function newChatInWorkspace(workspacePath: string): Promise<void> {
   }, 100);
 }
 
-/** 渲染单个对话列表项 HTML（供工作区卡片复用） */

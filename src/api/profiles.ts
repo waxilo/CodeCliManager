@@ -11,7 +11,24 @@ export function getApiProfilesState(): Promise<ApiProfilesState> {
   return invoke<ApiProfilesState>('get_api_profiles_state');
 }
 
-export function upsertApiProfile(args: Record<string, unknown>): Promise<ApiProfilesState> {
+/** upsert_api_profile 参数：结构化类型，字段拼错在编译期暴露 */
+export interface UpsertApiProfileArgs extends Record<string, unknown> {
+  profileId: string | null;
+  name: string;
+  config: {
+    baseUrl: string;
+    apiKey: string | null;
+    defaultModel: string;
+    haikuModel: string;
+    sonnetModel: string;
+    opusModel: string;
+    displayModels: string[];
+    customModels: string[];
+  };
+  apply: boolean;
+}
+
+export function upsertApiProfile(args: UpsertApiProfileArgs): Promise<ApiProfilesState> {
   return invoke<ApiProfilesState>('upsert_api_profile', args);
 }
 

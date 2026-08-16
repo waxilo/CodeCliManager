@@ -1,6 +1,7 @@
 import { appState } from '../../state';
 import type { SessionUsage } from '../../types';
 import { formatTokenCount } from './context-indicator';
+import { formatDuration } from '../../utils';
 
 function getActiveUsage(): SessionUsage | null {
   const sessionId = appState.activeConversationId;
@@ -8,12 +9,16 @@ function getActiveUsage(): SessionUsage | null {
   return appState.usageBySession.get(sessionId) || null;
 }
 
-/** 输入框外下方的成本 / Token 消耗指示器（当前会话累计） */
+/** 输入框外下方的成本 / Token 消耗指示器（当前会话累计，参考 claudecodeui 成本栏） */
 export function renderCostIndicatorHtml(): string {
   const usage = getActiveUsage();
   if (!usage) return '';
 
   const parts: string[] = [];
+  // 当前会话使用的模型（来自进程模型映射；缺省不显示）
+  const sessionId = appState.activeConversationId || '';
+  const model = sessionId ? appState.sessionProcessModels.get(sessionId) : undefined;
+  if (model) parts.push(String(model));
   if (usage.inputTokens || usage.outputTokens) {
     parts.push(`↑${formatTokenCount(usage.inputTokens)} ↓${formatTokenCount(usage.outputTokens)}`);
   }
@@ -22,6 +27,12 @@ export function renderCostIndicatorHtml(): string {
   }
   if (typeof usage.costUsd === 'number') {
     parts.push(`$${usage.costUsd.toFixed(4)}`);
+  }
+  // 本轮运行耗时（当前正在执行 / 刚结束的轮次）
+  const startedAt = sessionId ? appState.sessionRunStartedAt.get(sessionId) : undefined;
+  if (startedAt != null) {
+    const elapsed = formatDuration(Date.now() - startedAt);
+    if (elapsed) parts.push(`⏱${elapsed}`);
   }
   if (parts.length === 0) return '';
 

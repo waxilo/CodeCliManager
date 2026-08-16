@@ -7,7 +7,7 @@
   background: var(--color-bg-elevated, #323232);
   color: var(--color-text, #fff);
   padding: 10px 22px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   font-size: 13px;
   line-height: 1.5;
   box-shadow: 0 4px 16px rgba(0,0,0,0.18);
@@ -39,7 +39,7 @@
   overflow-y: auto;
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border);
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12);
   z-index: 100;
 }
@@ -63,7 +63,7 @@
 .file-suggestion-item.active {
   background: var(--color-accent);
   color: var(--color-on-accent);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
 }
 
 .file-suggestion-icon {
@@ -119,7 +119,7 @@
   align-items: center;
   gap: 6px;
   padding: 8px 16px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-surface);
   color: var(--color-text);
   font-size: 13px;
@@ -163,7 +163,7 @@
   align-items: center;
   gap: 5px;
   padding: 4px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-surface);
   border: 1px solid var(--color-bg-surface-hover);
   font-size: 12px;
@@ -187,7 +187,7 @@
 .file-ref-chip-thumb {
   width: 36px;
   height: 36px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   object-fit: cover;
   flex-shrink: 0;
   border: 1px solid var(--color-bg-surface-hover);
@@ -281,7 +281,7 @@
   width: 56px;
   height: 56px;
   padding: 14px;
-  border-radius: 14px;
+  border-radius: var(--radius-xl);
   background: var(--color-bg-surface);
   color: var(--color-accent);
   opacity: 0.85;
@@ -324,7 +324,7 @@
   flex-shrink: 0;
   width: 52px;
   height: 52px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   border: 2px solid transparent;
   cursor: pointer;
@@ -379,7 +379,7 @@
   flex-shrink: 0;
   width: 52px;
   height: 52px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow: hidden;
   border: 2px solid transparent;
   cursor: pointer;
@@ -402,7 +402,7 @@
   align-items: center;
   gap: 5px;
   padding: 6px 28px 6px 10px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   border: 1px solid transparent;
   font-size: 12px;
@@ -466,7 +466,7 @@
 .image-lightbox img {
   max-width: 90vw;
   max-height: 90vh;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   box-shadow: 0 8px 48px rgba(0, 0, 0, 0.5);
   object-fit: contain;
 }
@@ -488,7 +488,7 @@
   flex-direction: column;
   width: min(90vw, 720px);
   max-height: 85vh;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-base);
   box-shadow: 0 8px 48px rgba(0, 0, 0, 0.35);
   overflow: hidden;
@@ -518,7 +518,7 @@
   width: 28px;
   height: 28px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   font-size: 18px;
@@ -565,7 +565,7 @@
   flex-direction: column;
   width: min(90vw, 900px);
   height: 90vh;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
   background: var(--color-bg-base);
   box-shadow: 0 8px 48px rgba(0, 0, 0, 0.35);
   overflow: hidden;
@@ -595,7 +595,7 @@
   width: 28px;
   height: 28px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   font-size: 18px;

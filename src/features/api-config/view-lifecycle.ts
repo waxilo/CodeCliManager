@@ -4,7 +4,7 @@ import { getIsSidebarCollapsed, setSidebarCollapsed } from '../../ui';
 import { stashComposerDraft, restoreComposerDraft } from '../files/index';
 import { closeProfileContextMenu } from './profile-list';
 import { loadChatModelOptions } from '../chat/model-picker';
-import { refreshModelInfo } from '../chat/render-chat';
+import { refreshModelInfo } from '../chat/model-picker';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
 
 export function openApiConfigView() {

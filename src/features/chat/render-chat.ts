@@ -1,11 +1,9 @@
 import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
 import type { Message, Conversation } from '../../types';
 import { escapeHtml } from '../../utils';
-import * as api from '../../api';
 import { renderMessageListHtml, renderMessageHtmlChunks, type RenderedMessageChunk, extractToolName, extractToolUseId, extractToolResult } from './render-messages';
 import { getEffectiveProjectDir } from './session-context';
 import { renderCopyIconHtml, renderInputComposerHtml } from './input-composer';
-import { getActiveChatModelForRender } from './model-picker';
 import { dedupeAdjacentDuplicateMessages, getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
 import { normalizeMessageForCompare } from '../files/index';
 
@@ -298,51 +296,5 @@ export function renderEmptyState(): string {
   `;
 }
 
-export async function refreshModelInfo() {
-  const container = document.querySelector('#empty-chat-model-info');
-  if (!container) return;
 
-  try {
-    const state = await api.getApiProfilesState();
-    const activeProfile = state.profiles.find((p) => p.id === state.activeProfileId);
-    const profileName = activeProfile?.name || '';
-    const baseUrl = activeProfile?.baseUrl || state.current?.baseUrl || '';
-    // 当前模型直接读自配置文件
-    // 'default' 表示订阅默认（非具体模型），按未指定处理，让卡片回到「官方默认」文案
-    const rawModel = getActiveChatModelForRender();
-    const currentModel =
-      (rawModel && rawModel !== 'default' ? rawModel : '') ||
-      activeProfile?.defaultModel ||
-      state.current?.defaultModel ||
-      '';
-
-    const hasInfo = Boolean(currentModel || profileName || baseUrl);
-    const body = hasInfo
-      ? `
-          <div class="model-info-row"><span class="model-info-key">当前模型</span><span class="model-info-value model-info-model">${escapeHtml(currentModel || '未配置模型')}</span></div>
-          ${profileName ? `<div class="model-info-row"><span class="model-info-key">配置方案</span><span class="model-info-value">${escapeHtml(profileName)}</span></div>` : ''}
-          ${baseUrl ? `<div class="model-info-row"><span class="model-info-key">API 地址</span><span class="model-info-value model-info-url">${escapeHtml(baseUrl)}</span></div>` : ''}
-        `
-      : `
-          <div class="model-info-row"><span class="model-info-key">当前模型</span><span class="model-info-value model-info-model">官方默认（Claude 订阅）</span></div>
-          <div class="model-info-empty-text">正在使用 Claude 官方登录 / 订阅。如需改用第三方 API，点击右上角「API 配置」进入配置页并「应用」。</div>
-        `;
-
-    container.innerHTML = `
-      <div class="model-info-card">
-        <div class="model-info-header">
-          <svg class="model-info-icon" viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-            <path d="M2 17l10 5 10-5"/>
-            <path d="M2 12l10 5 10-5"/>
-          </svg>
-          <span class="model-info-label">当前模型配置</span>
-        </div>
-        <div class="model-info-body">${body}</div>
-      </div>
-    `;
-  } catch {
-    // 静默处理错误，不阻塞页面渲染
-  }
-}
 

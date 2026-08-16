@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 use tauri::{AppHandle, Emitter};
 
 use crate::history::{Conversation, Message};
@@ -107,7 +108,7 @@ pub(crate) fn emit_message_chunk(app: &AppHandle, conversation_id: &str, kind: &
     let _ = app.emit("message-chunk", &payload);
 }
 
-/// 流式 tool_use 块累积（仅 Task 会 emit 到前端）
+/// 流式 tool_use 块累积（所有工具都会 emit 到前端，供实时工具卡展示）
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ToolUseBlockState {
     pub(crate) id: String,
@@ -135,7 +136,9 @@ fn tool_result_content_to_string(content: &serde_json::Value) -> String {
     }
 }
 
-fn emit_task_tool_result_if_any(
+/// 流式 tool_result 下发：所有工具结果都实时发给前端（实时工具卡展示完成态/错误态）。
+/// Task 的子代理结果额外从未决集合移除，允许主链 result 触发 turn-complete。
+fn emit_tool_result_if_any(
     app: &AppHandle,
     sid: &str,
     value: &serde_json::Value,
@@ -158,11 +161,13 @@ fn emit_task_tool_result_if_any(
             .get("tool_use_id")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        if tool_use_id.is_empty() || !known_task_ids.contains(tool_use_id) {
+        if tool_use_id.is_empty() {
             continue;
         }
         // 子代理结果已回：从未决集合中移除，允许主链 result 触发 turn-complete
-        outstanding_task_ids.remove(tool_use_id);
+        if known_task_ids.contains(tool_use_id) {
+            outstanding_task_ids.remove(tool_use_id);
+        }
         let is_error = item
             .get("is_error")
             .and_then(|v| v.as_bool())
@@ -399,8 +404,7 @@ pub(crate) fn is_main_stream_result(line: &str) -> bool {
     }
 }
 
-/// 需要流式累积 input_json 的工具（Task 需发 tool_use 卡；TodoWrite 需解析 todos）
-const INPUT_JSON_TOOL_NAMES: &[&str] = &["Task", "TodoWrite"];
+/// 所有工具的 tool_use 块都流式累积 input（实时工具卡需要展示输入快照）。
 
 /// system 事件的字段可能挂在顶层，防御性取值。
 fn system_event_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&'a serde_json::Value> {
@@ -419,6 +423,7 @@ pub(crate) fn process_claude_stream_line(
     protocol_guard: &mut ProtocolLeakGuard,
     stream_error: &mut Option<String>,
     last_assistant_text: &mut Option<String>,
+    thinking_started_at: &mut Option<Instant>,
 ) {
     let value: serde_json::Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -573,7 +578,7 @@ pub(crate) fn process_claude_stream_line(
         }
         "user" => {
             if let Some(sid) = resolve_stream_session_id(captured_session_id, &value) {
-                emit_task_tool_result_if_any(app, &sid, &value, known_task_ids, outstanding_task_ids);
+                emit_tool_result_if_any(app, &sid, &value, known_task_ids, outstanding_task_ids);
             }
         }
         "stream_event" => {
@@ -611,6 +616,7 @@ pub(crate) fn process_claude_stream_line(
                         let index = event.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                         block_types.insert(index, block_type.to_string());
                         if block_type == "thinking" {
+                            *thinking_started_at = Some(Instant::now());
                             emit_message_chunk(app, &sid, "thinking_start", "");
                         } else if block_type == "text" {
                             emit_message_chunk(app, &sid, "text_start", "");
@@ -633,7 +639,9 @@ pub(crate) fn process_claude_stream_line(
                                     input_json: String::new(),
                                 },
                             );
-                            if INPUT_JSON_TOOL_NAMES.contains(&name.as_str()) && !id.is_empty() {
+                            // 所有工具都下发 tool_use_start：前端据此实时创建工具卡。
+                            // 无 id 的（罕见）跳过实时卡，落盘后仍由历史渲染展示。
+                            if !id.is_empty() {
                                 if name == "Task" {
                                     known_task_ids.insert(id.clone());
                                 }
@@ -692,10 +700,9 @@ pub(crate) fn process_claude_stream_line(
                             if let Some(partial) =
                                 delta.get("partial_json").and_then(|v| v.as_str())
                             {
+                                // 所有工具的 input 都累积：实时工具卡需要展示命令/路径/内容等输入
                                 if let Some(block) = tool_use_blocks.get_mut(&index) {
-                                    if INPUT_JSON_TOOL_NAMES.contains(&block.name.as_str()) {
-                                        block.input_json.push_str(partial);
-                                    }
+                                    block.input_json.push_str(partial);
                                 }
                             }
                         }
@@ -706,7 +713,18 @@ pub(crate) fn process_claude_stream_line(
                     let index = event.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
                     match block_types.get(&index).map(|s| s.as_str()) {
                         Some("thinking") => {
-                            emit_message_chunk(app, &sid, "thinking_end", "");
+                            // 思考块结束：附带本次思考时长（ms），前端在思考块标题展示
+                            let duration_ms = thinking_started_at
+                                .take()
+                                .map(|t| t.elapsed().as_millis() as u64)
+                                .unwrap_or(0);
+                            let payload = serde_json::json!({ "duration_ms": duration_ms });
+                            emit_message_chunk(
+                                app,
+                                &sid,
+                                "thinking_end",
+                                &payload.to_string(),
+                            );
                             block_types.remove(&index);
                         }
                         Some("text") => {
@@ -719,43 +737,42 @@ pub(crate) fn process_claude_stream_line(
                         }
                         Some("tool_use") => {
                             if let Some(block) = tool_use_blocks.remove(&index) {
-                                if INPUT_JSON_TOOL_NAMES.contains(&block.name.as_str()) {
-                                    let input: serde_json::Value =
-                                        serde_json::from_str(&block.input_json)
-                                            .unwrap_or_else(|_| serde_json::json!({}));
-                                    if block.name == "Task" {
-                                        // 主链 Task 已发出：其子代理 result 不再视为本轮结束
-                                        outstanding_task_ids.insert(block.id.clone());
-                                    } else if block.name == "TodoWrite" {
-                                        // TodoWrite 协议为「整表替换」，直接透传完整 todos 给前端
-                                        let todos = input
-                                            .get("todos")
-                                            .cloned()
-                                            .unwrap_or_else(|| serde_json::json!([]));
-                                        let todos_payload = serde_json::json!({
-                                            "conversation_id": sid,
-                                            "todos": todos,
-                                        });
-                                        emit_message_chunk(
-                                            app,
-                                            &sid,
-                                            "todos_updated",
-                                            &todos_payload.to_string(),
-                                        );
-                                    }
-                                    let payload = serde_json::json!({
-                                        "id": block.id,
-                                        "name": block.name,
-                                        "input": input,
-                                        "index": index,
+                                let input: serde_json::Value =
+                                    serde_json::from_str(&block.input_json)
+                                        .unwrap_or_else(|_| serde_json::json!({}));
+                                if block.name == "Task" {
+                                    // 主链 Task 已发出：其子代理 result 不再视为本轮结束
+                                    outstanding_task_ids.insert(block.id.clone());
+                                } else if block.name == "TodoWrite" {
+                                    // TodoWrite 协议为「整表替换」，直接透传完整 todos 给前端
+                                    let todos = input
+                                        .get("todos")
+                                        .cloned()
+                                        .unwrap_or_else(|| serde_json::json!([]));
+                                    let todos_payload = serde_json::json!({
+                                        "conversation_id": sid,
+                                        "todos": todos,
                                     });
                                     emit_message_chunk(
                                         app,
                                         &sid,
-                                        "tool_use_end",
-                                        &payload.to_string(),
+                                        "todos_updated",
+                                        &todos_payload.to_string(),
                                     );
                                 }
+                                // 所有工具都下发 tool_use_end：前端结束实时工具卡并展示完整输入
+                                let payload = serde_json::json!({
+                                    "id": block.id,
+                                    "name": block.name,
+                                    "input": input,
+                                    "index": index,
+                                });
+                                emit_message_chunk(
+                                    app,
+                                    &sid,
+                                    "tool_use_end",
+                                    &payload.to_string(),
+                                );
                             }
                             block_types.remove(&index);
                         }

@@ -504,11 +504,21 @@ export function renderChevronDownIconHtml(): string {
   </svg>`;
 }
 
-export function renderThinkingDetails(thinking: string, label: string, expanded: boolean, dataId?: string, isStreaming: boolean = false): string {
+export function renderThinkingDetails(
+  thinking: string,
+  label: string,
+  expanded: boolean,
+  dataId?: string,
+  isStreaming: boolean = false,
+  durationMs?: number,
+): string {
   const openAttr = expanded ? ' open' : '';
   const dataAttr = dataId ? ` data-thinking-id="${escapeHtml(dataId)}"` : '';
   const streamClass = isStreaming ? ' streaming-active' : '';
-  const durationText = isStreaming ? '' : '<span class="thinking-duration">思考完成</span>';
+  // 思考时长：流式中不显示（未结束），结束后展示；历史消息无时长则不显示
+  const durationText = !isStreaming
+    ? `<span class="thinking-duration">${durationMs ? formatDuration(durationMs) : '思考完成'}</span>`
+    : '';
   return `
     <details class="thinking-block${streamClass}"${openAttr}${dataAttr}>
       <summary class="thinking-summary">

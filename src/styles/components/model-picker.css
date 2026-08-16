@@ -12,8 +12,8 @@
 .display-models-picker-sync {
   height: 36px;
   padding: 0 12px;
-  border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
   background: var(--color-bg-elevated);
   color: var(--color-text-secondary);
   font-size: 12px;
@@ -37,8 +37,8 @@
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   background: var(--color-bg-surface);
 }
 
@@ -79,7 +79,7 @@
   height: 28px;
   padding: 0 10px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   font-size: 12px;
   cursor: pointer;
   flex-shrink: 0;
@@ -151,8 +151,8 @@
   min-height: 52px;
   max-height: 96px;
   padding: 8px 10px;
-  border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   background: var(--color-bg-surface);
   color: var(--color-text);
   font-size: 12px;
@@ -164,6 +164,7 @@
 .display-models-custom-add-input:focus {
   outline: none;
   border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
 }
 
 .display-models-custom-add-input::placeholder {
@@ -174,7 +175,7 @@
   min-height: 36px;
   padding: 0 14px;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-lg);
   background: var(--color-accent);
   color: var(--color-on-accent);
   font-size: 12px;
@@ -233,8 +234,8 @@
   min-width: 0;
   min-height: 64px;
   padding: 12px;
-  border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
   background: var(--color-bg-elevated);
   color: inherit;
   text-align: left;
@@ -314,10 +315,10 @@
   flex-direction: column;
   gap: 12px;
   padding: 16px;
-  border: 1px solid var(--color-bg-surface);
-  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
   background: var(--color-bg-base);
-  box-shadow: 0 16px 48px var(--color-shadow-strong);
+  box-shadow: var(--shadow-lg);
 }
 
 .model-picker-header {
@@ -336,7 +337,7 @@
 
 .model-picker-close {
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-secondary);
   font-size: 16px;
@@ -361,8 +362,8 @@
   height: 36px;
   box-sizing: border-box;
   padding: 0 12px;
-  border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   background: var(--color-bg-deep);
   color: var(--color-text);
   font-size: 13px;
@@ -372,6 +373,7 @@
 .model-picker-search:focus {
   outline: none;
   border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
 }
 
 .model-picker-list {
@@ -425,7 +427,7 @@
 .model-picker-item {
   width: 100%;
   border: 1px solid transparent;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: var(--color-bg-elevated);
   color: var(--color-text);
   padding: 8px 10px;
@@ -468,7 +470,7 @@
 .model-picker-cancel,
 .model-picker-confirm {
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-lg);
   font-size: 13px;
   padding: 8px 14px;
   cursor: pointer;
@@ -507,7 +509,7 @@
   gap: 12px;
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid var(--color-bg-surface);
+  border-top: 1px solid var(--color-border);
   flex-shrink: 0;
 }
 
@@ -537,7 +539,7 @@
   height: 36px;
   padding: 0 16px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   font-size: 14px;
   cursor: pointer;
 }

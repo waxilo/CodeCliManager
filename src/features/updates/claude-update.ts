@@ -71,6 +71,8 @@ export async function checkClaudeCodeUpdate(force = false): Promise<void> {
     if (!force) return appState.claudeUpdateCheckPromise;
     // 更新完成后的强制复查：等当前任务结束后再查一次，确保小红点状态刷新
     await appState.claudeUpdateCheckPromise;
+    // 等待期间可能已有并发 force 发起了新检查，此时直接复用，避免重复启动
+    if (appState.claudeUpdateCheckPromise) return appState.claudeUpdateCheckPromise;
   }
   // 安装/更新进行中不启动新检查（调用方应在结束后再 force 复查）
   if (appState.claudeUpdateCheckStatus === 'updating' || appState.claudeUpdateCheckStatus === 'installing') {

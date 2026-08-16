@@ -1,5 +1,6 @@
 import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
+import { formatDuration } from '../../utils';
 import type {
   Message,
   SessionErrorPayload,
@@ -14,8 +15,15 @@ import { getThinkingScroller } from './thinking-scroller';
 import { updateSendButtonState, setSendButtonLoading } from './session-context';
 import { updateOrAddConversation, findConversationById, assistantTextCovers } from '../conversations';
 import { updateConversationListSpinner, refreshActiveTabContent } from '../sidebar';
-import { renderThinkingDetails, extractToolUseId, processToolMessages } from './render-messages';
-import { clearPendingRequestState, hideSendingState } from './retry';
+import {
+  renderThinkingDetails,
+  renderToolMessageHtml,
+  TOOL_CONFIG_MAP,
+  getDefaultToolConfig,
+  extractToolUseId,
+  processToolMessages,
+} from './render-messages';
+import { clearPendingRequestState, hideSendingState } from './session-context';
 import {
   refreshRunStatusStrip,
   markSessionRunStart,
@@ -24,6 +32,7 @@ import {
 } from './run-status';
 import { ScrollController, scheduleUiRefresh } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
+import { formatTokenCount } from './context-indicator';
 
 const TOOL_CHUNK_KINDS = new Set([
   'tool_use_start',
@@ -160,7 +169,7 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
   if (kind === 'tool_use_start') {
     const id = String(data?.id || '');
     const name = String(data?.name || 'Task');
-    if (!id || name !== 'Task') return false;
+    if (!id) return false;
     const tools = getActiveToolsMap(sid);
     const existing = tools.get(id);
     tools.set(id, {
@@ -185,7 +194,7 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
   if (kind === 'tool_use_end') {
     const id = String(data?.id || '');
     const name = String(data?.name || 'Task');
-    if (!id || name !== 'Task') return false;
+    if (!id) return false;
     const tools = getActiveToolsMap(sid);
     const input =
       data?.input && typeof data.input === 'object'
@@ -568,7 +577,15 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       if (isActive) scheduleStreamingRefresh(sid);
       break;
     case 'thinking_end':
-      state.thinkingDone = true;
+      {
+        state.thinkingDone = true;
+        // 后端下发 {"duration_ms": N}：记录到当前 thinking 块，标题展示思考时长
+        const durationMs = parseChunkJson(content)?.duration_ms;
+        const block = state.blocks[state.currentBlockIdx];
+        if (block && block.type === 'thinking' && typeof durationMs === 'number' && durationMs > 0) {
+          block.durationMs = durationMs;
+        }
+      }
       if (isActive) refreshStreamingUI(sid);
       break;
     case 'text_start':
@@ -782,11 +799,18 @@ export function refreshStreamingUI(sessionId: string) {
     const last = merged[merged.length - 1];
     if (last && last.type === block.type && block.type === 'thinking') {
       last.content = last.content + '\n' + block.content;
+      // 合并时保留后到块的时长（thinking_end 只落在最后一个块上）
+      if (block.durationMs != null) last.durationMs = block.durationMs;
     } else if (last && last.type === block.type && block.type === 'text') {
       last.content = last.content + '\n\n' + block.content;
       last.finalized = Boolean(last.finalized && block.finalized);
     } else {
-      merged.push({ type: block.type, content: block.content, finalized: block.finalized });
+      merged.push({
+        type: block.type,
+        content: block.content,
+        finalized: block.finalized,
+        durationMs: block.durationMs,
+      });
     }
   }
 
@@ -815,6 +839,11 @@ export function refreshStreamingUI(sessionId: string) {
         const summary = existingEl.querySelector('.thinking-summary .thinking-label-text');
         if (pre) pre.textContent = block.content;
         if (summary) summary.textContent = label;
+        // 思考结束时写入时长（thinking_end 下发 duration_ms）
+        const durationEl = existingEl.querySelector('.thinking-summary .thinking-duration');
+        if (!isStreaming && durationEl && block.durationMs) {
+          durationEl.textContent = formatDuration(block.durationMs);
+        }
         // 更新流式状态类
         if (isStreaming) {
           existingEl.querySelector('.thinking-block')?.classList.add('streaming-active');
@@ -830,7 +859,7 @@ export function refreshStreamingUI(sessionId: string) {
         const el = document.createElement('div');
         el.id = blockId;
         el.className = 'message assistant thinking-msg streaming';
-        el.innerHTML = `<div class="message-content">${renderThinkingDetails(block.content, label, expanded, undefined, isStreaming)}</div>`;
+        el.innerHTML = `<div class="message-content">${renderThinkingDetails(block.content, label, expanded, undefined, isStreaming, block.durationMs)}</div>`;
         messageList.appendChild(el);
         const detailsEl = el.querySelector('.thinking-block');
         if (detailsEl) {
@@ -890,6 +919,9 @@ export function refreshStreamingUI(sessionId: string) {
 
   // 思考中/输入中状态同步到输入框下方状态条
   refreshRunStatusStrip();
+
+  // 主消息流实时工具卡：进行中的工具（Bash/Read/Edit…）在列表尾部展示
+  syncActiveToolCardsInMessageList(sessionId);
 }
 
 /** 初始化 Answer 区域 ScrollController（#message-list） */
@@ -923,5 +955,101 @@ export function restoreScrollState(snap: { autoScroll: boolean; scrollTop: numbe
   } else {
     appState.answerScroller.restorePosition(snap.scrollTop, false);
   }
+}
+
+/**
+ * 主消息流中的实时工具卡（参考 claudecodeui / Codex 的实时工具展示）。
+ * 进行中的工具（Bash/Read/Edit/Write/Grep/Glob…）在消息列表尾部实时展示；
+ * 子代理（Task/Agent）渲染为带实时进度的容器卡（description + 进度汇总），
+ * 完成后由历史渲染接管（reconcile 删除 active 项）。
+ * 按 `data-live-tool-id` 幂等定位，状态/输入变化时只更新对应卡片。
+ */
+export function syncActiveToolCardsInMessageList(sessionId: string): void {
+  if (sessionId !== appState.activeConversationId) return;
+  const messageList = document.querySelector<HTMLDivElement>('#message-list');
+  if (!messageList) return;
+
+  const tools = appState.activeToolsBySession.get(sessionId);
+  const liveTools = tools ? [...tools.entries()].filter(([, t]) => t.status === 'running') : [];
+
+  // 现有实时工具卡：按 id 索引
+  const container = messageList.querySelector<HTMLDivElement>('#live-tool-cards');
+  if (liveTools.length === 0) {
+    container?.remove();
+    return;
+  }
+  if (!container) {
+    const div = document.createElement('div');
+    div.id = 'live-tool-cards';
+    messageList.appendChild(div);
+  }
+  const liveContainer = messageList.querySelector<HTMLDivElement>('#live-tool-cards')!;
+
+  // 移除已完成/已消失的卡
+  liveContainer.querySelectorAll<HTMLElement>('[data-live-tool-id]').forEach((el) => {
+    const id = el.dataset.liveToolId;
+    if (!id || !liveTools.some(([tid]) => tid === id)) el.remove();
+  });
+
+  // 更新/新增进行中的工具卡（dataset 遍历而非 CSS.escape 选择器：jsdom 缺 CSS.escape）
+  for (const [id, tool] of liveTools) {
+    let existing: HTMLElement | null = null;
+    liveContainer.querySelectorAll<HTMLElement>('[data-live-tool-id]').forEach((el) => {
+      if (el.dataset.liveToolId === id) existing = el;
+    });
+    const html = renderToolMessageHtml({
+      id: `live-tool-${id}`,
+      role: 'tool',
+      content: '',
+      timestamp: Math.floor(tool.startedAt / 1000),
+      toolData: {
+        toolName: tool.toolName,
+        toolInput: tool.input || {},
+        toolResult: undefined,
+        isError: false,
+        toolUseId: id,
+        displayMode: TOOL_CONFIG_MAP[tool.toolName]?.displayMode || 'one-line',
+        colorScheme: {
+          border: (TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig()).borderColor,
+          icon: (TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig()).iconColor,
+          primary: (TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig()).borderColor,
+        },
+        // 子代理实时进度（description / progress 汇总）
+        ...(tool.description ? { taskNotification: undefined } : {}),
+      },
+    });
+    const wrapper = existing
+      ? existing
+      : (() => {
+          const div = document.createElement('div');
+          div.className = 'message tool live-tool-card';
+          div.dataset.liveToolId = id;
+          liveContainer.appendChild(div);
+          return div;
+        })();
+    // 子代理卡：注入实时进度行（描述 + tokens/工具次数/耗时）
+    const progressLine =
+      tool.toolName === 'Task' || tool.toolName === 'Agent'
+        ? renderLiveSubagentProgressLine(tool)
+        : '';
+    const newHtml = `<div class="message-content">${html}${progressLine}</div>`;
+    if (wrapper.innerHTML !== newHtml) wrapper.innerHTML = newHtml;
+    wrapper.classList.add('streaming');
+  }
+}
+
+/** 运行中子代理的实时进度行（描述 + 进度汇总），参考 claudecodeui 子代理容器 */
+function renderLiveSubagentProgressLine(tool: ActiveToolState): string {
+  const parts: string[] = [];
+  if (tool.progress?.totalTokens) parts.push(`${formatTokenCount(tool.progress.totalTokens)} tokens`);
+  if (tool.progress?.toolUses) parts.push(`${tool.progress.toolUses} 次工具`);
+  if (tool.progress?.durationMs) parts.push(formatDuration(tool.progress.durationMs));
+  const meta = parts.length ? `<span class="tool-meta">${parts.join(' · ')}</span>` : '';
+  return `
+    <div class="live-subagent-progress">
+      ${meta}
+      <span class="tool-status tool-status-running">子代理执行中</span>
+    </div>
+  `;
 }
 

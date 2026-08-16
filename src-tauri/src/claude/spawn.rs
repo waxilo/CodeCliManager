@@ -221,6 +221,8 @@ pub(crate) fn spawn_claude_stream(
     let mut turn_active = false;
     let mut turns_completed: u32 = 0;
     let mut graceful_since: Option<Instant> = None;
+    // 当前 thinking 块的开始时刻：thinking_end 时据此计算思考时长并下发前端
+    let mut thinking_started_at: Option<Instant> = None;
 
     while !stdout_finished {
         match line_rx.recv_timeout(Duration::from_secs(1)) {
@@ -387,6 +389,7 @@ pub(crate) fn spawn_claude_stream(
                     &mut protocol_guard,
                     &mut stream_error,
                     &mut last_assistant_text,
+                    &mut thinking_started_at,
                 );
                 // 首次捕获到 session_id 时，用 session_id 重新注册进程（方便按 session_id abort）
                 if let Some(ref sid) = captured_session_id {
@@ -674,6 +677,7 @@ pub(crate) fn spawn_claude_stream(
             &mut protocol_guard,
             &mut stream_error,
             &mut last_assistant_text,
+            &mut thinking_started_at,
         );
     }
 

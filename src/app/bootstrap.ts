@@ -33,7 +33,7 @@ import {
   setAbortingUi,
   setSendButtonLoading,
 } from '../features/chat/session-context';
-import { hideSendingState } from '../features/chat/retry';
+import { hideSendingState } from '../features/chat/session-context';
 import { updateConversationListSpinner, refreshConversationListDom } from '../features/sidebar';
 import { refreshStreamingUI } from '../features/chat/streaming';
 import { syncSubagentProgressUI } from '../features/chat/subagent-progress';
@@ -69,7 +69,7 @@ import {
 } from '../features/kiro';
 import { newChat } from '../features/chat/send';
 import { refreshSettingsModal } from '../features/api-config';
-import { refreshModelInfo } from '../features/chat/render-chat';
+import { refreshModelInfo } from '../features/chat/model-picker';
 import { checkClaudeCodeUpdate, initAppUpdate } from '../features/updates';
 import { setupEventListeners } from '../events/session-events';
 

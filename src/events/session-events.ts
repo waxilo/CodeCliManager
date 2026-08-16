@@ -6,7 +6,7 @@ import { handleMessageChunk, handleSessionError, clearStreamingState, commitStre
 import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages, findConversationById, assistantTextCovers } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
 import { setAbortingUi, setSendButtonLoading, isSendButtonLoading } from '../features/chat/session-context';
-import { hideSendingState } from '../features/chat/retry';
+import { hideSendingState } from '../features/chat/session-context';
 import { updateConversationListSpinner, refreshActiveTabContent } from '../features/sidebar';
 import { updateContextIndicator } from '../features/chat/context-indicator';
 import { updateCostIndicator } from '../features/chat/cost-indicator';

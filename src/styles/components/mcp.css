@@ -91,8 +91,8 @@
   justify-content: space-between;
   gap: 16px;
   padding: 14px 16px;
-  border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
   background: var(--color-bg-elevated);
   transition: border-color 0.15s ease;
 }
@@ -178,8 +178,8 @@
 .mcp-server-btn {
   height: 30px;
   padding: 0 12px;
-  border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   background: var(--color-bg-surface);
   color: var(--color-text-secondary);
   font-size: 12px;
@@ -216,10 +216,10 @@
   max-height: calc(100vh - 48px);
   overflow-y: auto;
   background: var(--color-bg-base);
-  border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
   padding: 20px;
-  box-shadow: 0 16px 48px var(--color-shadow);
+  box-shadow: var(--shadow-lg);
 }
 
 .mcp-dialog-header {
@@ -247,8 +247,8 @@
 .mcp-dialog-form textarea {
   box-sizing: border-box;
   padding: 8px 12px;
-  border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 6px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
   background: var(--color-bg-elevated);
   color: var(--color-text);
   font-size: 13px;
@@ -268,10 +268,11 @@
 .mcp-dialog-form textarea:focus {
   outline: none;
   border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
 }
 
 .mcp-env-details {
-  border-top: 1px solid var(--color-bg-surface-hover);
+  border-top: 1px solid var(--color-border);
   padding-top: 12px;
 }
 
@@ -300,7 +301,7 @@
   height: 36px;
   padding: 0 16px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   font-size: 14px;
   cursor: pointer;
 }

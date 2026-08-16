@@ -93,14 +93,24 @@ describe('getSessionRunStatus', () => {
     expect(getSessionRunStatus(SID)?.status).toBe('子代理执行中 · 完成 1/2');
   });
 
-  it('非 Task 工具运行时显示正在执行工具', () => {
+  it('非 Task 工具运行时显示动作描述（Bash 命令等）', () => {
     appState.runningSessions.add(SID);
     appState.activeToolsBySession.set(SID, new Map([
       ['t1', {
-        toolUseId: 't1', toolName: 'Bash', input: {}, status: 'running', startedAt: Date.now(),
+        toolUseId: 't1', toolName: 'Bash', input: { command: 'npm test' }, status: 'running', startedAt: Date.now(),
       }],
     ]));
-    expect(getSessionRunStatus(SID)?.status).toBe('正在执行工具 Bash');
+    expect(getSessionRunStatus(SID)?.status).toBe('正在执行: npm test');
+  });
+
+  it('工具无输入时回退到动作描述（不显示工具名原文）', () => {
+    appState.runningSessions.add(SID);
+    appState.activeToolsBySession.set(SID, new Map([
+      ['t1', {
+        toolUseId: 't1', toolName: 'Grep', input: {}, status: 'running', startedAt: Date.now(),
+      }],
+    ]));
+    expect(getSessionRunStatus(SID)?.status).toBe('正在搜索代码');
   });
 
   it('仅剩终态工具不阻塞输入中', () => {

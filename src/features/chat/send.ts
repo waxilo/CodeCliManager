@@ -13,8 +13,8 @@ import { groupConversationsByWorkspace } from '../sidebar';
 import { findConversationById } from '../conversations/normalize';
 import { clearStreamingState, commitStreamingAssistantToConversation } from './streaming';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
-import { refreshModelInfo } from './render-chat';
-import { hideSendingState } from './retry';
+import { refreshModelInfo } from './model-picker';
+import { hideSendingState } from './session-context';
 import { markSessionRunStart, setTransientStatus } from './run-status';
 import { isImageFile, stripFileRefTags, unwrapFileRef } from '../files/index';
 import { dismissMcpViewState } from '../mcp/mount';
@@ -304,7 +304,7 @@ export async function executePreparedCommand(
   );
 
   try {
-    const args: Record<string, string> = {
+    const args: api.ExecutePromptArgs = {
       prompt: command.prompt,
       messageContent: command.messageContent,
     };

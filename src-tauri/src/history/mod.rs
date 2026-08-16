@@ -984,23 +984,6 @@ pub(crate) fn expand_content_parts(
     }
 }
 
-/// 消息是否为可见的 Task tool_use（供 turn-complete 落盘判定）
-pub(crate) fn message_is_task_tool_use(message: &Message) -> bool {
-    if message.role != "tool_use" {
-        return false;
-    }
-    serde_json::from_str::<serde_json::Value>(&message.content)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("name")
-                .or_else(|| value.get("tool_name"))
-                .and_then(|name| name.as_str())
-                .map(|name| name == "Task")
-        })
-        .unwrap_or(false)
-}
-
 pub(crate) fn parse_timestamp(iso_string: &str) -> Option<i64> {
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso_string) {
         Some(dt.timestamp())
@@ -1322,7 +1305,7 @@ mod tests {
     use super::{
         decode_project_dir_from_jsonl_path, effective_message_uuids, expand_content_parts,
         is_human_user_message_line, is_internal_recovery_message, merge_conversations,
-        message_is_task_tool_use, parse_claude_session, sort_conversations, Conversation,
+        parse_claude_session, sort_conversations, Conversation,
         INTERNAL_RECOVERY_PROMPT,
     };
     use std::collections::HashSet;
@@ -1420,7 +1403,7 @@ mod tests {
         assert_eq!(tool_result.len(), 1);
         assert_eq!(tool_result[0].role, "tool_result");
         assert!(tool_result[0].content.contains("done summary"));
-        assert!(message_is_task_tool_use(&tool_use.iter().find(|m| m.role == "tool_use").unwrap()));
+        assert_eq!(tool_use.iter().filter(|m| m.role == "tool_use").count(), 1);
     }
 
     #[test]

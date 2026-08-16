@@ -330,9 +330,6 @@ export function renderKiroCard(status: KiroStatusData | null) {
     }
   }
 
-  if (appState.isKiroViewActive) {
-    // 状态渲染只更新卡片；模型状态由 mount/启动流程显式刷新，避免每次 status 事件再发 IPC。
-  }
 }
 
 export async function refreshKiroStatus(): Promise<void> {

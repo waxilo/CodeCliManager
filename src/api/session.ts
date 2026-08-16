@@ -1,7 +1,16 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { ExecutePromptResult, PermissionMode } from '../types';
 
-export function executePrompt(args: Record<string, unknown>): Promise<ExecutePromptResult> {
+/** execute_prompt 参数：结构化类型，字段拼错在编译期暴露 */
+export interface ExecutePromptArgs extends Record<string, unknown> {
+  prompt: string;
+  messageContent: string;
+  conversationId?: string;
+  model?: string;
+  projectDir?: string;
+}
+
+export function executePrompt(args: ExecutePromptArgs): Promise<ExecutePromptResult> {
   return invoke<ExecutePromptResult>('execute_prompt', args);
 }
 

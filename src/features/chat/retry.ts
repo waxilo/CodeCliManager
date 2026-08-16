@@ -1,7 +1,7 @@
 import { appState } from '../../state';
 import * as api from '../../api';
 import { showCopyToastMsg, scheduleUiRefresh } from '../../ui';
-import { setSendButtonLoading, setAbortingUi, updateSendButtonState } from './session-context';
+import { setSendButtonLoading, hideSendingState } from './session-context';
 import { clearStreamingState } from './streaming';
 import { abortSession, sendMessage } from './send';
 import { markSessionRunStart } from './run-status';
@@ -101,24 +101,6 @@ export function handleSendButtonClick() {
   } else {
     void sendMessage();
   }
-}
-
-/** 流式「待回复」占位已移除：状态改由输入框下方状态条承载。保留空实现兼容调用方。 */
-export function removePendingAssistantIndicator() {
-  document.querySelector('#pending-assistant')?.remove();
-}
-
-/** 流式「待回复」占位已移除：状态改由输入框下方状态条承载。保留空实现兼容调用方。 */
-export function clearPendingRequestState() {
-  removePendingAssistantIndicator();
-}
-
-export function hideSendingState() {
-  clearPendingRequestState();
-  setAbortingUi(false);
-  // 直接重置按钮为非加载状态（此函数仅在当前查看的会话结束时调用）
-  setSendButtonLoading(false);
-  updateSendButtonState();
 }
 
 /** 消息列表渲染后的统一后处理：代码复制按钮、思考块折叠、消息复制控件 */

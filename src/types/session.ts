@@ -122,6 +122,8 @@ export interface StreamBlock {
   content: string;
   /** text 块结束后才执行完整 Markdown 渲染 */
   finalized?: boolean;
+  /** 思考块时长（ms）：后端 thinking_end 下发，展示在思考块标题 */
+  durationMs?: number;
 }
 
 export interface StreamingState {

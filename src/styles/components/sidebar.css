@@ -4,9 +4,9 @@
   z-index: 2;
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 8px;
   background: var(--sidebar-header-bg);
-  padding: 10px 10px 7px;
+  padding: 8px 8px 8px;
 }
 
 /* New Chat：保留主行动层级，但降低大色块的视觉重量 */
@@ -16,7 +16,7 @@
   padding: 0 12px;
   background: var(--color-accent);
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   color: var(--color-on-accent);
   font-size: 13px;
   font-weight: 550;
@@ -59,11 +59,11 @@
   position: fixed;
   min-width: 200px;
   max-width: 280px;
-  padding: 6px;
+  padding: 8px;
   border: 1px solid var(--color-bg-surface-hover);
-  border-radius: 10px;
+  border-radius: var(--radius-xl);
   background: var(--color-bg-elevated);
-  box-shadow: 0 12px 32px var(--color-shadow-strong);
+  box-shadow: var(--shadow-lg);
   z-index: 500;
   display: flex;
   flex-direction: column;
@@ -72,7 +72,7 @@
 
 /* 分组标题 */
 .new-chat-dropdown-label {
-  padding: 6px 10px 4px;
+  padding: 8px 12px 4px;
   font-size: 11px;
   font-weight: 600;
   color: var(--color-text-muted);
@@ -87,9 +87,9 @@
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 9px 12px;
+  padding: var(--space-2) var(--space-3);
   border: none;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-accent);
   font-size: 13px;
@@ -111,7 +111,7 @@
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--color-accent-ring, color-mix(in srgb, var(--color-accent) 12%, transparent));
   color: var(--color-accent);
 }
@@ -129,9 +129,9 @@
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   border: none;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text);
   font-size: 13px;
@@ -142,7 +142,7 @@
 }
 
 .new-chat-dropdown-item:hover {
-  background: var(--color-bg-surface);
+  background: var(--sidebar-item-hover);
 }
 
 .new-chat-dropdown-item-icon {
@@ -152,7 +152,7 @@
   justify-content: center;
   width: 32px;
   height: 32px;
-  border-radius: 7px;
+  border-radius: var(--radius-md);
   background: var(--color-bg-surface);
   color: var(--color-text-muted);
 }
@@ -179,7 +179,7 @@
 }
 
 .new-chat-dropdown-empty {
-  padding: 16px 12px;
+  padding: var(--space-4) var(--space-3);
   text-align: center;
   color: var(--color-text-muted);
   font-size: 12px;
@@ -198,7 +198,7 @@
   padding: 0;
   background: transparent;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
   color: var(--color-text-muted);
   font-size: 15px;
   line-height: 1;
@@ -224,7 +224,7 @@
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 3px 7px 12px;
+  padding: 4px 8px 12px;
   min-height: 0;
   min-width: 0;
   scrollbar-width: none;
@@ -241,7 +241,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 6px;
-  padding: 7px 7px 5px;
+  padding: 8px 8px 4px;
   font-size: 10.5px;
   font-weight: 550;
   letter-spacing: 0.07em;
@@ -258,9 +258,9 @@
 
 /* ── Workspace 卡片（一级）───────────────────────────────────────── */
 .workspace-card {
-  margin-bottom: 2px;
+  margin-bottom: var(--space-1);
   border: 1px solid var(--sidebar-card-border);
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
   background: var(--sidebar-card-bg);
   box-shadow: var(--sidebar-card-shadow);
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
@@ -273,9 +273,9 @@
   box-shadow: var(--sidebar-card-shadow-hover);
 }
 
-/* 卡片内含当前活跃会话时，用 accent 描边标记 */
+/* 卡片内含当前活跃会话时，用左侧高亮条标记（Codex/DSH 风格） */
 .workspace-card.has-active {
-  border-color: color-mix(in srgb, var(--color-accent) 16%, transparent);
+  box-shadow: var(--sidebar-item-active-shadow);
 }
 
 /* ── 卡片标题（项目行）──────────────────────────────────────────── */
@@ -283,7 +283,7 @@
   display: flex;
   align-items: center;
   gap: 7px;
-  padding: 7px 7px 7px 5px;
+  padding: 8px 8px 8px 4px;
   cursor: pointer;
   user-select: none;
   background: transparent;
@@ -325,7 +325,7 @@
   flex-shrink: 0;
   width: 22px;
   height: 22px;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -480,7 +480,7 @@
   height: 22px;
   padding: 0;
   border: none;
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
@@ -513,7 +513,7 @@
 }
 
 .workspace-conversations {
-  padding: 1px 5px 5px 25px;
+  padding: 2px 8px 8px 25px;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -521,7 +521,7 @@
 
 /* 活跃会话 tab：近一天会话平铺列表（无项目卡片缩进） */
 .active-conversations {
-  padding: 1px 5px 5px;
+  padding: 2px 8px 8px;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -532,7 +532,7 @@
   flex-shrink: 0;
   display: flex;
   gap: 2px;
-  padding: 0 7px 8px;
+  padding: 0 8px 8px;
   border-bottom: 1px solid var(--color-bg-surface-hover);
 }
 
@@ -542,7 +542,7 @@
   height: 30px;
   padding: 0 8px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: transparent;
   color: var(--color-text-muted);
   font-size: 12px;
@@ -590,7 +590,7 @@
 .conversation-list .subagent-panel-header {
   display: flex;
   align-items: center;
-  padding: 2px 7px 8px;
+  padding: 2px 8px 8px;
 }
 
 .conversation-list .subagent-panel-title {
@@ -631,8 +631,8 @@
 
 .conversation-list .subagent-report {
   margin-top: 2px;
-  padding: 8px 10px;
-  border-radius: 8px;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
   background: var(--color-bg-base);
   border: 1px solid var(--color-composer-border);
   font-size: 12px;
@@ -667,7 +667,7 @@
   font-size: 11px;
   padding: 6px 8px;
   background: var(--color-bg-elevated, var(--color-bg-base));
-  border-radius: 6px;
+  border-radius: var(--radius-md);
   overflow-x: auto;
 }
 

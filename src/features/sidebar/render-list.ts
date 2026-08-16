@@ -50,6 +50,8 @@ export function renderConversationItemHtml(c: Conversation): string {
   const isRunning = appState.runningSessions.has(c.id);
   const isNew = appState.newConversationIds.has(c.id);
   const sourcePath = escapeHtml(c.source_path || '');
+  // c.id 也统一转义：会话 ID 虽来自后端，但需与其他属性转义一致，防止未来 ID 含引号时破坏 HTML
+  const idAttr = escapeHtml(c.id);
 
   const classNames = [
     'conversation-item',
@@ -62,18 +64,18 @@ export function renderConversationItemHtml(c: Conversation): string {
   const time = formatCompactTime(c.updated_at || c.created_at);
 
   return `
-    <div class="${classNames}" data-id="${c.id}" data-source-path="${sourcePath}" title="${escapeHtml(c.title)}">
+    <div class="${classNames}" data-id="${idAttr}" data-source-path="${sourcePath}" title="${escapeHtml(c.title)}">
       <span class="conversation-rail" aria-hidden="true"></span>
       ${isEditing ? `
         <div class="conversation-edit-row">
           <input type="text"
                  class="edit-input"
-                 id="edit-input-${c.id}"
+                 id="edit-input-${idAttr}"
                  data-source-path="${sourcePath}"
                  value="${escapeHtml(c.title)}"
           />
           <div class="edit-action-buttons">
-            <button type="button" class="edit-action-btn save" data-action="save-edit" data-id="${c.id}" data-source-path="${sourcePath}" title="保存">✓</button>
+            <button type="button" class="edit-action-btn save" data-action="save-edit" data-id="${idAttr}" data-source-path="${sourcePath}" title="保存">✓</button>
             <button type="button" class="edit-action-btn cancel" data-action="cancel-edit" title="取消">✕</button>
           </div>
         </div>
@@ -82,7 +84,7 @@ export function renderConversationItemHtml(c: Conversation): string {
           ${CONVERSATION_STATE_ICON}
           <span class="conversation-title">${escapeHtml(c.title)}</span>
           ${time ? `<span class="conversation-time">${escapeHtml(time)}</span>` : ''}
-          <button type="button" class="conv-more-btn" data-action="more" data-id="${c.id}" data-source-path="${sourcePath}" title="更多操作" aria-label="更多操作">
+          <button type="button" class="conv-more-btn" data-action="more" data-id="${idAttr}" data-source-path="${sourcePath}" title="更多操作" aria-label="更多操作">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
           </button>
         </span>

@@ -1,76 +1,87 @@
+/* ============================================================
+   设计令牌（Design Tokens）— Codex / DSH 风格深色系
+   - 深底 + 冷灰蓝 accent，中性低饱和，扁平化
+   - 语义命名保持与旧版一致（--color-* / --sidebar-*），
+     组件 CSS 无需大面积改名，仅换值即完成视觉切换
+   ============================================================ */
+
 :root,
 [data-theme='dark'] {
   color-scheme: dark;
-  --color-bg-base: #1e1e2e;
-  --color-bg-elevated: #181825;
-  --color-bg-deep: #11111b;
-  --color-bg-surface: #313244;
-  --color-bg-surface-hover: #45475a;
-  --color-bg-surface-active: #585b70;
-  --color-bg-thinking: #262637;
-  --color-bg-active-profile: #2a3147;
-  --color-text: #cdd6f4;
-  --color-text-primary: #cdd6f4;
-  --color-text-secondary: #a6adc8;
-  --color-text-muted: #6c7086;
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-bg-hover: #45475a;
-  --color-icon: #bac2de;
-  --color-accent: #89b4fa;
-  --color-accent-hover: #93c5fd;
-  --color-accent-soft: #b4befe;
-  --color-accent-ring: rgba(137, 180, 250, 0.25);
-  --color-on-accent: #1e1e2e;
-  --color-success: #a6e3a1;
-  --color-success-hover: #94d2a6;
-  --color-danger: #f38ba8;
-  --color-danger-hover: #f5a0b8;
-  --color-danger-bg: rgba(243, 139, 168, 0.16);
-  --color-danger-bg-hover: rgba(243, 139, 168, 0.28);
-  --color-danger-bg-soft: rgba(243, 139, 168, 0.18);
-  --color-error-bg: rgba(243, 139, 168, 0.12);
-  --color-error-border: rgba(243, 139, 168, 0.35);
-  --color-error-text: #f2cdcd;
-  --color-code: #f9e2af;
-  --color-markdown-muted: #4c566a;
-  --color-markdown-text: #2e3440;
-  --color-md-inline-bg: rgba(30, 30, 46, 0.12);
-  --color-md-subtle-bg: rgba(30, 30, 46, 0.08);
-  --color-md-border: rgba(30, 30, 46, 0.18);
-  --color-md-code-bg: rgba(30, 30, 46, 0.35);
-  --color-overlay: rgba(17, 17, 27, 0.72);
-  --color-shadow: rgba(0, 0, 0, 0.35);
-  --color-shadow-strong: rgba(0, 0, 0, 0.45);
-  --color-titlebar: #181825;
-  --color-titlebar-border: #313244;
-  --color-bubble-user-bg: rgba(110, 231, 183, 0.38);
-  --color-bubble-user-text: #111827;
-  --color-bubble-user-border: rgba(52, 211, 153, 0.45);
-  --color-bubble-user-avatar-bg: rgba(52, 211, 153, 0.36);
-  --color-bubble-user-code-bg: rgba(0, 0, 0, 0.1);
-  --color-bubble-assistant-bg: #3a3a52;
-  --color-bubble-assistant-border: rgba(255, 255, 255, 0.06);
-  --color-composer-bg: #282836;
-  --color-composer-border: rgba(255, 255, 255, 0.08);
-  --color-composer-footer: #1f1f2b;
-  --color-send-btn: rgba(137, 180, 250, 0.22);
-  --color-send-btn-hover: rgba(137, 180, 250, 0.34);
-  --color-send-btn-disabled: #313244;
-  --color-send-icon: #cdd6f4;
 
-  /* ── 代码块面板（highlight.js 恒为 github-dark，两主题共用）── */
+  /* ── 基础色板（GitHub Dark / VSCode 系）────────────────── */
+  --color-bg-base: #0d1117;          /* 页面最深底 */
+  --color-bg-elevated: #161b22;      /* 卡片/面板 */
+  --color-bg-deep: #010409;          /* 最深（标题栏/浮层底） */
+  --color-bg-surface: #1c2128;       /* 输入框/代码块底 */
+  --color-bg-surface-hover: #21262d; /* hover */
+  --color-bg-surface-active: #2d333b;/* active */
+  --color-bg-thinking: #131820;      /* 思考块底 */
+  --color-bg-active-profile: #182030;
+  --color-text: #e6edf3;
+  --color-text-primary: #e6edf3;
+  --color-text-secondary: #aeb8c5;
+  --color-text-muted: #768390;
+  --color-border: rgba(240, 246, 252, 0.12);
+  --color-bg-hover: #21262d;
+  --color-icon: #9fb0c3;
+  --color-accent: #4493f8;
+  --color-accent-hover: #58a6ff;
+  --color-accent-soft: #79c0ff;
+  --color-accent-ring: rgba(68, 147, 248, 0.35);
+  --color-on-accent: #ffffff;
+  --color-success: #3fb950;
+  --color-success-hover: #46c25a;
+  --color-danger: #f85149;
+  --color-danger-hover: #ff6b63;
+  --color-danger-bg: rgba(248, 81, 73, 0.15);
+  --color-danger-bg-hover: rgba(248, 81, 73, 0.25);
+  --color-danger-bg-soft: rgba(248, 81, 73, 0.12);
+  --color-error-bg: rgba(248, 81, 73, 0.1);
+  --color-error-border: rgba(248, 81, 73, 0.4);
+  --color-error-text: #ffb3af;
+  --color-code: #f2cc60;
+  --color-markdown-muted: #6e7681;
+  --color-markdown-text: #e6edf3;
+  --color-md-inline-bg: rgba(110, 118, 129, 0.25);
+  --color-md-subtle-bg: rgba(110, 118, 129, 0.15);
+  --color-md-border: rgba(110, 118, 129, 0.3);
+  --color-md-code-bg: rgba(110, 118, 129, 0.2);
+  --color-overlay: rgba(1, 4, 9, 0.78);
+  --color-shadow: rgba(0, 0, 0, 0.35);
+  --color-shadow-strong: rgba(0, 0, 0, 0.5);
+  --color-titlebar: #161b22;
+  --color-titlebar-border: #21262d;
+
+  /* ── 用户气泡：冷灰蓝（Codex 风格，非绿色）──────────────── */
+  --color-bubble-user-bg: rgba(56, 116, 190, 0.28);
+  --color-bubble-user-text: #e6edf3;
+  --color-bubble-user-border: rgba(88, 166, 255, 0.4);
+  --color-bubble-user-avatar-bg: rgba(68, 147, 248, 0.28);
+  --color-bubble-user-code-bg: rgba(1, 4, 9, 0.35);
+  --color-bubble-assistant-bg: transparent;
+  --color-bubble-assistant-border: transparent;
+  --color-composer-bg: #161b22;
+  --color-composer-border: #21262d;
+  --color-composer-footer: #0d1117;
+  --color-send-btn: rgba(68, 147, 248, 0.22);
+  --color-send-btn-hover: rgba(68, 147, 248, 0.35);
+  --color-send-btn-disabled: #21262d;
+  --color-send-icon: #e6edf3;
+
+  /* ── 代码块面板 ─────────────────────────────────────────── */
   --color-code-bg: #0d1117;
   --color-code-header-bg: #161b22;
   --color-code-border: #30363d;
   --color-code-btn-bg: #21262d;
   --color-code-btn-hover-bg: #30363d;
-  --color-code-text: #c9d1d9;
+  --color-code-text: #e6edf3;
   --color-code-muted: #8b949e;
-  --color-code-json-bg: #1a1a2e;
-  --color-code-json-border: #2d2d4a;
-  --color-code-json-badge: #7b8cff;
+  --color-code-json-bg: #0d1117;
+  --color-code-json-border: #21262d;
+  --color-code-json-badge: #4493f8;
 
-  /* ── 状态徽章 / 运行指示（工具卡片、Kiro、更新红点）────────── */
+  /* ── 状态徽章 / 运行指示 ─────────────────────────────────── */
   --color-status-running: #58a6ff;
   --color-status-running-bg: rgba(88, 166, 255, 0.15);
   --color-status-success: #3fb950;
@@ -78,97 +89,132 @@
   --color-status-success-border: #238636;
   --color-status-error: #f85149;
   --color-status-error-bg: rgba(248, 81, 73, 0.15);
-  --color-tool-border: #8b949e;
+  --color-tool-border: #484f58;
 
-  /* ── 上下文用量警告 / 危险 ───────────────────────────────── */
-  --color-warning: #e0a300;
-  --color-warning-bg: #fff3cd;
-  --color-warning-text: #664d03;
+  /* ── 上下文用量警告 ─────────────────────────────────────── */
+  --color-warning: #d29922;
+  --color-warning-bg: rgba(210, 153, 34, 0.15);
+  --color-warning-text: #e3b341;
 
-  /* 用户气泡始终为淡绿底，链接/代码文字固定深色 */
-  --color-bubble-user-link: #166534;
-  --color-bubble-user-code-text: #1f2937;
+  /* 用户气泡内链接/代码固定深色（蓝气泡上用浅色文字） */
+  --color-bubble-user-link: #79c0ff;
+  --color-bubble-user-code-text: #e6edf3;
 
-  /* ── 侧边栏（AI 工作区导航）───────────────────────────────── */
-  --sidebar-bg: #181825;
-  --sidebar-header-bg: #181825;
+  /* ── 侧边栏（工作区导航）─────────────────────────────────── */
+  --sidebar-bg: #0d1117;
+  --sidebar-header-bg: #0d1117;
   --sidebar-card-bg: transparent;
-  --sidebar-card-bg-hover: rgba(255, 255, 255, 0.035);
+  --sidebar-card-bg-hover: rgba(255, 255, 255, 0.04);
   --sidebar-card-border: transparent;
-  --sidebar-card-border-hover: rgba(255, 255, 255, 0.05);
+  --sidebar-card-border-hover: rgba(255, 255, 255, 0.08);
   --sidebar-card-shadow: none;
   --sidebar-card-shadow-hover: none;
-  --sidebar-item-hover: #2c2c3e;
-  --sidebar-item-active-from: rgba(137, 180, 250, 0.22);
-  --sidebar-item-active-to: rgba(137, 180, 250, 0.06);
-  --sidebar-item-active-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-  --sidebar-badge-bg: rgba(255, 255, 255, 0.07);
-  --sidebar-badge-text: #a6adc8;
-  --sidebar-divider: rgba(255, 255, 255, 0.06);
-  --sidebar-avatar-lightness: 62%;
-  --sidebar-avatar-text-lightness: 16%;
+  --sidebar-item-hover: #1c2128;
+  --sidebar-item-active-from: rgba(68, 147, 248, 0.2);
+  --sidebar-item-active-to: rgba(68, 147, 248, 0.05);
+  --sidebar-item-active-shadow: inset 2px 0 0 var(--color-accent);
+  --sidebar-badge-bg: rgba(255, 255, 255, 0.08);
+  --sidebar-badge-text: #aeb8c5;
+  --sidebar-divider: rgba(255, 255, 255, 0.08);
+  --sidebar-avatar-lightness: 55%;
+  --sidebar-avatar-text-lightness: 100%;
+
+  /* ── 设计度量（统一圆角/阴影/字体）───────────────────────── */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-full: 999px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas,
+    'PingFang SC', monospace;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
 }
 
+/* ============================================================
+   浅色主题（Codex 浅色对应：冷灰白 + 同系蓝）
+   ============================================================ */
 [data-theme='light'] {
   color-scheme: light;
-  --color-bg-base: #f4f4f8;
+
+  --color-bg-base: #f6f8fa;
   --color-bg-elevated: #ffffff;
   --color-bg-deep: #ffffff;
-  --color-bg-surface: #e8eaef;
-  --color-bg-surface-hover: #dfe2e8;
-  --color-bg-surface-active: #d0d4dc;
-  --color-bg-thinking: #eef0f4;
-  --color-bg-active-profile: #e8eefc;
-  --color-text: #1e1e2e;
-  --color-text-primary: #1e1e2e;
-  --color-text-secondary: #45475a;
-  --color-text-muted: #6c7086;
-  --color-border: rgba(15, 23, 42, 0.1);
-  --color-bg-hover: #dfe2e8;
-  --color-icon: #334155;
-  --color-accent: #2563eb;
-  --color-accent-hover: #1d4ed8;
-  --color-accent-soft: #3b82f6;
-  --color-accent-ring: rgba(37, 99, 235, 0.2);
+  --color-bg-surface: #eef1f4;
+  --color-bg-surface-hover: #e3e8ee;
+  --color-bg-surface-active: #d5dce4;
+  --color-bg-thinking: #f0f3f6;
+  --color-bg-active-profile: #e5effb;
+  --color-text: #1f2328;
+  --color-text-primary: #1f2328;
+  --color-text-secondary: #42526b;
+  --color-text-muted: #6e7781;
+  --color-border: rgba(27, 31, 36, 0.15);
+  --color-bg-hover: #e3e8ee;
+  --color-icon: #42526b;
+  --color-accent: #0969da;
+  --color-accent-hover: #0550ae;
+  --color-accent-soft: #218bff;
+  --color-accent-ring: rgba(9, 105, 218, 0.25);
   --color-on-accent: #ffffff;
-  --color-success: #16a34a;
-  --color-success-hover: #15803d;
-  --color-danger: #dc2626;
-  --color-danger-hover: #b91c1c;
-  --color-danger-bg: rgba(220, 38, 38, 0.12);
-  --color-danger-bg-hover: rgba(220, 38, 38, 0.2);
-  --color-danger-bg-soft: rgba(220, 38, 38, 0.14);
-  --color-error-bg: rgba(220, 38, 38, 0.08);
-  --color-error-border: rgba(220, 38, 38, 0.24);
-  --color-error-text: #991b1b;
-  --color-code: #b45309;
-  --color-markdown-muted: #64748b;
-  --color-markdown-text: #334155;
-  --color-md-inline-bg: rgba(15, 23, 42, 0.06);
-  --color-md-subtle-bg: rgba(15, 23, 42, 0.04);
-  --color-md-border: rgba(15, 23, 42, 0.12);
-  --color-md-code-bg: rgba(15, 23, 42, 0.08);
-  --color-overlay: rgba(15, 23, 42, 0.45);
-  --color-shadow: rgba(15, 23, 42, 0.12);
-  --color-shadow-strong: rgba(15, 23, 42, 0.18);
-  --color-titlebar: #ececec;
-  --color-titlebar-border: #d4d4d4;
-  --color-bubble-user-bg: #bbf7d0;
-  --color-bubble-user-text: #111827;
-  --color-bubble-user-border: #86efac;
-  --color-bubble-user-avatar-bg: #86efac;
-  --color-bubble-user-code-bg: rgba(0, 0, 0, 0.07);
-  --color-bubble-assistant-bg: #ffffff;
-  --color-bubble-assistant-border: #e2e8f0;
-  --color-composer-bg: #ffffff;
-  --color-composer-border: rgba(15, 23, 42, 0.1);
-  --color-composer-footer: #f5f6f8;
-  --color-send-btn: #e8e0ff;
-  --color-send-btn-hover: #ddd6fe;
-  --color-send-btn-disabled: #e8eaef;
-  --color-send-icon: #6366f1;
+  --color-success: #1a7f37;
+  --color-success-hover: #116329;
+  --color-danger: #cf222e;
+  --color-danger-hover: #a40e26;
+  --color-danger-bg: rgba(207, 34, 46, 0.1);
+  --color-danger-bg-hover: rgba(207, 34, 46, 0.18);
+  --color-danger-bg-soft: rgba(207, 34, 46, 0.08);
+  --color-error-bg: rgba(207, 34, 46, 0.07);
+  --color-error-border: rgba(207, 34, 46, 0.3);
+  --color-error-text: #a40e26;
+  --color-code: #9a6700;
+  --color-markdown-muted: #59636e;
+  --color-markdown-text: #1f2328;
+  --color-md-inline-bg: rgba(84, 93, 103, 0.15);
+  --color-md-subtle-bg: rgba(84, 93, 103, 0.1);
+  --color-md-border: rgba(84, 93, 103, 0.22);
+  --color-md-code-bg: rgba(84, 93, 103, 0.12);
+  --color-overlay: rgba(27, 31, 36, 0.5);
+  --color-shadow: rgba(27, 31, 36, 0.12);
+  --color-shadow-strong: rgba(27, 31, 36, 0.2);
+  --color-titlebar: #f6f8fa;
+  --color-titlebar-border: #d5dce4;
 
-  /* ── 状态徽章 / 运行指示（浅色主题适配）───────────────────── */
+  --color-bubble-user-bg: #d6e7fb;
+  --color-bubble-user-text: #0b2a4a;
+  --color-bubble-user-border: #a8c8ef;
+  --color-bubble-user-avatar-bg: #b8d4f2;
+  --color-bubble-user-code-bg: rgba(255, 255, 255, 0.6);
+  --color-bubble-assistant-bg: transparent;
+  --color-bubble-assistant-border: transparent;
+  --color-composer-bg: #ffffff;
+  --color-composer-border: #d5dce4;
+  --color-composer-footer: #f6f8fa;
+  --color-send-btn: #d5e5fa;
+  --color-send-btn-hover: #bcd8f8;
+  --color-send-btn-disabled: #eef1f4;
+  --color-send-icon: #0969da;
+
+  --color-code-bg: #f6f8fa;
+  --color-code-header-bg: #eef1f4;
+  --color-code-border: #d5dce4;
+  --color-code-btn-bg: #ffffff;
+  --color-code-btn-hover-bg: #eef1f4;
+  --color-code-text: #1f2328;
+  --color-code-muted: #59636e;
+  --color-code-json-bg: #f6f8fa;
+  --color-code-json-border: #d5dce4;
+  --color-code-json-badge: #0969da;
+
   --color-status-running: #0969da;
   --color-status-running-bg: rgba(9, 105, 218, 0.12);
   --color-status-success: #1a7f37;
@@ -176,29 +222,30 @@
   --color-status-success-border: #2da44e;
   --color-status-error: #cf222e;
   --color-status-error-bg: rgba(207, 34, 46, 0.12);
-  --color-tool-border: #d1d9e0;
+  --color-tool-border: #c8d1da;
 
-  /* ── 上下文用量警告 / 危险（浅色主题适配）──────────────────── */
   --color-warning: #9a6700;
-  --color-warning-bg: #fff8c5;
-  --color-warning-text: #4d4000;
+  --color-warning-bg: rgba(154, 103, 0, 0.1);
+  --color-warning-text: #7a5901;
 
-  /* ── 侧边栏（AI 工作区导航）───────────────────────────────── */
-  --sidebar-bg: #f7f8fa;
-  --sidebar-header-bg: #f7f8fa;
+  --color-bubble-user-link: #0550ae;
+  --color-bubble-user-code-text: #0b2a4a;
+
+  --sidebar-bg: #f6f8fa;
+  --sidebar-header-bg: #f6f8fa;
   --sidebar-card-bg: transparent;
-  --sidebar-card-bg-hover: rgba(15, 23, 42, 0.025);
+  --sidebar-card-bg-hover: rgba(27, 31, 36, 0.03);
   --sidebar-card-border: transparent;
-  --sidebar-card-border-hover: rgba(15, 23, 42, 0.045);
+  --sidebar-card-border-hover: rgba(27, 31, 36, 0.08);
   --sidebar-card-shadow: none;
   --sidebar-card-shadow-hover: none;
-  --sidebar-item-hover: rgba(15, 23, 42, 0.045);
-  --sidebar-item-active-from: #e8f0ff;
-  --sidebar-item-active-to: #f7fbff;
-  --sidebar-item-active-shadow: 0 1px 3px rgba(37, 99, 235, 0.1);
-  --sidebar-badge-bg: #f1f5f9;
-  --sidebar-badge-text: #64748b;
-  --sidebar-divider: rgba(15, 23, 42, 0.07);
-  --sidebar-avatar-lightness: 52%;
+  --sidebar-item-hover: rgba(27, 31, 36, 0.05);
+  --sidebar-item-active-from: #d6e7fb;
+  --sidebar-item-active-to: #eef4fc;
+  --sidebar-item-active-shadow: inset 2px 0 0 var(--color-accent);
+  --sidebar-badge-bg: #eef1f4;
+  --sidebar-badge-text: #59636e;
+  --sidebar-divider: rgba(27, 31, 36, 0.08);
+  --sidebar-avatar-lightness: 45%;
   --sidebar-avatar-text-lightness: 100%;
 }

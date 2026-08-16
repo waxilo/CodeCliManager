@@ -9,7 +9,7 @@ import { updateSendButtonState, isSendButtonLoading } from './session-context';
 import { sendMessage } from './send';
 import { handleRetryClick, handleUndoClick } from './retry';
 import { refreshRunStatusStrip } from './run-status';
-import { initAnswerScroller, captureScrollState, restoreScrollState } from './streaming';
+import { initAnswerScroller, captureScrollState, restoreScrollState, syncActiveToolCardsInMessageList } from './streaming';
 import { canSendMessage } from './session-context';
 import { getActiveSuggestionIndex, getFileSuggestionsContainer } from '../files/index';
 import { getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
@@ -45,6 +45,11 @@ export function setupMessageListPostRender(container: HTMLElement): void {
 
   // 初始化 Answer 区域滚动控制器
   initAnswerScroller();
+
+  // 主消息流实时工具卡：挂载完成后同步进行中的工具（Bash/Read/Edit…）
+  if (appState.activeConversationId) {
+    syncActiveToolCardsInMessageList(appState.activeConversationId);
+  }
 
   // 「加载更早」按钮：扩大当前会话的消息窗口（按会话独立累计）
   container.querySelectorAll<HTMLElement>('.load-earlier-btn').forEach((btn) => {

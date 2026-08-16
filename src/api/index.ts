@@ -9,6 +9,7 @@ export {
 
 export {
   executePrompt,
+  type ExecutePromptArgs,
   removeQueuedPrompt,
   clearQueuedPrompts,
   retryMessage,
