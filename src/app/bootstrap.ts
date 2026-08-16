@@ -36,7 +36,7 @@ import {
 import { hideSendingState } from '../features/chat/session-context';
 import { updateConversationListSpinner, refreshConversationListDom } from '../features/sidebar';
 import { refreshStreamingUI } from '../features/chat/streaming';
-import { syncSubagentProgressUI } from '../features/chat/subagent-progress';
+import { syncRunningSubagentsUI } from '../features/chat/subagent-progress';
 import { syncTodoPanelUI } from '../features/chat/todo-panel';
 import {
   invalidateFileCache,
@@ -189,7 +189,7 @@ export async function init(): Promise<void> {
       updateConversationListSpinner();
     }
     if (flags.subagent) {
-      syncSubagentProgressUI();
+      syncRunningSubagentsUI();
     }
     if (flags.todo) {
       syncTodoPanelUI();

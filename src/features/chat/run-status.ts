@@ -63,8 +63,12 @@ export function getSessionRunStatus(sessionId: string): RunStatusInfo | null {
   }
 
   const tools = appState.activeToolsBySession.get(sessionId);
-  if (tools && tools.size > 0) {
-    const taskStates = [...tools.values()].filter((t) => t.toolName === 'Task');
+  // 工具/流式状态只在会话运行中展示：会话结束后即使有残留（事件丢失 / 中断工具），
+  // 也不应显示「执行中 / 思考中」，避免输入框状态停在旧状态
+  if (running && tools && tools.size > 0) {
+    const taskStates = [...tools.values()].filter(
+      (t) => t.toolName === 'Task' || t.toolName === 'Agent',
+    );
     const runningTasks = taskStates.filter((t) => t.status === 'running');
     if (runningTasks.length > 0) {
       const done = taskStates.filter((t) => t.status === 'done').length;
@@ -79,7 +83,7 @@ export function getSessionRunStatus(sessionId: string): RunStatusInfo | null {
   if (!running && startedAt == null) return null;
 
   const streaming = appState.streamingBySession.get(sessionId);
-  if (streaming) {
+  if (running && streaming) {
     const lastText = [...streaming.blocks].reverse().find((b) => b.type === 'text');
     if (lastText && !lastText.finalized) {
       return { status: '输入中…', elapsedMs, busy: true };
@@ -261,17 +265,15 @@ let tickerStarted = false;
 /**
  * 启动全局状态条定时器（空闲且隐藏时为空转，不做任何 DOM 写入）。
  * 幂等，应在应用启动（setupEventListeners）调用一次。
+ * 状态条可见即刷新：运行中计时持续走动（子代理执行期间无事件也能走），
+ * 空闲时内部自动隐藏 / 展示余量；elapsed 未变化时 renderStrip 按键去重。
  */
 export function startRunStatusTicker(): void {
   if (tickerStarted) return;
   tickerStarted = true;
   setInterval(() => {
     const row = document.querySelector<HTMLElement>('#composer-status-row');
-    const statusActive =
-      !row ||
-      (!row.hidden && !getSessionRunStatus(appState.activeConversationId || 'pending') && !transientStatus);
-    // 状态条活动（运行中）或正在计时时刷新：顺带更新成本栏耗时（运行中才有意义）
-    if (statusActive) {
+    if (row && !row.hidden) {
       refreshRunStatusStrip();
     }
     // 运行中：成本栏的「⏱耗时」需要持续刷新

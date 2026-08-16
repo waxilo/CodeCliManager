@@ -22,7 +22,7 @@ import { renderSettingsViewHtml, mountSettingsView } from '../../features/settin
 import { renderMcpViewHtml, mountMcpView } from '../../features/mcp';
 import { bindAppUpdatePopoverEvents, checkAppUpdate } from '../../features/updates/app-update';
 import { bindClaudeUpdatePopoverEvents } from '../../features/updates/claude-update';
-import { syncSubagentProgressUI } from '../../features/chat/subagent-progress';
+import { syncRunningSubagentsUI } from '../../features/chat/subagent-progress';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { refreshStreamingUI } from '../../features/chat/streaming';
@@ -303,7 +303,7 @@ export function exitManagementView(): boolean {
   // 跳过整列表 innerHTML 重建（运行中会话每次退出都重建，是 Win 卡顿主因）。
   const contentChanged = getCurrentCommittedChatRenderKey() !== committedChatKeyAtStash;
 
-  syncSubagentProgressUI();
+  syncRunningSubagentsUI();
   remountActiveInteractionPanel();
   shellApi.syncTitlebarActions();
   startMainBalanceBarAutoRefresh();

@@ -10,7 +10,7 @@ import { hideSendingState } from '../features/chat/session-context';
 import { updateConversationListSpinner, refreshActiveTabContent } from '../features/sidebar';
 import { updateContextIndicator } from '../features/chat/context-indicator';
 import { updateCostIndicator } from '../features/chat/cost-indicator';
-import { syncSubagentProgressUI } from '../features/chat/subagent-progress';
+import { syncRunningSubagentsUI } from '../features/chat/subagent-progress';
 import { syncTodoPanelUI, extractLatestTodos } from '../features/chat/todo-panel';
 import { abortSession } from '../features/chat/send';
 import { getStreamingAssistantText } from '../features/chat/streaming';
@@ -133,7 +133,7 @@ export async function setupEventListeners() {
     seedUsageAndTodos(payload);
     if (isViewingThis) {
       syncTodoPanelUI();
-      syncSubagentProgressUI();
+      syncRunningSubagentsUI();
       updateCostIndicator();
       hideSendingState();
       // 输出结束后重建消息列表：走渲染缓存 + 指纹跳过，不再整页 innerHTML 重建。
@@ -339,7 +339,7 @@ export async function setupEventListeners() {
         // Rust 已在 turn-complete 前派发下一条；保留 running/loading，等待下一轮。
         updateConversationListSpinner();
         if (sid === appState.activeConversationId) {
-          syncSubagentProgressUI();
+          syncRunningSubagentsUI();
         }
         return;
       }
@@ -350,6 +350,9 @@ export async function setupEventListeners() {
       ensureAssistantPresent(sid, streamedText);
       appState.runningSessions.delete(sid);
       appState.abortingSessions.delete(sid);
+      // 本轮彻底结束：清空全部 active tools（含运行中被中断/通知丢失而残留 running 的），
+      // 否则输入框状态条会一直显示「正在执行: … / 子代理执行中」。
+      clearSessionTools(sid);
     }
     appState.runningSessions.delete('pending');
     appState.abortingSessions.delete('pending');

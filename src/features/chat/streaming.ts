@@ -78,6 +78,19 @@ function isFailedTaskStatus(status: string): boolean {
   return status === 'failed' || status === 'error' || status === 'stopped';
 }
 
+/** 子代理「启动成功」元数据结果（新版 Claude Code 的 Task/Agent 异步启动时，
+ *  主链立即收到 "Async agent launched successfully" 这类 tool_result）。
+ *  它不是子代理的完成结果：不能作为「完成」信号（实时卡 / reconcile 均需排除）。 */
+export function isSubagentLaunchMetadata(text: string): boolean {
+  const t = (text || '').trim();
+  return (
+    t.includes('Async agent launched successfully') ||
+    t.includes('launched successfully') ||
+    t.includes('internal metadata') ||
+    t.includes('agentId:')
+  );
+}
+
 function findActiveTool(
   tools: Map<string, ActiveToolState>,
   toolUseId: string,
@@ -124,6 +137,11 @@ export function reconcileActiveToolsWithHistory(sessionId: string, messages: Mes
       continue;
     }
     if (found.toolData?.toolResult !== undefined) {
+      // 子代理「启动成功」元数据（Async agent launched…）不是完成信号：
+      // 保持运行中，等 task-notification completed / 真实结果（历史卡由通知展示完成态）
+      if (!found.toolData.isError && isSubagentLaunchMetadata(found.toolData.toolResult)) {
+        continue;
+      }
       // 先写入完成态，再删除：即使后续 UI 竞态也能读到正确状态
       state.status = found.toolData.isError ? 'failed' : 'done';
       state.isError = found.toolData.isError;
@@ -207,6 +225,8 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
       input: Object.keys(input).length ? input : existing?.input || {},
       status: 'running',
       startedAt: existing?.startedAt || Date.now(),
+      // 保留开始时的流式块序号：覆盖状态不能丢锚点，否则工具卡穿插位置错乱
+      blockIndexAtStart: existing?.blockIndexAtStart,
       // task_started 可能先于 content_block_stop 到达：保留已设置的描述/进度
       description: existing?.description,
       progress: existing?.progress,
@@ -224,9 +244,16 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
     const state = findActiveTool(tools, toolUseId, taskId);
     if (!state) return false;
     const isError = Boolean(data?.is_error || data?.isError);
+    const resultText = String(data?.content ?? '');
+    // 子代理「启动成功」元数据（Async agent launched…）不是完成结果：
+    // 保持运行中，等 task-notification completed / 真实结果到达
+    if (!isError && isSubagentLaunchMetadata(resultText)) {
+      refreshActiveToolUI(sid);
+      return true;
+    }
     state.status = isError ? 'failed' : 'done';
     state.isError = isError;
-    state.toolResult = String(data?.content ?? '');
+    state.toolResult = resultText;
     // 保留到 messages-updated 再 reconcile 删除，避免完成态卡片闪断
     refreshActiveToolUI(sid);
     return true;
@@ -248,6 +275,8 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
       input: existing?.input || {},
       status: existing?.status === 'done' || existing?.status === 'failed' ? existing.status : 'running',
       startedAt: existing?.startedAt || Date.now(),
+      // 保留开始时的流式块序号（task_started 可能先于 tool_use_start 到达）
+      blockIndexAtStart: existing?.blockIndexAtStart,
       taskId: taskId || existing?.taskId,
       description,
       progress: existing?.progress,

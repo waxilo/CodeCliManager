@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { appState } from '../../state';
-import { handleMessageChunk, syncStreamingBlocksInPlace } from './streaming';
+import { handleMessageChunk, syncStreamingBlocksInPlace, reconcileActiveToolsWithHistory } from './streaming';
 import { refreshChatContent, resetChatRenderKey } from './refresh';
 
 const SID = 'sess-1';
@@ -143,6 +143,32 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     expect(children.indexOf(card)).toBeLessThan(children.indexOf(block1));
   });
 
+  it('工具先于思考（无流式块时启动）：工具卡排在思考块之前，不颠倒顺序', () => {
+    // kiro/OpenAI 兼容上游：tool_use 先于 reasoning 输出。
+    // 工具启动时还没有任何流式块（blockIndexAtStart = -1）→ 工具卡应排在最前，
+    // 后出现的思考块排在它后面（真实时间顺序），而不是思考块跑到工具卡上面。
+    appState.activeToolsBySession.set(SID, new Map([
+      ['t1', {
+        toolUseId: 't1', toolName: 'Read', input: { file_path: '/src/lib.rs' },
+        status: 'running', startedAt: Date.now(), blockIndexAtStart: -1,
+      }],
+    ]));
+    refreshChatContent();
+    // 思考块随后出现
+    appState.streamingBySession.set(SID, {
+      blocks: [{ type: 'thinking', content: '先看代码再下结论', finalized: false }],
+      thinkingDone: false,
+      currentBlockIdx: 0,
+    });
+    refreshChatContent();
+
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const card = list.querySelector('[data-stream-id="live-tool-t1"]')!;
+    const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    const children = [...list.children];
+    expect(children.indexOf(card)).toBeLessThan(children.indexOf(block));
+  });
+
   it('text 块节点按 id 复用：delta 就地追加，不重建 DOM', () => {
     appState.streamingBySession.set(SID, {
       blocks: [{ type: 'text', content: 'hello', finalized: false }],
@@ -191,5 +217,63 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     syncStreamingBlocksInPlace(SID);
     const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
     expect(block.querySelector('.markdown-body')!.textContent).toBe('data');
+  });
+
+  it('子代理「启动成功」元数据结果不置完成：保持运行中，真结果到达才完成', () => {
+    handleMessageChunk({
+      conversation_id: SID,
+      kind: 'tool_use_start',
+      content: JSON.stringify({ id: 'a1', name: 'Agent', index: 0 }),
+    });
+    refreshChatContent();
+    // 新版 Claude Code 异步子代理：启动即回 "Async agent launched successfully" 元数据
+    handleMessageChunk({
+      conversation_id: SID,
+      kind: 'tool_result',
+      content: JSON.stringify({
+        tool_use_id: 'a1',
+        content: 'Async agent launched successfully.\nagentId: abc (internal metadata)',
+        is_error: false,
+      }),
+    });
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const card = list.querySelector('[data-stream-id="live-tool-a1"]')!;
+    // 元数据不是完成信号：卡保持运行中
+    expect(card.textContent).toContain('运行中');
+    expect(card.classList.contains('streaming')).toBe(true);
+    // 真实结果（子代理完成）到达才显示完成
+    handleMessageChunk({
+      conversation_id: SID,
+      kind: 'tool_result',
+      content: JSON.stringify({ tool_use_id: 'a1', content: '## 报告\n\n正文', is_error: false }),
+    });
+    refreshChatContent();
+    const cardAfter = list.querySelector('[data-stream-id="live-tool-a1"]')!;
+    expect(cardAfter.textContent).toContain('完成');
+    expect(cardAfter.classList.contains('streaming')).toBe(false);
+  });
+
+  it('reconcile：历史里子代理 tool_use 只带启动元数据结果时，不判完成、不删 active 卡', () => {
+    appState.activeToolsBySession.set(SID, new Map([
+      ['a1', {
+        toolUseId: 'a1', toolName: 'Agent', input: {}, status: 'running', startedAt: Date.now(),
+      }],
+    ]));
+    // 历史已落盘 Agent tool_use + 启动元数据 result（子代理仍在运行）
+    reconcileActiveToolsWithHistory(SID, [
+      {
+        id: 'tu-1', role: 'tool', content: '{}', timestamp: 1,
+        toolData: {
+          toolName: 'Agent', toolInput: {}, toolUseId: 'a1', displayMode: 'collapsible',
+          toolResult: 'Async agent launched successfully.\nagentId: abc (internal metadata)',
+          isError: false,
+          colorScheme: { border: '#999', icon: '#999', primary: '#999' },
+        },
+      },
+    ]);
+    const active = appState.activeToolsBySession.get(SID);
+    expect(active).toBeDefined();
+    expect(active!.get('a1')!.status).toBe('running');
   });
 });

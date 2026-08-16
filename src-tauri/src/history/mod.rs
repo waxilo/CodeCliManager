@@ -654,6 +654,20 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
             *usage_agg.cost_usd.get_or_insert(0.0) += cost;
         }
 
+        // 新版 CLI 把子代理完成通知写在 queue-operation / attachment 等非消息行：
+        // 顶层 content 以 <task-notification> 开头时同样解析合并进对应 tool_use，
+        // 否则通知丢失，历史 Agent/Task 卡只剩「运行中」空横线。
+        if let Some(content) = value.get("content").and_then(|c| c.as_str()) {
+            if content.trim_start().starts_with("<task-notification>") {
+                if let Some(notif) = parse_task_notification(content) {
+                    if !notif.tool_use_id.is_empty() {
+                        task_notifications.insert(notif.tool_use_id.clone(), notif);
+                    }
+                }
+                continue;
+            }
+        }
+
         let Some(message) = value.get("message") else {
             continue;
         };
@@ -804,8 +818,10 @@ pub(crate) fn decode_project_dir_from_jsonl_path(path: &Path) -> Option<String> 
     (encoded == "-").then(|| "/".to_string())
 }
 
-/// 主链可见工具白名单：AskUserQuestion（互动卡片）+ Agent / Task（Subagent 状态）
-/// + TodoWrite / TaskCreate / TaskUpdate（TodoList 清单与任务管理卡）
+/// 历史主链可见工具白名单：AskUserQuestion（互动卡片）+ Agent / Task（Subagent 状态）
+/// + TodoWrite / TaskCreate / TaskUpdate（TodoList 清单与任务管理卡）。
+/// 脚本工具（Bash/Read/Edit…）不进历史，避免会话界面被大量收起卡横线占满；
+/// 运行中的脚本由实时工具卡展示（activeToolsBySession）。
 const VISIBLE_TOOL_NAMES: &[&str] = &["AskUserQuestion", "Agent", "Task", "TodoWrite", "TaskCreate", "TaskUpdate"];
 
 fn is_visible_tool_name(name: &str) -> bool {
@@ -930,9 +946,13 @@ pub(crate) fn expand_content_parts(
                             .get("name")
                             .and_then(|n| n.as_str())
                             .unwrap_or("");
+                        // 历史只保留主链可见工具（子代理 / 问答 / Todo 卡）：
+                        // 脚本工具（Bash/Read/Edit…）不进历史，避免会话界面被大量收起卡横线占满；
+                        // 运行中的脚本仍由实时卡展示。Task/Agent 额外收集进可见集合，
+                        // 供 tool_result 判定子代理结果。
                         if is_visible_tool_name(name) {
                             if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
-                                if name == "Task" && !id.is_empty() {
+                                if (name == "Task" || name == "Agent") && !id.is_empty() {
                                     visible_task_tool_ids.insert(id.to_string());
                                 }
                             }
@@ -965,7 +985,14 @@ pub(crate) fn expand_content_parts(
                             .unwrap_or("");
                         let is_task_result = !tool_use_id.is_empty()
                             && visible_task_tool_ids.contains(tool_use_id);
-                        if has_answers || has_questions || is_task_result {
+                        // 子代理「启动成功」元数据结果（Async agent launched…）不保留：
+                        // 它不是子代理的完成结果，保留会让历史卡误显完成态
+                        let is_launch_metadata = !has_answers
+                            && !has_questions
+                            && is_subagent_launch_metadata_content(item.get("content"));
+                        // 保留：问答结果 / 子代理（Task/Agent）真结果（脚本结果不保留，
+                        // 与 tool_use 白名单一致）。启动元数据过滤优先于 is_task_result。
+                        if !is_launch_metadata && (has_answers || has_questions || is_task_result) {
                             let payload = serde_json::json!({
                                 "content": item.get("content").cloned().unwrap_or(serde_json::Value::Null),
                                 "tool_use_id": item.get("tool_use_id").cloned().unwrap_or(serde_json::Value::Null),
@@ -989,6 +1016,29 @@ pub(crate) fn expand_content_parts(
         }
         _ => vec![],
     }
+}
+
+/// 子代理「启动成功」元数据结果（新版 Claude Code 的 Task/Agent 异步启动时，
+/// 主链立即收到 "Async agent launched successfully" 这类 tool_result）。
+/// 它不是子代理的完成结果：历史里不保留，避免误显完成态。
+fn is_subagent_launch_metadata_content(content: Option<&serde_json::Value>) -> bool {
+    let Some(content) = content else {
+        return false;
+    };
+    let text = match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .filter_map(|it| it.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => other.to_string(),
+    };
+    let t = text.trim();
+    t.contains("Async agent launched successfully")
+        || t.contains("launched successfully")
+        || t.contains("internal metadata")
+        || t.contains("agentId:")
 }
 
 pub(crate) fn parse_timestamp(iso_string: &str) -> Option<i64> {
@@ -1417,6 +1467,7 @@ mod tests {
             Some(&serde_json::json!([
                 {"type":"text","text":"starting"},
                 {"type":"tool_use","id":"toolu_task1","name":"Task","input":{"description":"explore"}},
+                {"type":"tool_use","id":"toolu_agent","name":"Agent","input":{"description":"audit"}},
                 {"type":"tool_use","id":"toolu_bash","name":"Bash","input":{"command":"ls"}}
             ])),
             "a",
@@ -1425,25 +1476,32 @@ mod tests {
             &mut task_ids,
         );
         assert!(task_ids.contains("toolu_task1"));
-        assert_eq!(tool_use.iter().filter(|m| m.role == "tool_use").count(), 1);
+        assert!(task_ids.contains("toolu_agent"));
+        // 历史只保留主链可见工具（Task/Agent）：脚本 Bash 不进历史，避免界面被横线占满
+        assert_eq!(tool_use.iter().filter(|m| m.role == "tool_use").count(), 2);
         assert!(tool_use.iter().any(|m| m.content.contains("Task")));
+        assert!(tool_use.iter().any(|m| m.content.contains("Agent")));
         assert!(!tool_use.iter().any(|m| m.content.contains("Bash")));
 
         let tool_result = expand_content_parts(
             "user",
             Some(&serde_json::json!([
                 {"type":"tool_result","tool_use_id":"toolu_task1","content":"done summary"},
-                {"type":"tool_result","tool_use_id":"toolu_bash","content":"file.txt"}
+                {"type":"tool_result","tool_use_id":"toolu_bash","content":"file.txt"},
+                {"type":"tool_result","tool_use_id":"toolu_agent","content":[{"type":"text","text":"Async agent launched successfully.\nagentId: abc (internal ID)"}]}
             ])),
             "u",
             2,
             None,
             &mut task_ids,
         );
+        // Task 真结果保留；Bash 脚本结果不保留；子代理「启动成功」元数据不保留
         assert_eq!(tool_result.len(), 1);
         assert_eq!(tool_result[0].role, "tool_result");
         assert!(tool_result[0].content.contains("done summary"));
-        assert_eq!(tool_use.iter().filter(|m| m.role == "tool_use").count(), 1);
+        assert!(!tool_result.iter().any(|m| m.content.contains("file.txt")));
+        assert!(!tool_result.iter().any(|m| m.content.contains("launched successfully")));
+        assert_eq!(tool_use.iter().filter(|m| m.role == "tool_use").count(), 2);
     }
 
     #[test]
@@ -1615,6 +1673,31 @@ mod tests {
         assert_eq!(tn["total_tokens"], 100);
         assert_eq!(tn["tool_uses"], 3);
         assert_eq!(tn["duration_ms"], 5000);
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn queue_operation_notification_merges_into_agent_tool_use() {
+        // 新版 CLI（984dd8cc 实测）：子代理完成通知写在 queue-operation / attachment
+        // 等非消息行（顶层 content，无 message 字段）。若不解析，通知丢失，
+        // 历史 Agent/Task 卡只剩「运行中」空横线。
+        let contents = concat!(
+            r#"{"sessionId":"qnotif","uuid":"q","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"审查代码"}}"#,
+            "\n",
+            r#"{"sessionId":"qnotif","uuid":"a1","parentUuid":"q","type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"call_09_1","name":"Agent","input":{"description":"审查 UI"}}]}}"#,
+            "\n",
+            r#"{"sessionId":"qnotif","uuid":"tn1","parentUuid":"a1","type":"queue-operation","operation":"enqueue","timestamp":"2026-01-01T00:00:02Z","content":"<task-notification>\n<task-id>xyz</task-id>\n<tool-use-id>call_09_1</tool-use-id>\n<status>completed</status>\n<summary>Agent \"审查 UI\" finished</summary>\n<result>队列行报告</result>\n<usage><subagent_tokens>50</subagent_tokens><tool_uses>2</tool_uses><duration_ms>3000</duration_ms></usage>\n</task-notification>"}"#,
+        );
+        let path = temp_jsonl("queue-notification-merge.jsonl", contents);
+        let conversation = parse_claude_session(&path).unwrap();
+        assert_eq!(conversation.messages.len(), 2);
+        let tool_msg = &conversation.messages[1];
+        assert_eq!(tool_msg.role, "tool_use");
+        let payload: serde_json::Value = serde_json::from_str(&tool_msg.content).unwrap();
+        let tn = &payload["taskNotification"];
+        assert_eq!(tn["status"], "completed");
+        assert_eq!(tn["result"], "队列行报告");
+        assert_eq!(tn["summary"], "Agent \"审查 UI\" finished");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

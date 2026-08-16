@@ -560,37 +560,50 @@ export function renderToolMessageHtml(msg: Message, msgIdAttr = ''): string {
     const styleClass = config.style ? `tool-oneline-${config.style}` : 'tool-oneline-default';
 
     let oneLineHtml = '';
+    // 运行中实时卡的 input 尚未流完（tool_use_end 才带完整输入）：空值时显示工具名占位，
+    // 避免 summary 只剩标签横线、「看不到脚本」
+    const displayValue = (value || '').trim() || toolName;
     if (config.style === 'terminal') {
-      oneLineHtml = `<span class="tool-cmd-prefix">$</span> <code class="tool-cmd-text">${escapeHtml(value)}</code>`;
+      oneLineHtml = `<span class="tool-cmd-prefix">$</span> <code class="tool-cmd-text">${escapeHtml(displayValue)}</code>`;
     } else if (config.style === 'file-open') {
-      oneLineHtml = `<span class="tool-file-link">📄 ${escapeHtml(value)}</span>`;
+      oneLineHtml = `<span class="tool-file-link">📄 ${escapeHtml(displayValue)}</span>`;
     } else if (config.style === 'search') {
-      oneLineHtml = `<span class="tool-search-pattern">${escapeHtml(value)}</span>`;
+      oneLineHtml = `<span class="tool-search-pattern">${escapeHtml(displayValue)}</span>`;
     } else {
-      oneLineHtml = `<span>${escapeHtml(value || toolName)}</span>`;
+      oneLineHtml = `<span>${escapeHtml(displayValue)}</span>`;
     }
 
     const secondaryHtml = secondary ? `<span class="tool-secondary">${escapeHtml(secondary)}</span>` : '';
 
+    // 单行工具（Bash/Read/Grep/Glob…）也统一为可折叠卡片：默认收起，
+    // summary 显示命令摘要 + 状态徽标，输出/进度收进 body，点击展开查看。
     const toolContent = `
       <div class="tool-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" ${msgIdAttr} style="border-left-color: ${colorScheme.border}">
-        <div class="tool-card-header">
-          <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
-          <span class="tool-label">${escapeHtml(config.label)}</span>
-          ${secondaryHtml}
-          ${statusBadge}
-        </div>
-        <div class="tool-card-body ${styleClass}">
-          ${oneLineHtml}
-        </div>
-        ${hasResult ? `<div class="tool-card-result"><div class="markdown-body">${renderMarkdown(toolResult!)}</div></div>` : ''}
+        <details class="tool-collapsible">
+          <summary class="tool-card-header tool-collapsible-summary">
+            <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
+            <span class="tool-label">${escapeHtml(config.label)}</span>
+            <span class="tool-title-text ${styleClass}">${oneLineHtml}</span>
+            ${secondaryHtml}
+            ${statusBadge}
+            <span class="tool-chevron">▾</span>
+          </summary>
+          <div class="tool-card-body ${styleClass}">
+            ${hasResult
+              ? `<div class="tool-card-result"><div class="markdown-body">${renderMarkdown(toolResult!)}</div></div>`
+              : isRunning
+                ? '<div class="tool-running-indicator"><span class="pending-dot"></span><span class="pending-dot"></span><span class="pending-dot"></span></div>'
+                : ''}
+          </div>
+        </details>
       </div>`;
     return toolContent;
   }
 
   // Subagent 完成卡（Agent / Task + history 合并的 taskNotification）：
   // tool_result 被导入层丢弃 → 通用路径会误判「运行中」，这里以通知的权威终态为准，
-  // 头部展示用量元信息，报告按 Markdown 渲染并默认展开，避免缩成一条空横线。
+  // 头部展示用量元信息，报告按 Markdown 渲染并默认收起（非主要内容不抢占主视野），
+  // 点击标题展开查看报告正文。
   const tn = td.taskNotification;
   if (tn) {
     const config = TOOL_CONFIG_MAP[toolName] || getDefaultToolConfig();
@@ -611,7 +624,7 @@ export function renderToolMessageHtml(msg: Message, msgIdAttr = ''): string {
     const report = tn.result?.trim();
     return `
       <div class="tool-card subagent-task-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" ${msgIdAttr} style="border-left-color: ${colorScheme.border}">
-        <details class="tool-collapsible"${report ? ' open' : ''}>
+        <details class="tool-collapsible">
           <summary class="tool-card-header tool-collapsible-summary">
             <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
             <span class="tool-label">${escapeHtml(config.label)}</span>
@@ -653,10 +666,11 @@ export function renderToolMessageHtml(msg: Message, msgIdAttr = ''): string {
     }
   }
 
-  const expanded = isRunning ? ' open' : '';
+  // 可折叠显示（Edit、Write、Task、Plan 等复杂工具）：默认收起，
+  // 运行状态由 summary 状态徽标承载，输入预览/结果/进度点击展开查看。
   const toolContent = `
     <div class="tool-card" data-tool-use-id="${td.toolUseId ? escapeHtml(td.toolUseId) : ''}" ${msgIdAttr} style="border-left-color: ${colorScheme.border}">
-      <details class="tool-collapsible"${expanded}>
+      <details class="tool-collapsible">
         <summary class="tool-card-header tool-collapsible-summary">
           <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
           <span class="tool-label">${escapeHtml(config.label)}</span>
@@ -856,7 +870,17 @@ export function renderMessageHtmlChunks(messages: Message[]): RenderedMessageChu
   // 先处理/过滤工具，再合并相邻助手，避免「助手-工具-助手」过滤后露出重复答案
   const processed = mergeAdjacentSameRole(
     dedupeAdjacentDuplicateMessages(filterVisibleMessages(processToolMessages(messages))),
-  );
+  ).filter((m) => {
+    if (m.role !== 'tool' || !m.toolData) return true;
+    // 历史会话不渲染子代理卡（Task/Agent）：调用过程与结果由实时卡、
+    // 对话文本承载，历史界面只保留对话与思考内容，避免一排收起横线。
+    if (m.toolData.toolName === 'Task' || m.toolData.toolName === 'Agent') return false;
+    // 其他工具（问答/Todo 等）「无结果且无通知」的数据缺失时同样不展示
+    return (
+      m.toolData.toolResult !== undefined ||
+      m.toolData.taskNotification !== undefined
+    );
+  });
   // 提前计算最后一条用户消息索引，避免在 .map() 内部 O(n²) 重复计算
   const lastUserIdx = processed.map(m => m.role).lastIndexOf('user');
   return processed.map((msg, idx, arr) => {

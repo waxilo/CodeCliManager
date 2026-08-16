@@ -30,7 +30,7 @@ import { renderChatAreaHtml } from '../../features/chat/render-chat';
 import { renderBalanceStatusBarHtml, bindSessionIdCopyEvents, bindQueuedPromptEvents } from '../../features/chat/input-composer';
 import { setSendButtonLoading, isActiveConversationRunning, updateSendButtonState } from '../../features/chat/session-context';
 import { refreshStreamingUI } from '../../features/chat/streaming';
-import { syncSubagentProgressUI } from '../../features/chat/subagent-progress';
+import { syncRunningSubagentsUI } from '../../features/chat/subagent-progress';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { bindPermissionModeBarEvents } from '../../features/settings/mount';
 import {
@@ -157,7 +157,7 @@ function performRender() {
       afterChatMounted(() => refreshStreamingUI(sid));
     }
     // 同步左侧「子代理」tab 内容 / 角标 / 自动切换（全量 HTML 已嵌入时也要补）
-    syncSubagentProgressUI();
+    syncRunningSubagentsUI();
   }
   remountActiveInteractionPanel();
   if (appState.isKiroViewActive) {

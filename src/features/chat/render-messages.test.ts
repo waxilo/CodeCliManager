@@ -195,8 +195,9 @@ describe('renderToolMessageHtml Subagent 卡（taskNotification 分支）', () =
     // 头部用量元信息 + 标题
     expect(html).toContain('100 tokens · 3 次工具 · 5.0s');
     expect(html).toContain('审查 UI');
-    // 报告 Markdown 渲染并默认展开
-    expect(html).toContain('<details class="tool-collapsible" open');
+    // 报告 Markdown 渲染但默认收起（非主要内容不抢占主视野，点击展开查看）
+    expect(html).toContain('<details class="tool-collapsible">');
+    expect(html).not.toContain('<details class="tool-collapsible" open');
     expect(html).toContain('markdown-body');
     expect(html).toContain('<p>正文</p>');
   });
@@ -216,8 +217,9 @@ describe('renderToolMessageHtml Subagent 卡（taskNotification 分支）', () =
 
 describe('renderMessageListHtml 全流程：真实 81f4d1ee 数据形态的 Agent 子代理卡', () => {
   // 复刻 Rust parse_claude_session 对会话 81f4d1ee 的输出形态：
-  // 5 条 Agent tool_use（content 内嵌 taskNotification，tool_result 被导入层丢弃），
-  // 主视图不得渲染成折叠横线，必须出完整的「完成」子代理卡并默认展开报告。
+  // 5 条 Agent tool_use（content 内嵌 taskNotification，tool_result 被导入层丢弃）。
+  // 历史渲染不展示子代理卡（Task/Agent 一律不渲染，避免收起横线占满历史界面）；
+  // 子代理调用过程与结果由实时卡与对话文本承载。
   function realSessionMessages(): Message[] {
     const user: Message = { id: 'u1', role: 'user', content: '审查项目', timestamp: 1 };
     const agent = (call: string, desc: string, report: string): Message => ({
@@ -252,40 +254,34 @@ describe('renderMessageListHtml 全流程：真实 81f4d1ee 数据形态的 Agen
     ];
   }
 
-  it('5 条 Agent tool_use 全部渲染为「完成」子代理卡，报告默认展开，无运行中/横线态', () => {
+  it('历史会话不渲染子代理卡：5 条 Agent tool_use 全部不展示（含通知/结果）', () => {
     const html = renderMessageListHtml(realSessionMessages());
-
-    // 5 张子代理完成卡
-    expect(html.match(/subagent-task-card/g)).toHaveLength(5);
-    // 每张卡：终态完成徽标 + 报告 Markdown 默认展开 + 标题含子代理描述
-    for (const desc of ['审查前端工程与架构', '审查 Rust 后端工程与安全', '审查功能正确性与边界', '审查兼容性与构建发布', '审查 UI/UX 与可访问性']) {
-      expect(html).toContain(desc);
-      expect(html).toContain('>完成</span>');
-    }
-    // 不出现「运行中」误判（tool_result 被丢弃也不该显示运行中）
+    // 子代理卡（含报告）不进入历史渲染，避免一排收起横线
+    expect(html.match(/subagent-task-card/g) || []).toHaveLength(0);
+    expect(html).not.toContain('call_00_YGQOELetYqhM5guoxD0m2172');
+    expect(html).not.toContain('call_04_WK4xGAr2L1NVRrBZNAaO9561');
     expect(html).not.toContain('tool-status-running');
-    // 报告默认展开：每个 details 都带 open
-    expect((html.match(/<details class="tool-collapsible" open/g) || [])).toHaveLength(5);
-    // 报告 Markdown 渲染出 <p> 正文
-    expect(html).toContain('<p>前端审查正文</p>');
-    expect(html).toContain('<p>UI 审查正文</p>');
-    // 头部用量元信息
-    expect(html).toContain('100 tokens · 3 次工具 · 5.0s');
+    // 对话文本保留
+    expect(html).toContain('审查完成，报告如下');
   });
 
-  it('tool_result 存在但对应 Agent 无 taskNotification 时仍按通用卡渲染（不报错、不缩成空卡）', () => {
+  it('历史会话不渲染子代理卡：即使有 tool_result 或 taskNotification 也不展示', () => {
     const msgs = realSessionMessages();
-    // 去掉 call_04 的 taskNotification，模拟「通知尚未落盘」的中间态
-    const raw = JSON.parse(msgs[5].content) as Record<string, unknown>;
-    delete raw.taskNotification;
-    msgs[5].content = JSON.stringify(raw);
+    // 给 call_04 补一个真实 tool_result（有数据 → 子代理卡仍不渲染）
+    msgs.splice(6, 0, {
+      id: 'tr-04',
+      role: 'tool_result',
+      content: JSON.stringify({
+        content: '## 报告\n\nUI 审查正文',
+        tool_use_id: 'call_04_WK4xGAr2L1NVRrBZNAaO9561',
+        is_error: false,
+      }),
+      timestamp: 1,
+    });
     const html = renderMessageListHtml(msgs);
-    expect(html.match(/subagent-task-card/g)).toHaveLength(4);
-    // call_04 无通知 → 回退通用折叠卡（data-tool-use-id 保留，但不再是子代理完成卡，也不默认展开）
-    const card04 = html.match(/data-tool-use-id="call_04_WK4xGAr2L1NVRrBZNAaO9561"[\s\S]*?<\/div>/)?.[0] ?? '';
-    expect(card04).not.toContain('subagent-task-card');
-    expect(card04).not.toContain('>完成</span>');
-    // 无通知时按「运行中」占位（不缩成空横线），通知落盘后由重建切到完成态
-    expect(card04).toContain('tool-status-running');
+    expect(html.match(/subagent-task-card/g) || []).toHaveLength(0);
+    expect(html).not.toContain('call_04_WK4xGAr2L1NVRrBZNAaO9561');
+    expect(html).not.toContain('>完成</span>');
+    // 其他工具（如 AskUserQuestion / TodoWrite）不受影响
   });
 });

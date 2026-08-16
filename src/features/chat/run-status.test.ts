@@ -8,6 +8,7 @@ import {
   setTransientStatus,
   transferSessionRunTimer,
   refreshRunStatusStrip,
+  startRunStatusTicker,
 } from './run-status';
 
 const SID = 'conv-test-1';
@@ -254,6 +255,51 @@ describe('refreshRunStatusStrip（DOM）', () => {
     });
     refreshRunStatusStrip();
     expect(document.querySelector('.composer-status-text')?.textContent).toBe('思考中…');
+  });
+
+  it('子代理（Agent）执行中：状态文案含计数，计时随锚点走', () => {
+    appState.runningSessions.add(SID);
+    appState.sessionRunStartedAt.set(SID, Date.now() - 5000);
+    appState.activeToolsBySession.set(SID, new Map([
+      ['a1', { toolUseId: 'a1', toolName: 'Agent', input: {}, status: 'running', startedAt: 1000 }],
+      ['a2', { toolUseId: 'a2', toolName: 'Task', input: {}, status: 'done', startedAt: 1000 }],
+    ]));
+    refreshRunStatusStrip();
+    expect(document.querySelector('.composer-status-text')?.textContent).toBe('子代理执行中 · 完成 1/2');
+    expect(document.querySelector('.composer-status-elapsed')?.textContent).toBe('5s');
+  });
+
+  it('会话结束后残留的 running 工具不显示「执行中」：状态条进入结束态', () => {
+    // 会话已结束（runningSessions 已删），但 activeTools 残留 running 工具
+    // （事件丢失 / 中断工具 / turn-complete 清理前）→ 不得显示「正在执行」
+    appState.sessionRunStartedAt.set(SID, Date.now() - 5000);
+    appState.activeToolsBySession.set(SID, new Map([
+      ['a1', { toolUseId: 'a1', toolName: 'Agent', input: {}, status: 'running', startedAt: 1000 }],
+    ]));
+    appState.streamingBySession.set(SID, {
+      blocks: [{ type: 'thinking', content: 'x', finalized: false }],
+      thinkingDone: false,
+      currentBlockIdx: 0,
+    });
+    refreshRunStatusStrip();
+    expect(document.querySelector('.composer-status-text')?.textContent).not.toBe('子代理执行中');
+    expect(document.querySelector('.composer-status-text')?.textContent).not.toBe('正在执行');
+    expect(document.querySelector('.composer-status-text')?.textContent).not.toBe('思考中…');
+  });
+
+  it('ticker：子代理执行期间无事件，计时也持续走动', () => {
+    startRunStatusTicker();
+    appState.runningSessions.add(SID);
+    appState.sessionRunStartedAt.set(SID, Date.now() - 5000);
+    appState.activeToolsBySession.set(SID, new Map([
+      ['a1', { toolUseId: 'a1', toolName: 'Agent', input: {}, status: 'running', startedAt: 1000 }],
+    ]));
+    refreshRunStatusStrip();
+    expect(document.querySelector('.composer-status-elapsed')?.textContent).toBe('5s');
+
+    // 子代理安静执行（无任何事件）：ticker 每 250ms 刷新，计时持续走动
+    vi.advanceTimersByTime(2000);
+    expect(document.querySelector('.composer-status-elapsed')?.textContent).toBe('7s');
   });
 
   it('运行结束后短暂展示最终时长，再隐藏', () => {

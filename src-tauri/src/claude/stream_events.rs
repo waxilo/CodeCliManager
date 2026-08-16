@@ -136,8 +136,20 @@ fn tool_result_content_to_string(content: &serde_json::Value) -> String {
     }
 }
 
+/// 子代理「启动成功」元数据结果（新版 Claude Code 的 Task/Agent 异步启动时，
+/// 主链立即收到 "Async agent launched successfully" 这类 tool_result）。
+/// 它不是子代理的完成结果：不能作为前端「完成」信号，也不能把子代理从未决集合移除。
+pub(crate) fn is_subagent_launch_metadata(result_text: &str) -> bool {
+    let t = result_text.trim();
+    t.contains("Async agent launched successfully")
+        || t.contains("launched successfully")
+        || t.contains("internal metadata")
+        || t.contains("agentId:")
+}
+
 /// 流式 tool_result 下发：所有工具结果都实时发给前端（实时工具卡展示完成态/错误态）。
-/// Task 的子代理结果额外从未决集合移除，允许主链 result 触发 turn-complete。
+/// Task/Agent 的子代理结果额外从未决集合移除，允许主链 result 触发 turn-complete；
+/// 子代理「启动成功」的元数据结果除外——它不表示子代理完成。
 fn emit_tool_result_if_any(
     app: &AppHandle,
     sid: &str,
@@ -164,10 +176,6 @@ fn emit_tool_result_if_any(
         if tool_use_id.is_empty() {
             continue;
         }
-        // 子代理结果已回：从未决集合中移除，允许主链 result 触发 turn-complete
-        if known_task_ids.contains(tool_use_id) {
-            outstanding_task_ids.remove(tool_use_id);
-        }
         let is_error = item
             .get("is_error")
             .and_then(|v| v.as_bool())
@@ -176,6 +184,15 @@ fn emit_tool_result_if_any(
             .get("content")
             .map(tool_result_content_to_string)
             .unwrap_or_default();
+        // 子代理启动元数据（"Async agent launched successfully"）：不表示完成，
+        // 不下发前端（避免实时卡误显"完成"）、不移除未决集合（子代理仍在运行）。
+        if !is_error && is_subagent_launch_metadata(&result_text) {
+            continue;
+        }
+        // 子代理结果已回：从未决集合中移除，允许主链 result 触发 turn-complete
+        if known_task_ids.contains(tool_use_id) {
+            outstanding_task_ids.remove(tool_use_id);
+        }
         let payload = serde_json::json!({
             "tool_use_id": tool_use_id,
             "content": result_text,
@@ -642,7 +659,9 @@ pub(crate) fn process_claude_stream_line(
                             // 所有工具都下发 tool_use_start：前端据此实时创建工具卡。
                             // 无 id 的（罕见）跳过实时卡，落盘后仍由历史渲染展示。
                             if !id.is_empty() {
-                                if name == "Task" {
+                                // Task/Agent 都是子代理：纳入 known 集合，
+                                // 其运行期间主链 result 不得触发 turn-complete。
+                                if name == "Task" || name == "Agent" {
                                     known_task_ids.insert(id.clone());
                                 }
                                 let payload = serde_json::json!({
@@ -740,8 +759,9 @@ pub(crate) fn process_claude_stream_line(
                                 let input: serde_json::Value =
                                     serde_json::from_str(&block.input_json)
                                         .unwrap_or_else(|_| serde_json::json!({}));
-                                if block.name == "Task" {
-                                    // 主链 Task 已发出：其子代理 result 不再视为本轮结束
+                                if block.name == "Task" || block.name == "Agent" {
+                                    // 主链 Task/Agent 已发出：其子代理结果未回前，
+                                    // 主链 result 不视为本轮结束（异步子代理仍在运行）
                                     outstanding_task_ids.insert(block.id.clone());
                                 } else if block.name == "TodoWrite" {
                                     // TodoWrite 协议为「整表替换」，直接透传完整 todos 给前端
@@ -842,7 +862,7 @@ pub(crate) fn process_claude_stream_line(
 
 #[cfg(test)]
 mod tests {
-    use super::ProtocolLeakGuard;
+    use super::{is_subagent_launch_metadata, ProtocolLeakGuard};
 
     #[test]
     fn protocol_guard_filters_split_internal_route() {
@@ -862,5 +882,18 @@ mod tests {
 
         assert!(guard.take_recovery_needed());
         assert!(!guard.take_recovery_needed());
+    }
+
+    #[test]
+    fn subagent_launch_metadata_is_recognized() {
+        // 新版 Claude Code 的 Task/Agent 异步启动结果：是元数据，不是完成信号
+        assert!(is_subagent_launch_metadata(
+            "Async agent launched successfully. (This tool result is internal metadata — never quote or paste any part of it, including the agentId below, into a user-facing reply.)\nagentId: abc123 (internal ID)"
+        ));
+        assert!(is_subagent_launch_metadata("launched successfully"));
+        // 普通工具结果 / 子代理真报告不是启动元数据
+        assert!(!is_subagent_launch_metadata("file.txt"));
+        assert!(!is_subagent_launch_metadata("## 报告\n\n正文"));
+        assert!(!is_subagent_launch_metadata(""));
     }
 }

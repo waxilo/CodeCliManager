@@ -497,11 +497,19 @@ function interleaveStreamAndToolChunks(
   };
 
   const anchored: Array<{ idx: number; chunk: RenderedMessageChunk }> = [];
+  // 工具开始时尚无任何流式块（blockIndexAtStart = -1：工具先于思考，常见于
+  // kiro/OpenAI 兼容上游的 tool_use 先于 reasoning 输出）→ 工具是更早的内容，
+  // 排到所有流式块之前，保持真实时间顺序（否则后出现的思考块会跑到工具卡上面）。
+  const head: RenderedMessageChunk[] = [];
+  // 锚点超出合并后块范围（块被合并/清理后的旧工具）：兜底排最后
   const tail: RenderedMessageChunk[] = [];
   for (const tc of toolChunks) {
-    const mi = tc.anchorBlockIndex != null ? rawToMerged(tc.anchorBlockIndex) : -1;
+    const mi = tc.anchorBlockIndex != null && tc.anchorBlockIndex >= 0
+      ? rawToMerged(tc.anchorBlockIndex)
+      : -1;
     if (mi >= 0) anchored.push({ idx: mi, chunk: tc });
-    else tail.push(tc);
+    else if (tc.anchorBlockIndex != null && tc.anchorBlockIndex >= 0) tail.push(tc);
+    else head.push(tc);
   }
 
   // renderLiveToolChunks 已按锚点排序，anchored 天然有序；同锚点多个工具保持顺序
@@ -515,7 +523,7 @@ function interleaveStreamAndToolChunks(
     }
   }
   for (; ai < anchored.length; ai++) out.push(anchored[ai].chunk);
-  return [...chunks, ...out, ...tail];
+  return [...chunks, ...head, ...out, ...tail];
 }
 
 /**

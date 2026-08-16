@@ -9,7 +9,6 @@ import {
   setActiveSidebarTab,
   getActiveSidebarTab,
   refreshActiveTabContent,
-  notifySubagentActivity,
 } from './sidebar-tabs';
 
 const HOUR = 3600 * 1000;
@@ -58,15 +57,14 @@ describe('侧边栏多视图页签', () => {
     appState.isKiroViewActive = false;
   });
 
-  it('页签条渲染：活跃会话 + 归档会话 + 子代理三个 tab，角标默认隐藏', () => {
+  it('页签条渲染：活跃会话 + 归档会话两个 tab（子代理 tab 已移除）', () => {
     buildDom();
     const buttons = document.querySelectorAll('.sidebar-tab');
-    expect(buttons.length).toBe(3);
+    expect(buttons.length).toBe(2);
     expect(
       Array.from(buttons).map((b) => b.getAttribute('data-tab')),
-    ).toEqual(['active', 'archived', 'subagents']);
-    const badge = document.querySelector('#subagent-tab-badge') as HTMLElement;
-    expect(badge.hidden).toBe(true);
+    ).toEqual(['active', 'archived']);
+    expect(document.querySelector('#subagent-tab-badge')).toBeNull();
     expect(
       document.querySelector('.sidebar-tab.is-active')?.getAttribute('data-tab'),
     ).toBe('active');
@@ -74,17 +72,17 @@ describe('侧边栏多视图页签', () => {
 
   it('点击页签切换：activeTab 更新、is-active 迁移、内容替换', () => {
     buildDom();
-    const subTab = document.querySelector(
-      '.sidebar-tab[data-tab="subagents"]',
+    const archTab = document.querySelector(
+      '.sidebar-tab[data-tab="archived"]',
     ) as HTMLElement;
-    subTab.click();
+    archTab.click();
 
-    expect(getActiveSidebarTab()).toBe('subagents');
+    expect(getActiveSidebarTab()).toBe('archived');
     expect(
       document.querySelector('.sidebar-tab.is-active')?.getAttribute('data-tab'),
-    ).toBe('subagents');
-    // 内容容器已替换为子代理 tab 的空态
-    expect(document.querySelector('#conversation-list')?.textContent).toContain('暂无子代理');
+    ).toBe('archived');
+    // 内容容器已替换为归档会话视图（无会话时为空态）
+    expect(document.querySelector('#conversation-list')?.textContent).toContain('还没有会话');
   });
 
   it('tab 选择持久化到 localStorage，且重置回默认活跃会话', () => {
@@ -103,27 +101,11 @@ describe('侧边栏多视图页签', () => {
     expect(mod.getActiveSidebarTab()).toBe('archived');
   });
 
-  it('从 localStorage 恢复上次的 tab', async () => {
+  it('旧版 subagents tab（已移除）迁移为活跃会话', async () => {
     localStorage.setItem('codemanager-sidebar-tab', 'subagents');
     vi.resetModules();
     const mod = await import('./sidebar-tabs');
-    expect(mod.getActiveSidebarTab()).toBe('subagents');
-  });
-
-  it('子代理自动切换状态机：0→n 自动切到子代理，n→0 切回；手动切换打断恢复', () => {
-    buildDom();
-    notifySubagentActivity(true);
-    expect(getActiveSidebarTab()).toBe('subagents');
-
-    notifySubagentActivity(false);
-    expect(getActiveSidebarTab()).toBe('active');
-
-    // 运行中手动切回活跃会话，结束后不被打回子代理
-    notifySubagentActivity(true);
-    expect(getActiveSidebarTab()).toBe('subagents');
-    setActiveSidebarTab('active');
-    notifySubagentActivity(false);
-    expect(getActiveSidebarTab()).toBe('active');
+    expect(mod.getActiveSidebarTab()).toBe('active');
   });
 });
 

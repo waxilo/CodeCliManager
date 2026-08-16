@@ -5,7 +5,7 @@ import {
   exitManagementView,
   clearStashedMainDom,
 } from './management-view';
-import { syncSubagentProgressUI } from '../../features/chat/subagent-progress';
+import { syncRunningSubagentsUI } from '../../features/chat/subagent-progress';
 import * as refresh from '../../features/chat/refresh';
 import type { ActiveToolState } from '../../types';
 
@@ -144,7 +144,7 @@ describe('management-view 增量进出', () => {
 
     // 无子代理时同步同样不产生任何面板节点
     appState.activeToolsBySession.clear();
-    syncSubagentProgressUI();
+    syncRunningSubagentsUI();
     expect(document.querySelector('#subagent-progress')).toBeNull();
   });
 

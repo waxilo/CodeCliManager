@@ -850,7 +850,25 @@
   background: var(--color-bg-surface-active);
 }
 
-/* ── 子代理进度行（侧边栏「子代理」tab 复用） ───────────── */
+/* ── 进行中的子代理（输入框上方展示区） ───────────── */
+.running-subagents-host {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 8px;
+  max-height: 140px;
+  overflow-y: auto;
+}
+
+.running-subagents-host[hidden] {
+  display: none;
+}
+
+.running-subagent-item {
+  border: 1px solid color-mix(in srgb, var(--color-composer-border) 70%, transparent);
+}
+
+/* ── 子代理进度行（复用：输入框上方进行中子代理） ───────────── */
 .subagent-progress-list {
   display: flex;
   flex-direction: column;

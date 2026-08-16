@@ -182,6 +182,7 @@ export function renderInputComposerHtml(): string {
   return `
     <div class="input-area">
       <div id="interaction-host" class="interaction-host" hidden></div>
+      <div id="running-subagents-host" class="running-subagents-host" hidden></div>
       ${renderQueuedPromptsHtml()}
       ${renderTodoPanelHtml()}
       <div id="paste-attachments-bar" class="paste-attachments-bar" style="display:none"></div>
