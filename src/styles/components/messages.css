@@ -7,8 +7,10 @@
   flex-direction: column;
   gap: var(--space-4);
   min-width: 0;
-  /* 为滚动到底部按钮留空间 */
-  scroll-behavior: smooth;
+  /* 为滚动到底部按钮留空间。
+     注意：scroll-behavior 必须保持 auto——smooth 会让 scrollTop 赋值（恢复位置/置底）
+     变成动画滚动，流式重建逐帧错位震荡（「跳来跳去」）；如需平滑由调用方显式滚动。 */
+  scroll-behavior: auto;
 }
 
 /* tail-N 消息窗口的「加载更早」按钮 */
@@ -121,10 +123,9 @@
   gap: 10px;
   max-width: 100%;
   min-width: 0;
-  /* 长会话在 Win WebView2 上：离屏消息跳过样式/布局/绘制，只布局可见区。
-     挂回/重建消息列表时大幅降低整体 layout 成本（auto 记录最近一次真实高度）。 */
-  content-visibility: auto;
-  contain-intrinsic-size: auto 180px;
+  /* 注意：不再使用 content-visibility——离屏消息按 180px 估算高度会让
+     scrollHeight 失真（置底/恢复滚动跳到错误位置），且滚动时懒渲染导致
+     布局抖动（自动跳来跳去）。长列表性能由键控 diff + 消息窗口 + 分块挂载保证。 */
 }
 
 /* ---- 用户消息：右侧淡绿气泡 ---- */

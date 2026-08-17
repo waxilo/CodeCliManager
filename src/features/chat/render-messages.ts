@@ -515,10 +515,11 @@ export function renderThinkingDetails(
   const openAttr = expanded ? ' open' : '';
   const dataAttr = dataId ? ` data-thinking-id="${escapeHtml(dataId)}"` : '';
   const streamClass = isStreaming ? ' streaming-active' : '';
-  // 思考时长：流式中不显示（未结束），结束后展示；历史消息无时长则不显示
-  const durationText = !isStreaming
-    ? `<span class="thinking-duration">${durationMs ? formatDuration(durationMs) : '思考完成'}</span>`
-    : '';
+  // 思考时长：duration 元素总是渲染（流式时为空占位）——finalize 时节点不重建，
+  // syncStreamingBlocksInPlace 就地填充时长文本；历史消息无时长则显示「思考完成」。
+  const durationText = `<span class="thinking-duration">${
+    !isStreaming ? (durationMs ? formatDuration(durationMs) : '思考完成') : ''
+  }</span>`;
   return `
     <details class="thinking-block${streamClass}"${openAttr}${dataAttr}>
       <summary class="thinking-summary">

@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { appState } from '../../state';
-import { afterChatMounted, refreshChatContent, resetChatRenderKey } from './refresh';
+import { afterChatMounted, refreshChatContent, resetChatRenderKey, getLastChatRenderKey } from './refresh';
 
 /**
  * 键控 DOM diff 挂载（H1 彻底方案）行为测试：
@@ -161,5 +161,166 @@ describe('applyChatDom 键控 diff 挂载', () => {
     await flushRaf();
     expect(list.querySelectorAll('.message[data-message-id]').length).toBe(30);
     expect(mounted).toBe(1);
+  });
+});
+
+describe('applyChatDom 纯追加快速路径（流式 tick 滚动稳定）', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    appState.conversations = [];
+    appState.activeConversationId = '';
+    appState.activeConversationSourcePath = null;
+    appState.messageWindowSizeByConversation.clear();
+    appState.runningSessions.clear();
+    appState.pendingAskQuestions.clear();
+    appState.activeToolsBySession.clear();
+    appState.streamingBySession.clear();
+    appState.expandedThinkingBlocks.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('流式追加（前缀匹配）：已挂载节点不被摘除重建，新节点追加到末尾', async () => {
+    setupChatDomShell();
+    seedConversation(2);
+    resetChatRenderKey();
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const m0 = list.querySelector('.message[data-message-id="m0"]')!;
+    const m1 = list.querySelector('.message[data-message-id="m1"]')!;
+
+    // 模拟流式新块/新消息追加：会话追加一条消息
+    const conv = appState.conversations[0];
+    conv.messages.push({ id: 'm2', role: 'assistant', content: '新增内容', timestamp: 3 });
+    conv.updated_at = 3;
+    resetChatRenderKey();
+    refreshChatContent();
+
+    const children = [...list.children].filter((el) =>
+      (el as HTMLElement).classList?.contains('message'),
+    );
+    expect(children.length).toBe(3);
+    expect(children[0]).toBe(m0); // 节点引用保持（未被 remove 重建）
+    expect(children[1]).toBe(m1);
+    expect(children[2].getAttribute('data-message-id')).toBe('m2');
+    expect(children[2].textContent).toContain('新增内容');
+  });
+
+  it('前缀不匹配（中间消息变化）时不走追加路径，正常 diff 重建该节点', async () => {
+    setupChatDomShell();
+    seedConversation(3);
+    resetChatRenderKey();
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const m0 = list.querySelector('.message[data-message-id="m0"]')!;
+
+    // 修改中间消息 m1（renderKey 变化 → 前缀不匹配）
+    const conv = appState.conversations[0];
+    conv.messages[1] = { ...conv.messages[1], content: 'changed!', timestamp: 9 };
+    conv.updated_at = 9;
+    resetChatRenderKey();
+    refreshChatContent();
+
+    const m0After = list.querySelector('.message[data-message-id="m0"]')!;
+    expect(m0After).toBe(m0);
+    expect(
+      list.querySelector('.message[data-message-id="m1"]')!.textContent,
+    ).toContain('changed!');
+  });
+});
+
+describe('canAppendOnly 判定（含回到底部按钮场景）', () => {
+  it('列表带「回到底部」按钮时仍判为可追加（生产环境按钮常驻 messageList）', () => {
+    setupChatDomShell();
+    seedConversation(2);
+    resetChatRenderKey();
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    // setupMessageListPostRender 已创建 answerScroller 的浮动按钮
+    const btn = list.querySelector('.scroll-to-bottom-btn');
+    expect(btn).not.toBeNull();
+
+    const conv = appState.conversations[0];
+    conv.messages.push({ id: 'm2', role: 'user', content: 'x', timestamp: 3 });
+    conv.updated_at = 3;
+    resetChatRenderKey();
+    refreshChatContent();
+
+    // 快速路径生效：按钮引用保持（未被移除重建）、新消息追加
+    expect(list.querySelector('.scroll-to-bottom-btn')).toBe(btn);
+    const children = [...list.children].filter((el) =>
+      (el as HTMLElement).classList?.contains('message'),
+    );
+    expect(children.length).toBe(3);
+    expect(children[2].getAttribute('data-message-id')).toBe('m2');
+  });
+
+  it('残留问卡等非消息节点 → 不判为可追加', () => {
+    setupChatDomShell();
+    seedConversation(1);
+    resetChatRenderKey();
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const junk = document.createElement('div');
+    junk.className = 'ask-card';
+    list.appendChild(junk);
+
+    const conv = appState.conversations[0];
+    conv.messages.push({ id: 'm1', role: 'user', content: 'x', timestamp: 3 });
+    conv.updated_at = 3;
+    resetChatRenderKey();
+    refreshChatContent();
+    // 慢路径兜底：残留被清理，新消息正常挂载
+    expect(list.querySelector('.ask-card')).toBeNull();
+    expect(
+      list.querySelector('.message[data-message-id="m1"]'),
+    ).not.toBeNull();
+  });
+});
+
+describe('管理页 stash 期间指纹冻结（退出后 diff 补新块）', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    appState.conversations = [];
+    appState.activeConversationId = '';
+    appState.activeConversationSourcePath = null;
+    appState.messageWindowSizeByConversation.clear();
+    appState.runningSessions.clear();
+    appState.pendingAskQuestions.clear();
+    appState.activeToolsBySession.clear();
+    appState.streamingBySession.clear();
+    appState.expandedThinkingBlocks.clear();
+    vi.restoreAllMocks();
+  });
+
+  it('消息列表缺席（stash）期间指纹不更新；恢复后流式新块被 diff 创建', async () => {
+    setupChatDomShell();
+    seedConversation(1);
+    appState.streamingBySession.set('c1', {
+      blocks: [{ type: 'thinking', content: '块A', finalized: false }],
+      thinkingDone: false,
+      currentBlockIdx: 0,
+    });
+    resetChatRenderKey();
+    refreshChatContent();
+    const keyBefore = getLastChatRenderKey();
+    expect(document.querySelector('[data-stream-id="streaming-block-0"]')).not.toBeNull();
+
+    // 模拟管理页 stash：摘走 message-list
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    list.remove();
+
+    // stash 期间流式推进：新增 text 块
+    const state = appState.streamingBySession.get('c1')!;
+    state.blocks.push({ type: 'text', content: '块B', finalized: false });
+    refreshChatContent();
+    // 指纹未被更新（缺席早退，不渲染）
+    expect(getLastChatRenderKey()).toBe(keyBefore);
+
+    // 恢复：挂回 message-list 后刷新 → diff 运行，新块创建
+    document.querySelector<HTMLElement>('.main-content')!.appendChild(list);
+    refreshChatContent();
+    expect(document.querySelector('[data-stream-id="streaming-block-0"]')).not.toBeNull();
+    expect(document.querySelector('[data-stream-id="streaming-block-1"]')).not.toBeNull();
+    expect(getLastChatRenderKey()).not.toBe(keyBefore);
   });
 });

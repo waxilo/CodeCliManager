@@ -158,7 +158,9 @@ export function buildDisplayMessages(conversation: Conversation | undefined): Me
     (appState.pendingUserMessageConvId === appState.activeConversationId || (!appState.pendingUserMessageConvId && !appState.activeConversationId));
   if (pendingBelongsToThisConv && appState.pendingUserMessage && !messages.some((m) => m.role === 'user' && normalizeMessageForCompare(m.content) === normalizeMessageForCompare(appState.pendingUserMessage))) {
     messages.push({
-      id: `pending-user-${Date.now()}`,
+      // 稳定 id：pending 期间多次重建 diff 复用同一节点（每次生成新 id 会导致
+      // 气泡闪烁且快路径永远失配）。内容变化由 messageRenderKey 驱动重建。
+      id: 'pending-user',
       role: 'user',
       content: appState.pendingUserMessage,
       timestamp: Math.floor(Date.now() / 1000),
@@ -269,15 +271,19 @@ export function mergeStreamBlocks(blocks: StreamBlock[]): MergedStreamBlock[] {
   let rawCursor = 0;
   for (const block of blocks) {
     const last = merged[merged.length - 1];
-    if (last && last.type === block.type && (block.type === 'thinking' || block.type === 'text')) {
+    // 相邻同类型块合并；已完成块不与未完成块合并（拆开）——
+    // 否则已渲染 markdown 的 text / 已结束的 thinking 会被新块的未完成态污染回退
+    const sameType = last && last.type === block.type && (block.type === 'thinking' || block.type === 'text');
+    const merges = Boolean(sameType && !(last!.finalized && !block.finalized));
+    if (merges) {
       if (block.type === 'thinking') {
-        last.content = last.content + '\n' + block.content;
-        if (block.durationMs != null) last.durationMs = block.durationMs;
+        last!.content = last!.content + '\n' + block.content;
+        if (block.durationMs != null) last!.durationMs = block.durationMs;
       } else {
-        last.content = last.content + '\n\n' + block.content;
-        last.finalized = Boolean(last.finalized && block.finalized);
+        last!.content = last!.content + '\n\n' + block.content;
       }
-      last.rawEnd = rawCursor;
+      last!.finalized = Boolean(last!.finalized && block.finalized);
+      last!.rawEnd = rawCursor;
     } else {
       merged.push({
         type: block.type,
@@ -299,10 +305,7 @@ export function mergeStreamBlocks(blocks: StreamBlock[]): MergedStreamBlock[] {
  * 内容变化（renderKey 变）只重建该块，避免整列表重建导致的闪烁。
  * 根节点带 data-stream-id：与历史消息的 data-message-id 一并被 applyChatDom 索引。
  */
-export function renderStreamingBlocksChunks(
-  blocks: StreamBlock[],
-  thinkingDone: boolean,
-): RenderedMessageChunk[] {
+export function renderStreamingBlocksChunks(blocks: StreamBlock[]): RenderedMessageChunk[] {
   const merged = mergeStreamBlocks(blocks);
   return merged.map((block, i) => {
     const id = `streaming-block-${i}`;
@@ -310,8 +313,10 @@ export function renderStreamingBlocksChunks(
     // 修复旧实现「多个思考块共享 sessionId 展开态」的问题
     const thinkingExpanded = appState.expandedThinkingBlocks.has(id);
     if (block.type === 'thinking') {
-      const label = thinkingDone ? '思考过程' : '思考中...';
-      const isStreaming = !thinkingDone;
+      // per-block finalized：一轮多个思考块互不影响（thinkingDone 全局字段已弃用）
+      const finalized = Boolean(block.finalized);
+      const label = finalized ? '思考过程' : '思考中...';
+      const isStreaming = !finalized;
       const html = `<div class="message assistant thinking-msg${isStreaming ? ' streaming' : ''}" data-stream-id="${escapeHtml(id)}">
         <div class="message-content">${renderThinkingDetails(
           block.content,
@@ -324,14 +329,14 @@ export function renderStreamingBlocksChunks(
       </div>`;
       return {
         id,
-        // renderKey 不含内容：高频 delta 由 syncStreamingBlocksInPlace 就地更新 <pre>，
-        // diff 只在该块「思考结束 / 展开态」变化时重建（重建时内容已在 html 里）。
-        renderKey: `thinking|${thinkingDone ? 'd' : 's'}|${thinkingExpanded ? 'e' : 'c'}`,
+        // renderKey 恒定：内容/结束态/展开态全部由 syncStreamingBlocksInPlace 就地更新，
+        // diff 只响应结构变化（新增块）——finalize 不重建节点，快路径全程生效。
+        renderKey: 'thinking',
         html,
       };
     }
-    // text 块：diff 时按 finalized 状态复用节点（renderKey 不含内容——
-    // 高频 delta 由 syncStreamingBlocksInPlace 就地追加文本，避免每帧重建 DOM）。
+    // text 块：diff 时按恒定 renderKey 复用节点——高频 delta 与 finalize（markdown 渲染）
+    // 均由 syncStreamingBlocksInPlace 就地完成，避免每帧/结束态重建 DOM。
     // 内容经根节点 data-stream-id 定位，挂载完成后由同步函数填充。
     const html = `<div class="message assistant${block.finalized ? '' : ' streaming'}" data-stream-id="${escapeHtml(id)}">
       <div class="message-content">
@@ -340,7 +345,7 @@ export function renderStreamingBlocksChunks(
     </div>`;
     return {
       id,
-      renderKey: `text|${block.finalized ? 'f' : 'p'}`,
+      renderKey: 'text',
       html,
     };
   });
@@ -390,8 +395,10 @@ export function renderLiveToolChunks(tools: ActiveToolState[]): RenderedMessageC
     return {
       id,
       anchorBlockIndex: tool.blockIndexAtStart,
-      // renderKey 含状态/结果/输入/进度签名：任一变化 → 重建该卡（进度行实时更新）
-      renderKey: `tool|${tool.status}|${(tool.toolResult || '').length}|${Object.keys(tool.input).length}|${tool.progress?.totalTokens ?? 0}:${tool.progress?.toolUses ?? 0}:${tool.progress?.durationMs ?? 0}`,
+      // renderKey 只含结构性字段（状态/结果/输入）：进度字段（tokens/工具次数/耗时）
+      // 由 syncStreamingBlocksInPlace 就地更新进度行——进度 tick 不触发节点重建，
+      // 快路径（纯追加）在工具活跃期保持生效，滚动不被摘除/重插干扰。
+      renderKey: `tool|${tool.status}|${(tool.toolResult || '').length}|${Object.keys(tool.input).length}`,
       html,
     };
   });

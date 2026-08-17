@@ -37,6 +37,11 @@ export function setupMessageListPostRender(container: HTMLElement): void {
       if (!id) return;
       if ((details as HTMLDetailsElement).open) {
         appState.expandedThinkingBlocks.add(id);
+        // 展开思考块 = 用户在看思考内容：暂停父消息列表自动跟随，
+        // 避免下一 tick 置底把正在看的思考块拉走
+        if (appState.answerScroller) {
+          appState.answerScroller.autoScroll = false;
+        }
       } else {
         appState.expandedThinkingBlocks.delete(id);
       }
@@ -125,6 +130,9 @@ let lastCommittedChatRenderKey = '';
 export function resetChatRenderKey(): void {
   lastChatRenderKey = '';
   lastCommittedChatRenderKey = '';
+  // 会话实例/顶栏指纹一并重置：管理页 stash 恢复、测试隔离时避免误判「未切会话」
+  lastDiffSessionKey = '';
+  lastTopbarHtml = '';
 }
 
 /** 最近一次 refreshChatContent 计算并写入 DOM 的内容指纹（'' = 尚未渲染 / 已被 reset） */
@@ -158,18 +166,15 @@ function pendingAskSignature(sid: string): string {
   return '';
 }
 
-/** 当前会话流式状态的轻量签名：块数 + 各块内容长度/时长/完成标记 + 思考结束标记 + 工具卡状态/进度。
+/** 当前会话流式状态的轻量签名：块数 + 各块内容长度/时长/完成标记 + 工具卡状态/进度。
  *  并入 chatRenderKey——流式 delta / 工具转态 / 子代理进度时内容变化，统一 diff 需感知。 */
 function streamingSignature(): string {
   const sid = appState.activeConversationId || 'pending';
   const state = appState.streamingBySession.get(sid);
   const blocksSig = state
-    ? (state.thinkingDone ? 'D' : 'd') +
-      state.blocks
+    ? state.blocks
         .map((b) =>
-          b.type === 'text'
-            ? `t:${b.content.length}:${b.durationMs ?? 0}:${b.finalized ? 'f' : 'p'}`
-            : `h:${b.content.length}:${b.durationMs ?? 0}`,
+          `${b.type[0]}:${b.content.length}:${b.durationMs ?? 0}:${b.finalized ? 'f' : 'p'}`,
         )
         .join(',')
     : '';
@@ -334,6 +339,38 @@ function syncMountSlots(messageList: HTMLElement, slots: ChatMountSlot[]): void 
   }
 }
 
+/**
+ * 流式 tick 的典型形态是「已挂载节点前缀完全一致 + 末尾新增」。
+ * 此时走纯追加挂载：不摘除/重插任何现有节点，scrollTop 由浏览器自然保持，
+ * 无需 capture/restore 硬拉回（remove-all 再重插会 clamp 滚动位置，是跳动残余来源）。
+ * 条件：无「加载更早」头部、列表里除消息节点外无残留、现有节点按序与新序列前缀匹配、
+ * 且新增数量不多（同步 append 不阻塞主线程）。
+ */
+export function canAppendOnly(messageList: HTMLElement, chunks: RenderedMessageChunk[], loadEarlier: string): boolean {
+  if (loadEarlier !== '') return false;
+  // 列表里除消息节点外只允许「回到底部」按钮（answerScroller 挂在 messageList 内），
+  // 其余残留（问卡等）会使追加位置不干净
+  for (const child of messageList.children) {
+    const cls = (child as HTMLElement).classList;
+    if (cls?.contains('message') || cls?.contains('scroll-to-bottom-btn')) continue;
+    return false;
+  }
+  const existing = messageList.querySelectorAll<HTMLElement>(
+    '.message[data-stream-id], .message[data-message-id]',
+  );
+  if (existing.length > chunks.length) return false; // 有删除 → 不能纯追加
+  if (chunks.length - existing.length > CHUNK_BATCH) return false; // 新增太多 → 走分块
+  let i = 0;
+  for (const el of existing) {
+    const chunk = chunks[i];
+    if (!chunk) return false;
+    const id = el.dataset.streamId || el.dataset.messageId;
+    if (id !== chunk.id || el.dataset.renderKey !== chunk.renderKey) return false;
+    i += 1;
+  }
+  return true;
+}
+
 /** 异步分块挂载（仅新建节点）：批间让出主线程，完成后统一后处理 + 滚动恢复 */
 function asyncMountCreateSlots(
   messageList: HTMLElement,
@@ -408,12 +445,18 @@ function applyChatDom(
   // 重建前记录滚动状态：输出结束时若用户在阅读上方消息，重建后不应强制跳回底部
   const scrollSnap = captureScrollState();
   const gen = ++mountGeneration;
+  // 注意：异步分块挂载进行中再触发新一轮重建会清空并丢弃旧队列回调——
+  // 当前所有注册方（流式块恢复等）每次重建都会重新注册，丢旧队列无实际影响；
+  // 未来若有「仅某次挂载后执行一次」的注册方需改为继承旧队列。
   mountedCallbacks = [];
   mountedCallbacksIdle = false;
 
-  // 空状态：无消息时
+  // 空状态：无消息时。保留「回到底部」按钮（answerScroller 常驻 messageList，
+  // 直接 innerHTML 覆盖会销毁它且 initAnswerScroller 的元素守卫不会再重建）。
   if (chunks.length === 0) {
+    const bottomBtn = messageList.querySelector('.scroll-to-bottom-btn');
     messageList.innerHTML = loadEarlier + (empty ?? '');
+    if (bottomBtn) messageList.appendChild(bottomBtn);
     setupMessageListPostRender(messageList);
     restoreScrollState(scrollSnap);
     fireMountedCallbacks();
@@ -442,6 +485,28 @@ function applyChatDom(
     }
   }
 
+  // ── 快速路径：纯追加挂载（现有节点前缀匹配时）——滚动位置自然保持 ──
+  // 必须在 remove-all 之前判断：慢路径会摘除全部节点（scrollTop 被 clamp）。
+  if (canAppendOnly(messageList, chunks, loadEarlier)) {
+    const existingCount = messageList.querySelectorAll<HTMLElement>(
+      '.message[data-stream-id], .message[data-message-id]',
+    ).length;
+    for (let i = existingCount; i < chunks.length; i++) {
+      const el = createElementFromHtml(chunks[i].html);
+      if (el) {
+        el.dataset.renderKey = chunks[i].renderKey;
+        messageList.appendChild(el);
+      }
+    }
+    // 追加后恢复滚动意图：用户在底部（autoScroll）→ 跟随新内容置底；
+    // 用户已上滑 → restorePosition 设为旧值（追加未触碰 scrollTop，等同无操作）。
+    // 与慢路径一致，保证「底部跟随」在流式输出时不间断。
+    restoreScrollState(scrollSnap);
+    setupMessageListPostRender(messageList);
+    fireMountedCallbacks();
+    return;
+  }
+
   // 旧节点不再需要：先摘除（复用节点在挂载时被重新 append，顺序由 slots 决定）
   existingById.forEach((el) => {
     if (el.parentElement === messageList) el.remove();
@@ -451,9 +516,12 @@ function applyChatDom(
   messageList.querySelector('.conversation-empty-state')?.remove();
   // 流式块 / 实时工具卡已纳入统一 diff（data-stream-id 索引）：不在新序列中的自然被摘除，
   // 不再单独清理，避免「清掉 → 重建」的闪烁。
-  // 其余非消息节点（问卡残留等）一并清掉，保证列表结构纯净
+  // 其余非消息节点（问卡残留等）一并清掉，保证列表结构纯净；
+  // 「回到底部」按钮（answerScroller 常驻 messageList）保留。
   Array.from(messageList.children).forEach((child) => {
-    if (!(child as HTMLElement).classList?.contains('message')) child.remove();
+    const cls = (child as HTMLElement).classList;
+    if (cls?.contains('message') || cls?.contains('scroll-to-bottom-btn')) return;
+    child.remove();
   });
 
   if (loadEarlier) {
@@ -526,6 +594,9 @@ function interleaveStreamAndToolChunks(
   return [...chunks, ...head, ...out, ...tail];
 }
 
+/** 最近一次 diff 挂载的会话实例 key：切会话时旧会话的滚动位置/跟随状态不应带到新会话 */
+let lastDiffSessionKey = '';
+
 /**
  * 重建聊天区内容。返回是否真正重建了 DOM（false = 指纹未变被跳过），
  * 供调度器执行器决定是否需要重跑流式块恢复。
@@ -538,6 +609,18 @@ export function refreshChatContent(): boolean {
   // 切会话后先重置消息窗口，再算指纹，避免「上一会话的扩展窗口」导致多一次冗余重建
   ensureMessageWindowForActiveConversation();
 
+  // 切会话：先置底（capture 到 autoScroll=true → restore 走 scrollToBottom），
+  // 避免把旧会话的阅读位置/关闭跟随状态恢复到新会话列表
+  const sessionKey = conversationInstanceKey(
+    appState.activeConversationId || 'pending',
+    appState.activeConversationSourcePath,
+  );
+  const sessionChanged = sessionKey !== lastDiffSessionKey;
+  lastDiffSessionKey = sessionKey;
+  if (sessionChanged) {
+    appState.answerScroller?.scrollToBottom();
+  }
+
   // 内容指纹未变（连点同一会话 / 重复消息事件）：跳过昂贵的内联 HTML 重建，
   // 流式块也得以保留；只轻量同步发送按钮状态。
   const key = chatRenderKey(conversation);
@@ -547,16 +630,18 @@ export function refreshChatContent(): boolean {
   }
   const committedKey = committedChatRenderKey(conversation);
   const committedChanged = committedKey !== lastCommittedChatRenderKey;
-  lastChatRenderKey = key;
-  lastCommittedChatRenderKey = committedKey;
 
   // 管理页停留期间消息列表被摘下：仅工具/流式转态（已提交内容未变）时，
   // 渲染结果无处落盘纯属浪费，直接跳过整条渲染管线；已提交内容变化时仍渲染入缓存，
   // 让退出 contentChanged 路径走缓存命中。
+  // 注意：此早退**不更新指纹**——stash 期间流式推进的签名保留为"未渲染"状态，
+  // 退出后指纹不等 → diff 重建补上 stash 期间新增的块/工具卡（否则新块永久缺失）。
   if (!document.querySelector('#message-list') && !committedChanged) {
     updateSendButtonState();
     return false;
   }
+  lastChatRenderKey = key;
+  lastCommittedChatRenderKey = committedKey;
 
   // 按会话渲染缓存命中：回切 A 时直接复用上次渲染的 HTML 字符串，跳过整条渲染管线
   const cacheKey = conversationInstanceKey(
@@ -601,7 +686,7 @@ export function refreshChatContent(): boolean {
   const sid = appState.activeConversationId || 'pending';
   const streamState = appState.streamingBySession.get(sid);
   const streamChunks = streamState
-    ? renderStreamingBlocksChunks(streamState.blocks, streamState.thinkingDone)
+    ? renderStreamingBlocksChunks(streamState.blocks)
     : [];
   const tools = appState.activeToolsBySession.get(sid);
   const toolChunks = tools && tools.size > 0 ? renderLiveToolChunks([...tools.values()]) : [];

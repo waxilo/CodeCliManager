@@ -4,7 +4,18 @@ export function getThinkingScroller(el: HTMLElement, id: string): ScrollControll
   let sc = appState.thinkingScrollers.get(id);
   if (!sc || sc.el !== el) {
     sc?.destroy();
-    sc = new ScrollController(el, { resumePx: 20, leavePx: 80, stopWheelPropagation: true });
+    sc = new ScrollController(el, {
+      resumePx: 20,
+      stopWheelPropagation: true,
+      // 思考块滚动被拦截（不冒泡到父容器），父容器感知不到用户在看思考块、
+      // 自动跟随一直保持 → 每 tick 置底把思考块拉走。用户滚动思考块时
+      // 同步关闭父消息列表的自动跟随，避免「自动跳来跳去」。
+      onUserScroll: () => {
+        if (appState.answerScroller) {
+          appState.answerScroller.autoScroll = false;
+        }
+      },
+    });
     appState.thinkingScrollers.set(id, sc);
   }
   return sc;

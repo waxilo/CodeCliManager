@@ -122,7 +122,8 @@ export interface SessionUsageUpdatedPayload {
 export interface StreamBlock {
   type: 'thinking' | 'text';
   content: string;
-  /** text 块结束后才执行完整 Markdown 渲染 */
+  /** text 块结束后才执行完整 Markdown 渲染；thinking 块结束后展示「思考过程」标题。
+   *  per-block：一轮多个思考块互不影响（thinkingDone 全局字段仅作兼容保留） */
   finalized?: boolean;
   /** 思考块时长（ms）：后端 thinking_end 下发，展示在思考块标题 */
   durationMs?: number;

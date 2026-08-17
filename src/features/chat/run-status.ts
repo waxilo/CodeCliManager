@@ -88,7 +88,7 @@ export function getSessionRunStatus(sessionId: string): RunStatusInfo | null {
     if (lastText && !lastText.finalized) {
       return { status: '输入中…', elapsedMs, busy: true };
     }
-    if (!streaming.thinkingDone && streaming.blocks.some((b) => b.type === 'thinking')) {
+    if (streaming.blocks.some((b) => b.type === 'thinking' && !b.finalized)) {
       return { status: '思考中…', elapsedMs, busy: true };
     }
   }

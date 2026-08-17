@@ -313,10 +313,11 @@ export function exitManagementView(): boolean {
     resetChatRenderKey();
     scheduleUiRefresh({ chat: true, sidebar: true });
   } else {
-    // 内容未变：保留挂回的 DOM，不重建聊天区。
-    // 仅当会话仍在流式时增量恢复流式块（离开期间可能持续推进）。
-    // 进行中子代理（Task）卡不在主流程，由右侧子代理清单栏独立同步，无需此处增量更新。
-    scheduleUiRefresh({ sidebar: true });
+    // 内容未变：保留挂回的 DOM，不强制整列表重建。
+    // 仍调度一次 chat 刷新：P1 修复后缺席期间指纹不更新，流式/工具结构若有推进
+    // → 指纹不等 → 键控 diff 补上 stash 期间新增的块/工具卡（复用节点，非 innerHTML）；
+    // 完全无变化 → 指纹相等 → refreshChatContent 早退，零成本。
+    scheduleUiRefresh({ chat: true, sidebar: true });
     const sid = appState.activeConversationId;
     if (sid && appState.streamingBySession.has(sid)) {
       refreshStreamingUI(sid);

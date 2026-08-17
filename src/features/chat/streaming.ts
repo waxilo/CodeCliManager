@@ -29,6 +29,7 @@ import {
 import { ScrollController, scheduleUiRefresh } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
 import { mergeStreamBlocks } from './render-chat';
+import { formatTokenCount } from './context-indicator';
 
 const TOOL_CHUNK_KINDS = new Set([
   'tool_use_start',
@@ -346,6 +347,20 @@ export function getStreamingState(sessionId: string): StreamingState {
 export function clearStreamingState(sessionId: string) {
   appState.streamingBySession.delete(sessionId);
   appState.pendingTextDelta.delete(sessionId);
+  // 流式块 id 是位置键（streaming-block-N）：跨轮/跨会话会复用同名键，
+  // 清理展开态，避免下一轮/下一会话的新块被旧展开状态自动展开
+  for (const key of [...appState.expandedThinkingBlocks]) {
+    if (key.startsWith('streaming-block-')) {
+      appState.expandedThinkingBlocks.delete(key);
+    }
+  }
+  // 清理已消失块的 thinking scroller（destroy 幂等，map 不随会话增长）
+  for (const [key, sc] of [...appState.thinkingScrollers]) {
+    if (key.startsWith('streaming-block-')) {
+      sc.destroy();
+      appState.thinkingScrollers.delete(key);
+    }
+  }
   removeStreamingElements(sessionId);
   const refresh = appState.streamRefreshBySession.get(sessionId);
   if (refresh?.rafId !== null && refresh?.rafId !== undefined) {
@@ -611,8 +626,11 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
         // 后端下发 {"duration_ms": N}：记录到当前 thinking 块，标题展示思考时长
         const durationMs = parseChunkJson(content)?.duration_ms;
         const block = state.blocks[state.currentBlockIdx];
-        if (block && block.type === 'thinking' && typeof durationMs === 'number' && durationMs > 0) {
-          block.durationMs = durationMs;
+        if (block && block.type === 'thinking') {
+          block.finalized = true;
+          if (typeof durationMs === 'number' && durationMs > 0) {
+            block.durationMs = durationMs;
+          }
         }
       }
       if (isActive) refreshStreamingUI(sid);
@@ -838,17 +856,20 @@ export function syncStreamingBlocksInPlace(sessionId: string): void {
     if (!existingEl) return; // 尚未挂载（diff 下一轮创建，届时挂载完成后再次同步）
 
     if (block.type === 'thinking') {
-      const label = state.thinkingDone ? '思考过程' : '思考中...';
-      const isStreaming = !state.thinkingDone;
+      const finalized = Boolean(block.finalized);
+      const label = finalized ? '思考过程' : '思考中...';
+      const isStreaming = !finalized;
       const pre = existingEl.querySelector('.thinking-content pre');
       const summary = existingEl.querySelector('.thinking-summary .thinking-label-text');
       if (pre) pre.textContent = block.content;
       if (summary) summary.textContent = label;
       const durationEl = existingEl.querySelector('.thinking-summary .thinking-duration');
-      if (!isStreaming && durationEl && block.durationMs) {
-        durationEl.textContent = formatDuration(block.durationMs);
+      if (!isStreaming && durationEl) {
+        durationEl.textContent = block.durationMs ? formatDuration(block.durationMs) : '思考完成';
       }
       existingEl.querySelector('.thinking-block')?.classList.toggle('streaming-active', isStreaming);
+      // 结束态就地移除消息的 streaming 类（renderKey 恒定，diff 不再重建）
+      existingEl.classList.toggle('streaming', isStreaming);
       const scrollEl = existingEl.querySelector<HTMLElement>('.thinking-content-scroll');
       if (scrollEl) getThinkingScroller(scrollEl, blockId).onNewContent();
     } else {
@@ -858,8 +879,31 @@ export function syncStreamingBlocksInPlace(sessionId: string): void {
         initCodeCopyButtons(existingEl);
         scheduleHighlighting(existingEl);
       }
+      // 结束态就地移除 streaming 类（renderKey 恒定，diff 不再重建）
+      existingEl.classList.toggle('streaming', !block.finalized);
     }
   });
+
+  // 就地更新运行中 Task/Agent 卡的进度行（tokens · 工具次数 · 耗时）：
+  // 工具卡 renderKey 不含进度字段，进度 tick 不重建节点（快路径保持生效）
+  const tools = appState.activeToolsBySession.get(sessionId);
+  if (tools) {
+    for (const [id, tool] of tools) {
+      if (tool.toolName !== 'Task' && tool.toolName !== 'Agent') continue;
+      const cardEl = messageList.querySelector<HTMLElement>(
+        `[data-stream-id="live-tool-${id}"]`,
+      );
+      if (!cardEl) continue;
+      const metaEl = cardEl.querySelector('.live-subagent-progress .tool-meta');
+      if (!metaEl) continue;
+      const parts: string[] = [];
+      if (tool.progress?.totalTokens) parts.push(`${formatTokenCount(tool.progress.totalTokens)} tokens`);
+      if (tool.progress?.toolUses) parts.push(`${tool.progress.toolUses} 次工具`);
+      if (tool.progress?.durationMs) parts.push(formatDuration(tool.progress.durationMs));
+      metaEl.textContent = parts.join(' · ');
+    }
+  }
+
   // Answer 区域自动置底
   appState.answerScroller?.onNewContent();
 }
@@ -902,7 +946,6 @@ export function initAnswerScroller(): void {
 
   appState.answerScroller = new ScrollController(messageList, {
     resumePx: 20,
-    leavePx: 80,
     createButton: true,
   });
 }

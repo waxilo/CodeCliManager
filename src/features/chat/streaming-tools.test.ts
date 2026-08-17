@@ -189,20 +189,49 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     expect(blockAfter.querySelector('.markdown-body')!.textContent).toBe('hello world');
   });
 
-  it('思考块结束：renderKey 变化重建节点，内容与时长保留', () => {
+  it('思考块结束：finalize 就地更新，节点复用不重建，内容与时长保留', () => {
     appState.streamingBySession.set(SID, {
       blocks: [{ type: 'thinking', content: '先想后做', durationMs: 1234 }],
+      thinkingDone: false,
+      currentBlockIdx: 0,
+    });
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    expect(block.classList.contains('streaming')).toBe(true);
+
+    // 思考结束（per-block finalized）：renderKey 恒定 → 节点复用，仅就地更新外观
+    const state = appState.streamingBySession.get(SID)!;
+    state.blocks[0].finalized = true;
+    refreshChatContent();
+    const blockAfter = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    expect(blockAfter).toBe(block); // 未重建
+    expect(blockAfter.classList.contains('streaming')).toBe(false);
+    expect(blockAfter.textContent).toContain('先想后做');
+    expect(blockAfter.textContent).toContain('2s');
+    // 思考块默认折叠（DSH 样式）
+    expect(blockAfter.querySelector('.thinking-block')!.hasAttribute('open')).toBe(false);
+  });
+
+  it('text 块 finalize：节点复用不重建，markdown 就地渲染', () => {
+    appState.streamingBySession.set(SID, {
+      blocks: [{ type: 'text', content: '**重点**内容', finalized: false }],
       thinkingDone: true,
       currentBlockIdx: 0,
     });
     refreshChatContent();
     const list = document.querySelector<HTMLElement>('#message-list')!;
     const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
-    expect(block.classList.contains('streaming')).toBe(false);
-    expect(block.textContent).toContain('先想后做');
-    expect(block.textContent).toContain('2s');
-    // 思考块默认折叠（DSH 样式）
-    expect(block.querySelector('.thinking-block')!.hasAttribute('open')).toBe(false);
+    expect(block.classList.contains('streaming')).toBe(true);
+
+    // finalize：renderKey 恒定 → 节点复用；markdown 就地渲染 + streaming 类移除
+    const state = appState.streamingBySession.get(SID)!;
+    state.blocks[0].finalized = true;
+    refreshChatContent();
+    const blockAfter = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    expect(blockAfter).toBe(block);
+    expect(blockAfter.classList.contains('streaming')).toBe(false);
+    expect(blockAfter.querySelector('.markdown-body')!.innerHTML).toContain('<strong>重点</strong>');
   });
 
   it('syncStreamingBlocksInPlace 幂等：text 块重复同步不重复追加', () => {
@@ -275,5 +304,57 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     const active = appState.activeToolsBySession.get(SID);
     expect(active).toBeDefined();
     expect(active!.get('a1')!.status).toBe('running');
+  });
+});
+
+describe('per-block finalized：一轮多个思考块互不影响', () => {
+  beforeEach(() => {
+    setupShell();
+    vi.restoreAllMocks();
+  });
+
+  it('thinking1 已完成 + thinking2 进行中：各自标签/样式独立', () => {
+    // 一轮 [thinking1 → tool → thinking2]：thinking1 已结束，thinking2 仍在流
+    appState.streamingBySession.set(SID, {
+      blocks: [
+        { type: 'thinking', content: '第一段思考', finalized: true, durationMs: 800 },
+        { type: 'thinking', content: '第二段思考', finalized: false },
+      ],
+      thinkingDone: false,
+      currentBlockIdx: 1,
+    });
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const b0 = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    const b1 = list.querySelector('[data-stream-id="streaming-block-1"]')!;
+    // thinking1：完成态（思考过程 + 时长 + 无 streaming 类）
+    expect(b0.textContent).toContain('思考过程');
+    expect(b0.textContent).toContain('800ms');
+    expect(b0.classList.contains('streaming')).toBe(false);
+    // thinking2：流式态（思考中 + streaming 类）
+    expect(b1.textContent).toContain('思考中');
+    expect(b1.classList.contains('streaming')).toBe(true);
+  });
+
+  it('text 已完成块不与未完成块合并（markdown 不回退）', () => {
+    // text1 已完成（markdown 已渲染）+ 相邻新 text2 未完成 → 拆成两块
+    appState.streamingBySession.set(SID, {
+      blocks: [
+        { type: 'text', content: '**已格式化**内容', finalized: true },
+        { type: 'text', content: '后续未完成', finalized: false },
+      ],
+      thinkingDone: true,
+      currentBlockIdx: 1,
+    });
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    // 两个独立块：block-0 保持 markdown 渲染，block-1 纯文本流式
+    const b0 = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    const b1 = list.querySelector('[data-stream-id="streaming-block-1"]')!;
+    expect(b0).not.toBeNull();
+    expect(b1).not.toBeNull();
+    expect(b0.querySelector('.markdown-body')!.innerHTML).toContain('<strong>已格式化</strong>');
+    expect(b0.classList.contains('streaming')).toBe(false);
+    expect(b1.classList.contains('streaming')).toBe(true);
   });
 });
