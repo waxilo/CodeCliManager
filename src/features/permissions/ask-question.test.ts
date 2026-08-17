@@ -140,3 +140,46 @@ describe('syncPendingAskToInteractionHost（待问答卡片钉在输入框上方
     expect(() => syncPendingAskToInteractionHost()).not.toThrow();
   });
 });
+
+describe('showQuestionDialog（全自动模式自动回答）', () => {
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('auto 模式：不弹卡，自动选择每个问题的第一个选项', async () => {
+    localStorage.setItem('codemanager-permission-mode', 'auto');
+    const { showQuestionDialog } = await import('./ask-question');
+    const parsed = {
+      questions: [
+        { question: 'Q1', header: undefined, options: [{ label: 'A1' }, { label: 'A2' }], multiSelect: false },
+        { question: 'Q2', header: undefined, options: [{ label: 'B1' }], multiSelect: false },
+      ],
+    };
+    const result = await showQuestionDialog(
+      { requestId: 'req-auto', conversationId: 'c1', toolName: 'AskUserQuestion', input: {} },
+      parsed,
+    );
+    expect(result.action).toBe('submit');
+    if (result.action === 'submit') {
+      expect(result.answers).toEqual({ Q1: 'A1', Q2: 'B1' });
+    }
+  });
+
+  it('ask 模式：不自动回答（返回挂起的 Promise，由用户交互完成）', async () => {
+    localStorage.setItem('codemanager-permission-mode', 'ask');
+    const { showQuestionDialog } = await import('./ask-question');
+    const parsed = {
+      questions: [
+        { question: 'Q1', header: undefined, options: [{ label: 'A1' }], multiSelect: false },
+      ],
+    };
+    let settled = false;
+    const p = showQuestionDialog(
+      { requestId: 'req-ask', conversationId: 'c1', toolName: 'AskUserQuestion', input: {} },
+      parsed,
+    );
+    p.then(() => { settled = true; });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(settled).toBe(false);
+  });
+});

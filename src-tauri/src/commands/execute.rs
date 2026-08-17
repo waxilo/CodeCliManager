@@ -486,17 +486,18 @@ pub fn respond_tool_permission(
 }
 
 /// 同步前端权限模式到后端，并更新所有已运行的 Claude Code 进程。
+/// auto（全部跳过）= silent + 前端自动回答互动问答：后端同样按静默授权处理。
 #[tauri::command]
 pub fn set_permission_mode(mode: String) -> Result<(), String> {
     match mode.trim().to_lowercase().as_str() {
-        "silent" => {
+        "silent" | "auto" => {
             set_silent_permission_mode(true);
             allow_pending_non_question_permissions();
         }
         "ask" => {
             set_silent_permission_mode(false);
         }
-        other => return Err(format!("未知权限模式: {other}（应为 ask 或 silent）")),
+        other => return Err(format!("未知权限模式: {other}（应为 ask / silent / auto）")),
     }
     sync_active_permission_mode();
     Ok(())

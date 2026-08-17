@@ -70,12 +70,19 @@ export function bindPermissionModeBarEvents(): void {
 
   bar.querySelectorAll<HTMLInputElement>('input[name="permission-mode"]').forEach((input) => {
     input.addEventListener('change', () => {
-      if (input.value !== 'ask' && input.value !== 'silent') return;
-      setPermissionMode(input.value);
+      const value = input.value as 'ask' | 'silent' | 'auto';
+      if (value !== 'ask' && value !== 'silent' && value !== 'auto') return;
+      setPermissionMode(value);
       bar.querySelectorAll('.permission-mode-chip').forEach((el) => {
         el.classList.toggle('is-selected', el.querySelector('input')?.value === input.value);
       });
-      showCopyToastMsg(input.value === 'silent' ? '已开启静默授权' : '已恢复询问模式（同工具只问一次）');
+      if (value === 'silent') {
+        showCopyToastMsg('已开启静默授权（自动允许工具请求）');
+      } else if (value === 'auto') {
+        showCopyToastMsg('已开启全自动（自动允许工具 + 自动回答互动问答）');
+      } else {
+        showCopyToastMsg('已恢复询问模式（同工具只问一次）');
+      }
     });
   });
 }

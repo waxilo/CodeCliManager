@@ -230,6 +230,10 @@ export function renderInputComposerHtml(): string {
               <input type="radio" name="permission-mode" value="silent"${mode === 'silent' ? ' checked' : ''} />
               <span>静默授权</span>
             </label>
+            <label class="permission-mode-chip${mode === 'auto' ? ' is-selected' : ''}" title="跳过所有权限确认与互动问答，全自动执行">
+              <input type="radio" name="permission-mode" value="auto"${mode === 'auto' ? ' checked' : ''} />
+              <span>全自动</span>
+            </label>
           </div>
           ${renderChatModelPickerHtml()}
         </div>

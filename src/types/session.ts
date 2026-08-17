@@ -159,4 +159,5 @@ export interface PreparedCommand {
   model?: string;
 }
 
-export type PermissionMode = 'ask' | 'silent';
+/** 工具权限模式：ask = 每次询问；silent = 自动允许工具；auto = 跳过所有停顿（含互动问答） */
+export type PermissionMode = 'ask' | 'silent' | 'auto';

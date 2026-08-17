@@ -4,6 +4,7 @@ import type { PermissionRequestPayload, AskUserQuestionOption, AskUserQuestionIt
 import { syncMessageInputPlaceholder } from '../chat/session-context';
 import { renderAskUserQuestionCardHtml } from '../chat/render-messages';
 import { getInteractionHost } from './interaction-panel';
+import { getPermissionMode } from './permission-mode';
 export function parseAskUserQuestionInput(input: unknown): AskUserQuestionInput | null {
   if (!input || typeof input !== 'object') return null;
   const questionsRaw = (input as { questions?: unknown }).questions;
@@ -41,11 +42,20 @@ export function parseAskUserQuestionInput(input: unknown): AskUserQuestionInput 
 /**
  * AskUserQuestion：可点选卡片钉在输入框上方（#interaction-host）
  * 「自定义回答」是卡片内始终可见的输入框，直接填写即作为答案，无需先勾选「其他」
+ * 「全自动」模式：不弹卡，自动选择每个问题的第一个选项并立即提交
  */
 export function showQuestionDialog(
   payload: PermissionRequestPayload,
   parsed: AskUserQuestionInput,
 ): Promise<QuestionDialogResult> {
+  if (getPermissionMode() === 'auto') {
+    const answers: Record<string, string> = {};
+    for (const q of parsed.questions) {
+      answers[q.question] = q.options[0]?.label ?? '';
+    }
+    return Promise.resolve({ action: 'submit', answers });
+  }
+
   return new Promise((resolve) => {
     const askKey = payload.conversationId || 'pending';
     let settled = false;

@@ -9,7 +9,7 @@ export function normalizeModelKey(model?: string | null): string {
 
 export function getPermissionMode(): PermissionMode {
   const stored = localStorage.getItem(PERMISSION_MODE_STORAGE_KEY);
-  return stored === 'silent' ? 'silent' : 'ask';
+  return stored === 'silent' || stored === 'auto' ? stored : 'ask';
 }
 
 export function setPermissionMode(mode: PermissionMode): void {
