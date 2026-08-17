@@ -10,6 +10,7 @@ export {
   shouldShowClaudeUpdateBadge,
   getClaudeUpdateButtonTitle,
   renderClaudeUpdateIcon,
+  setupClaudeUpdateProgressListener,
 } from './claude-update';
 export {
   shouldShowAppUpdateBadge,

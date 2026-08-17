@@ -275,6 +275,23 @@
   line-height: 1.45;
 }
 
+/* claude 更新实时输出行（进度反馈：npm 下载 / 安装器阶段） */
+.claude-update-progress-line {
+  margin: 2px 0 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  background: var(--color-bg-base);
+  border: 1px solid var(--color-composer-border);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+  max-height: 60px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .claude-update-popover-actions {
   display: flex;
   flex-wrap: wrap;
@@ -864,3 +881,32 @@ a.claude-update-action {
   line-height: 1.5;
 }
 
+
+/* claude 更新弹层：npm 镜像输入行 */
+.claude-update-registry-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 10px;
+}
+
+.claude-update-registry-row label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.claude-update-registry-row input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 8px;
+  border: 1px solid var(--color-composer-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-base);
+  color: var(--color-text);
+  font-size: 12px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.claude-update-registry-row input:disabled {
+  opacity: 0.6;
+}

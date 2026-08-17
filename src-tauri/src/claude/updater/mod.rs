@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use tauri::{AppHandle, Emitter};
 
 use crate::claude::runtime::{apply_cli_runtime_env, resolve_claude_executable};
 use crate::session::force_kill_process_tree;
@@ -297,6 +298,92 @@ pub async fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
     }
 }
 
+/// 等待子进程完成：实时转发 stdout/stderr 每行给前端（claude-update-progress 事件），
+/// 附带总超时与「无输出 stall」检测（120 秒无新输出即中断——npm 网络挂起等场景
+/// 不必等满 300/600 秒）。返回（退出状态，合并输出文本）。
+pub(crate) fn run_update_child_with_progress(
+    app: &AppHandle,
+    label: &str,
+    timeout: Duration,
+    mut child: Child,
+) -> Result<(std::process::ExitStatus, String), String> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let mut spawn_reader = |stream: Option<Box<dyn std::io::Read + Send>>| {
+        if let Some(stream) = stream {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                let reader = std::io::BufReader::new(stream);
+                for line in reader.lines() {
+                    let Ok(line) = line else { break };
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    };
+    spawn_reader(stdout.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>));
+    spawn_reader(stderr.map(|s| Box::new(s) as Box<dyn std::io::Read + Send>));
+    drop(tx);
+
+    let started_at = Instant::now();
+    let mut last_output_at = Instant::now();
+    let mut combined = String::new();
+    loop {
+        // 排空当前可用输出行（非阻塞）
+        while let Ok(line) = rx.try_recv() {
+            last_output_at = Instant::now();
+            let _ = app.emit(
+                "claude-update-progress",
+                serde_json::json!({ "text": line }),
+            );
+            if !line.trim().is_empty() {
+                combined.push_str(&line);
+                combined.push('\n');
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started_at.elapsed() < timeout => {
+                // stall：启动 15 秒后若 120 秒无新输出 → 提前中断（网络挂起）
+                if started_at.elapsed() > Duration::from_secs(15)
+                    && last_output_at.elapsed() > Duration::from_secs(120)
+                {
+                    force_kill_process_tree(&mut child);
+                    let _ = child.wait();
+                    return Err(format!("{label}超过 120 秒无输出，已中断"));
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            Ok(None) => {
+                force_kill_process_tree(&mut child);
+                let _ = child.wait();
+                return Err(format!(
+                    "{label}超时（{} 秒）",
+                    timeout.as_secs()
+                ));
+            }
+            Err(e) => {
+                force_kill_process_tree(&mut child);
+                let _ = child.wait();
+                return Err(format!("等待 {label} 失败: {e}"));
+            }
+        }
+    }
+    // 收尾剩余输出
+    while let Ok(line) = rx.try_recv() {
+        if !line.trim().is_empty() {
+            combined.push_str(&line);
+            combined.push('\n');
+        }
+    }
+    let status = child.wait().map_err(|e| format!("读取 {label} 状态失败: {e}"))?;
+    Ok((status, combined.trim().to_string()))
+}
+
 pub(crate) fn wait_child_with_timeout(
     mut child: Child,
     timeout: Duration,
@@ -452,7 +539,7 @@ pub(crate) fn should_fallback_claude_update(text: &str) -> bool {
 }
 
 /// 在用户可写目录静默执行 `claude update`。
-pub(crate) fn run_claude_update_process(claude_bin: &Path) -> Result<String, String> {
+pub(crate) fn run_claude_update_process(app: &AppHandle, claude_bin: &Path) -> Result<String, String> {
     let mut cmd = Command::new(claude_bin);
     apply_cli_runtime_env(&mut cmd);
     apply_create_no_window(&mut cmd);
@@ -463,9 +550,9 @@ pub(crate) fn run_claude_update_process(claude_bin: &Path) -> Result<String, Str
     let child = cmd
         .spawn()
         .map_err(|e| format!("启动 Claude Code 更新失败（{}）: {}", claude_bin.display(), e))?;
-    let output = wait_child_with_timeout(child, CLAUDE_UPDATE_TIMEOUT, "Claude Code 更新")?;
-    let combined = output_combined_text(&output);
-    if output.status.success() {
+    let (status, combined) =
+        run_update_child_with_progress(app, "Claude Code 更新", CLAUDE_UPDATE_TIMEOUT, child)?;
+    if status.success() {
         Ok(if combined.is_empty() {
             "Claude Code 已更新".to_string()
         } else {
@@ -475,7 +562,7 @@ pub(crate) fn run_claude_update_process(claude_bin: &Path) -> Result<String, Str
         Err(if combined.is_empty() {
             format!(
                 "Claude Code 更新失败（退出码 {}）",
-                output.status.code().unwrap_or(-1)
+                status.code().unwrap_or(-1)
             )
         } else {
             combined
@@ -485,7 +572,7 @@ pub(crate) fn run_claude_update_process(claude_bin: &Path) -> Result<String, Str
 
 /// macOS：通过系统授权对话框提权执行更新（不打开 Terminal）。
 #[cfg(target_os = "macos")]
-pub(crate) fn run_claude_update_elevated_macos(claude_bin: &Path) -> Result<String, String> {
+pub(crate) fn run_claude_update_elevated_macos(app: &AppHandle, claude_bin: &Path) -> Result<String, String> {
     let bin = shell_escape_double_quoted(&claude_bin.display().to_string());
     let shell = format!(
         "do shell script \"\\\"{}\\\" update\" with administrator privileges",
@@ -498,9 +585,13 @@ pub(crate) fn run_claude_update_elevated_macos(claude_bin: &Path) -> Result<Stri
     let child = cmd
         .spawn()
         .map_err(|e| format!("启动系统授权更新失败: {}", e))?;
-    let output = wait_child_with_timeout(child, CLAUDE_UPDATE_TIMEOUT, "系统授权更新")?;
-    let combined = output_combined_text(&output);
-    if output.status.success() {
+    let (status, combined) = run_update_child_with_progress(
+        app,
+        "系统授权更新",
+        CLAUDE_UPDATE_TIMEOUT,
+        child,
+    )?;
+    if status.success() {
         Ok(if combined.is_empty() {
             "Claude Code 已更新（已使用管理员权限）".to_string()
         } else {
@@ -510,7 +601,7 @@ pub(crate) fn run_claude_update_elevated_macos(claude_bin: &Path) -> Result<Stri
         let msg = if combined.is_empty() {
             format!(
                 "系统授权更新失败（退出码 {}）",
-                output.status.code().unwrap_or(-1)
+                status.code().unwrap_or(-1)
             )
         } else {
             combined
@@ -528,7 +619,7 @@ pub(crate) fn run_claude_update_elevated_macos(claude_bin: &Path) -> Result<Stri
 }
 
 /// 通过官方原生安装器更新/迁移（无需 sudo；npm 全局目录不可写时的推荐路径）。
-pub(crate) fn run_claude_native_install(claude_bin: &Path) -> Result<String, String> {
+pub(crate) fn run_claude_native_install(app: &AppHandle, claude_bin: &Path) -> Result<String, String> {
     let mut cmd = Command::new(claude_bin);
     apply_cli_runtime_env(&mut cmd);
     apply_create_no_window(&mut cmd);
@@ -544,9 +635,13 @@ pub(crate) fn run_claude_native_install(claude_bin: &Path) -> Result<String, Str
             e
         )
     })?;
-    let output = wait_child_with_timeout(child, CLAUDE_UPDATE_TIMEOUT, "Claude Code 原生安装")?;
-    let combined = output_combined_text(&output);
-    if output.status.success() {
+    let (status, combined) = run_update_child_with_progress(
+        app,
+        "Claude Code 原生安装",
+        CLAUDE_INSTALL_TIMEOUT,
+        child,
+    )?;
+    if status.success() {
         Ok(if combined.is_empty() {
             "已通过原生安装器完成更新".to_string()
         } else {
@@ -556,7 +651,7 @@ pub(crate) fn run_claude_native_install(claude_bin: &Path) -> Result<String, Str
         Err(if combined.is_empty() {
             format!(
                 "Claude Code 原生安装失败（退出码 {}）",
-                output.status.code().unwrap_or(-1)
+                status.code().unwrap_or(-1)
             )
         } else {
             combined
@@ -565,7 +660,10 @@ pub(crate) fn run_claude_native_install(claude_bin: &Path) -> Result<String, Str
 }
 
 /// 当系统目录不可写时，静默安装到用户 `~/.local`（无需 sudo）。
-pub(crate) fn run_npm_user_prefix_install() -> Result<String, String> {
+pub(crate) fn run_npm_user_prefix_install(
+    app: &AppHandle,
+    npm_registry: Option<&str>,
+) -> Result<String, String> {
     let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())?;
     let prefix = home.join(".local");
     let bin_dir = prefix.join("bin");
@@ -581,15 +679,23 @@ pub(crate) fn run_npm_user_prefix_install() -> Result<String, String> {
         prefix.to_string_lossy().as_ref(),
         "@anthropic-ai/claude-code@latest",
     ]);
+    // 可选 npm 镜像（设置页配置）：直连镜像仓库加速下载；未配置时用用户 npm 全局 registry
+    if let Some(registry) = npm_registry.filter(|r| !r.trim().is_empty()) {
+        cmd.arg("--registry").arg(registry.trim());
+    }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
     let child = cmd
         .spawn()
         .map_err(|e| format!("启动 npm 用户目录安装失败: {}（请确认已安装 Node.js/npm）", e))?;
-    let output = wait_child_with_timeout(child, CLAUDE_UPDATE_TIMEOUT, "npm 用户目录安装")?;
-    let combined = output_combined_text(&output);
-    if output.status.success() {
+    let (status, combined) = run_update_child_with_progress(
+        app,
+        "npm 用户目录安装",
+        CLAUDE_INSTALL_TIMEOUT,
+        child,
+    )?;
+    if status.success() {
         Ok(format!(
             "已安装到 {}。若命令行仍指向旧路径，请优先将 ~/.local/bin 加入 PATH。",
             bin_dir.display()
@@ -598,7 +704,7 @@ pub(crate) fn run_npm_user_prefix_install() -> Result<String, String> {
         Err(if combined.is_empty() {
             format!(
                 "npm 用户目录安装失败（退出码 {}）",
-                output.status.code().unwrap_or(-1)
+                status.code().unwrap_or(-1)
             )
         } else {
             combined
@@ -606,7 +712,10 @@ pub(crate) fn run_npm_user_prefix_install() -> Result<String, String> {
     }
 }
 
-pub(crate) fn run_claude_code_update_silent_blocking() -> Result<ClaudeCodeSilentUpdateResult, String> {
+pub(crate) fn run_claude_code_update_silent_blocking(
+    app: &AppHandle,
+    npm_registry: Option<&str>,
+) -> Result<ClaudeCodeSilentUpdateResult, String> {
     let (installed_before, path) = read_installed_claude_version()?;
     let claude_bin = PathBuf::from(&path);
     let latest = fetch_latest_claude_version().ok();
@@ -618,7 +727,7 @@ pub(crate) fn run_claude_code_update_silent_blocking() -> Result<ClaudeCodeSilen
 
     // 1) 可写安装：先走 `claude update`
     if can_silent {
-        match run_claude_update_process(&claude_bin) {
+        match run_claude_update_process(app, &claude_bin) {
             Ok(msg) => message = Some(msg),
             Err(err) if should_fallback_claude_update(&err) => {
                 errors.push(format!("原地更新: {err}"));
@@ -631,7 +740,7 @@ pub(crate) fn run_claude_code_update_silent_blocking() -> Result<ClaudeCodeSilen
 
     // 2) npm 全局更新失败时的官方推荐：原生安装（无需 sudo）
     if message.is_none() {
-        match run_claude_native_install(&claude_bin) {
+        match run_claude_native_install(app, &claude_bin) {
             Ok(msg) => message = Some(msg),
             Err(err) => errors.push(format!("原生安装: {err}")),
         }
@@ -641,7 +750,7 @@ pub(crate) fn run_claude_code_update_silent_blocking() -> Result<ClaudeCodeSilen
     #[cfg(target_os = "macos")]
     if message.is_none() {
         used_elevation = true;
-        match run_claude_update_elevated_macos(&claude_bin) {
+        match run_claude_update_elevated_macos(app, &claude_bin) {
             Ok(msg) => message = Some(msg),
             Err(err) => errors.push(format!("管理员授权: {err}")),
         }
@@ -649,7 +758,7 @@ pub(crate) fn run_claude_code_update_silent_blocking() -> Result<ClaudeCodeSilen
 
     // 4) 最后回退：npm 安装到 ~/.local
     if message.is_none() {
-        match run_npm_user_prefix_install() {
+        match run_npm_user_prefix_install(app, npm_registry) {
             Ok(msg) => message = Some(msg),
             Err(err) => {
                 errors.push(format!("用户目录 npm 安装: {err}"));
@@ -676,8 +785,13 @@ pub(crate) fn run_claude_code_update_silent_blocking() -> Result<ClaudeCodeSilen
 
 /// 静默更新 Claude Code：优先 `claude update`，失败则回退原生安装 / 提权 / 用户目录 npm。
 #[tauri::command]
-pub async fn run_claude_code_update_silent() -> Result<ClaudeCodeSilentUpdateResult, String> {
-    tauri::async_runtime::spawn_blocking(run_claude_code_update_silent_blocking)
-        .await
-        .map_err(|e| format!("静默更新任务失败: {e}"))?
+pub async fn run_claude_code_update_silent(
+    app: AppHandle,
+    npm_registry: Option<String>,
+) -> Result<ClaudeCodeSilentUpdateResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_claude_code_update_silent_blocking(&app, npm_registry.as_deref())
+    })
+    .await
+    .map_err(|e| format!("静默更新任务失败: {e}"))?
 }

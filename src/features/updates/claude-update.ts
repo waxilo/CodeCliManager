@@ -1,3 +1,4 @@
+import { listen } from '@tauri-apps/api/event';
 import { appState } from '../../state';
 import * as api from '../../api';
 import { escapeHtml } from '../../utils';
@@ -7,6 +8,46 @@ import {
   renderAppUpdatePopoverBody,
   bindAppUpdatePopoverEvents,
 } from './app-update';
+
+/**
+ * 监听后端 claude 更新子进程的实时输出（claude-update-progress 事件），
+ * 展示最近一行作为进度反馈（npm 下载 / 安装器阶段等）。
+ * 幂等，应用启动时调用一次。
+ */
+export function setupClaudeUpdateProgressListener(): void {
+  void listen<{ text?: string }>('claude-update-progress', (event) => {
+    const text = (event.payload?.text || '').trim();
+    if (!text) return;
+    appState.claudeUpdateProgressText = text.length > 500 ? text.slice(-500) : text;
+    // 仅更新中/安装中时刷新展示（避免后台探测行覆盖其他 UI 状态）
+    if (
+      appState.claudeUpdateCheckStatus === 'updating' ||
+      appState.claudeUpdateCheckStatus === 'installing'
+    ) {
+      syncClaudeUpdateButtonUI();
+      refreshClaudeUpdatePopoverIfOpen();
+    }
+  });
+}
+
+/** npm 镜像地址（可选）：存 localStorage，静默更新时传给后端 npm 安装路径 */
+const NPM_REGISTRY_STORAGE_KEY = 'codemanager-npm-registry';
+
+export function getNpmRegistry(): string {
+  try {
+    return localStorage.getItem(NPM_REGISTRY_STORAGE_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+function setNpmRegistry(value: string): void {
+  try {
+    localStorage.setItem(NPM_REGISTRY_STORAGE_KEY, value.trim());
+  } catch {
+    // ignore
+  }
+}
 
 export function shouldShowClaudeUpdateBadge(): boolean {
   return Boolean(appState.claudeUpdateInfo?.updateAvailable && appState.claudeUpdateInfo.latest);
@@ -161,12 +202,14 @@ export async function runClaudeCodeInstall(): Promise<void> {
       };
     }
     appState.claudeUpdateCheckStatus = 'ready';
+    appState.claudeUpdateProgressText = '';
     syncClaudeUpdateButtonUI();
     refreshClaudeUpdatePopoverIfOpen();
     await checkClaudeCodeUpdate(true);
   } catch (e) {
     appState.claudeUpdateError = String(e);
     appState.claudeUpdateCheckStatus = 'ready';
+    appState.claudeUpdateProgressText = '';
     syncClaudeUpdateButtonUI();
     refreshClaudeUpdatePopoverIfOpen();
   }
@@ -181,7 +224,7 @@ export async function runClaudeCodeSilentUpdate(): Promise<void> {
   refreshClaudeUpdatePopoverIfOpen();
 
   try {
-    const result = await api.runClaudeCodeUpdateSilent();
+    const result = await api.runClaudeCodeUpdateSilent(getNpmRegistry());
     showCopyToastMsg(
       result.usedElevation ? '已通过系统授权完成更新' : 'Claude Code 已静默更新'
     );
@@ -198,12 +241,14 @@ export async function runClaudeCodeSilentUpdate(): Promise<void> {
       };
     }
     appState.claudeUpdateCheckStatus = 'ready';
+    appState.claudeUpdateProgressText = '';
     syncClaudeUpdateButtonUI();
     refreshClaudeUpdatePopoverIfOpen();
     await checkClaudeCodeUpdate(true);
   } catch (e) {
     appState.claudeUpdateError = String(e);
     appState.claudeUpdateCheckStatus = 'ready';
+    appState.claudeUpdateProgressText = '';
     syncClaudeUpdateButtonUI();
     refreshClaudeUpdatePopoverIfOpen();
   }
@@ -223,6 +268,9 @@ export function renderClaudeUpdatePopoverBody(): string {
   const path = info?.executablePath || '';
   const error = appState.claudeUpdateError || info?.error || '';
   const canSilent = info?.canSilentUpdate !== false;
+  const progressLine = appState.claudeUpdateProgressText
+    ? `<div class="claude-update-progress-line" title="${escapeHtml(appState.claudeUpdateProgressText)}">${escapeHtml(appState.claudeUpdateProgressText)}</div>`
+    : '';
   const statusHint = installing
     ? '正在执行 Claude 官方安装脚本，请稍候…'
     : updating
@@ -277,7 +325,18 @@ export function renderClaudeUpdatePopoverBody(): string {
         <span class="app-update-progress-pct">更新中</span>
       </div>
     ` : ''}
+    ${(installing || updating) ? progressLine : ''}
     ${error && !updating ? `<p class="claude-update-popover-error">${escapeHtml(error)}</p>` : ''}
+    <div class="claude-update-registry-row">
+      <label for="claude-update-registry">npm 镜像（可选，仅 npm 安装路径）</label>
+      <input
+        id="claude-update-registry"
+        type="text"
+        placeholder="https://registry.npmmirror.com"
+        value="${escapeHtml(getNpmRegistry())}"
+        ${checking || updating || installing ? 'disabled' : ''}
+      />
+    </div>
     <div class="claude-update-popover-actions">
       <button type="button" class="claude-update-action" data-action="recheck" ${checking || updating || installing ? 'disabled' : ''}>
         ${checking ? '检查中…' : '重新检查'}
@@ -301,6 +360,11 @@ export function bindClaudeUpdatePopoverEvents(panel: Element) {
   panel.querySelector('.claude-update-popover-close')?.addEventListener('click', () => {
     if (panel.id === 'settings-claude-update-view') return;
     closeClaudeUpdatePopover();
+  });
+
+  const registryInput = panel.querySelector<HTMLInputElement>('#claude-update-registry');
+  registryInput?.addEventListener('change', () => {
+    setNpmRegistry(registryInput.value);
   });
 
   panel.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((btn) => {

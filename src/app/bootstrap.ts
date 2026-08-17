@@ -70,7 +70,7 @@ import {
 import { newChat } from '../features/chat/send';
 import { refreshSettingsModal } from '../features/api-config';
 import { refreshModelInfo } from '../features/chat/model-picker';
-import { checkClaudeCodeUpdate, initAppUpdate } from '../features/updates';
+import { checkClaudeCodeUpdate, initAppUpdate, setupClaudeUpdateProgressListener } from '../features/updates';
 import { setupEventListeners } from '../events/session-events';
 
 /** 将各 feature 实现注册到 shellApi，打破循环依赖。 */
@@ -225,6 +225,7 @@ export async function init(): Promise<void> {
   }
   startMainBalanceBarAutoRefresh();
   setupEventListeners();
+  setupClaudeUpdateProgressListener();
   setupExternalLinkInterceptor();
   bindSidebarResponsive();
   // 先让首屏完成绘制，再启动两个独立的后台版本检查。

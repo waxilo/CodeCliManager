@@ -114,6 +114,8 @@ export const appState = {
   claudeUpdateCheckStatus: 'idle' as ClaudeUpdateCheckStatus,
   claudeUpdateCheckPromise: null as Promise<void> | null,
   claudeUpdateError: null as string | null,
+  /** claude 更新子进程的实时输出行（最后一行，用于进度反馈） */
+  claudeUpdateProgressText: '' as string,
   appUpdate: null as AppUpdate | null,
   appUpdateInfo: {
     currentVersion: null,
