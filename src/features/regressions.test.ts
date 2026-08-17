@@ -7,6 +7,7 @@ import {
   findConversationById,
   mergeRemoteAndLocalMessages,
   assistantTextCovers,
+  getActiveConversation,
 } from './conversations/normalize';
 import {
   handleMessageChunk,
@@ -497,5 +498,46 @@ describe('commitStreamingAssistantToConversation / ensureAssistantPresent', () =
     expect(
       conv.messages.some((m) => m.role === 'assistant' && m.content === 'hello'),
     ).toBe(true);
+  });
+});
+
+describe('会话 source_path 回填与激活会话匹配（空态「会话内容已撤回」回归）', () => {
+  beforeEach(() => {
+    appState.conversations = [];
+    appState.activeConversationId = '';
+    appState.activeConversationSourcePath = null;
+  });
+
+  it('source_path 回填后 getActiveConversation 仍能按 id 兜底匹配（active 路径未同步时）', () => {
+    // 模拟：新会话先以 source_path=null 落地并激活，之后消息回填真实路径
+    appState.conversations = [
+      {
+        id: 'c1', title: 't', platform: 'claude', messages: [{ id: 'u1', role: 'user', content: 'hi', timestamp: 1 }],
+        created_at: 1, updated_at: 2, source_path: '/real/path/c1.jsonl',
+      },
+    ];
+    appState.activeConversationId = 'c1';
+    appState.activeConversationSourcePath = null; // 尚未同步
+    const conv = getActiveConversation();
+    expect(conv).toBeDefined();
+    expect(conv!.id).toBe('c1');
+    expect(conv!.messages).toHaveLength(1);
+  });
+
+  it('updateOrAddConversation 回填 source_path 时同步激活会话路径', () => {
+    appState.conversations = [
+      {
+        id: 'c1', title: 't', platform: 'claude', messages: [{ id: 'u1', role: 'user', content: 'hi', timestamp: 1 }],
+        created_at: 1, updated_at: 2, source_path: null,
+      },
+    ];
+    appState.activeConversationId = 'c1';
+    appState.activeConversationSourcePath = null;
+    updateOrAddConversation({
+      id: 'c1', title: 't', platform: 'claude',
+      messages: [{ id: 'u1', role: 'user', content: 'hi', timestamp: 1 }],
+      created_at: 1, updated_at: 2, source_path: '/real/path/c1.jsonl',
+    });
+    expect(appState.activeConversationSourcePath).toBe('/real/path/c1.jsonl');
   });
 });

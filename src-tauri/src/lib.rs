@@ -9,6 +9,7 @@ mod history;
 mod kiro;
 mod model_fetch;
 mod paths;
+mod proc_guard;
 mod protocol_guard;
 mod session;
 mod shell;

@@ -101,7 +101,9 @@ pub fn get_git_branch(project_dir: String) -> Result<Option<String>, String> {
         return Ok(None);
     }
 
-    let output = Command::new("git")
+    let mut branch_cmd = Command::new("git");
+    crate::proc_guard::suppress_console_window(&mut branch_cmd);
+    let output = branch_cmd
         .args(["-C", dir, "branch", "--show-current"])
         .output()
         .map_err(|e| format!("执行 git 失败: {}", e))?;
@@ -116,7 +118,9 @@ pub fn get_git_branch(project_dir: String) -> Result<Option<String>, String> {
     }
 
     // detached HEAD：展示短 commit
-    let head = Command::new("git")
+    let mut head_cmd = Command::new("git");
+    crate::proc_guard::suppress_console_window(&mut head_cmd);
+    let head = head_cmd
         .args(["-C", dir, "rev-parse", "--short", "HEAD"])
         .output()
         .map_err(|e| format!("执行 git 失败: {}", e))?;

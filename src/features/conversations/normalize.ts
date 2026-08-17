@@ -276,13 +276,20 @@ export function isConversationInstance(
 
 export function getActiveConversation(): Conversation | undefined {
   if (!appState.activeConversationId) return undefined;
-  return appState.conversations.find((conversation) =>
+  const byInstance = appState.conversations.find((conversation) =>
     isConversationInstance(
       conversation,
       appState.activeConversationId,
       appState.activeConversationSourcePath,
     ),
   );
+  if (byInstance) return byInstance;
+  // source_path 失配兜底：新会话 source_path 被回填而 active 路径尚未同步时，
+  // 同 id 唯一则按 id 匹配，避免渲染成空会话（「会话内容已撤回」空态）。
+  const sameId = appState.conversations.filter(
+    (conversation) => conversation.id === appState.activeConversationId,
+  );
+  return sameId.length === 1 ? sameId[0] : undefined;
 }
 
 /** 优先按 (id, source_path) 精确定位；同 id 唯一时按 id 定位，避免拆成两条。 */
@@ -319,7 +326,7 @@ export function updateOrAddConversation(conv: Conversation): boolean {
   let added = false;
   if (idx >= 0) {
     const existing = appState.conversations[idx];
-    appState.conversations[idx] = {
+    const next = {
       ...normalized,
       project_dir: resolveConversationProjectDir(normalized.project_dir, existing.project_dir),
       // 保留已落地路径：新会话先为 null，回填时不再提升，避免 activeConversationSourcePath
@@ -327,6 +334,16 @@ export function updateOrAddConversation(conv: Conversation): boolean {
       source_path: existing.source_path ?? normalized.source_path,
       created_at: existing.created_at,
     };
+    // source_path 回填后若当前激活会话正是它、且 active 路径还是初始 null（用户未重新选择过），
+    // 同步 activeConversationSourcePath，避免严格匹配失败导致渲染成「会话内容已撤回」空态。
+    if (
+      next.id === appState.activeConversationId &&
+      appState.activeConversationSourcePath == null &&
+      next.source_path != null
+    ) {
+      appState.activeConversationSourcePath = next.source_path;
+    }
+    appState.conversations[idx] = next;
   } else {
     appState.conversations.unshift(normalized);
     added = true;

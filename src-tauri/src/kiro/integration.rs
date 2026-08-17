@@ -395,7 +395,9 @@ fn try_kiro_cli_touch() {
         "kiro",
     ];
     for bin in candidates {
-        let status = std::process::Command::new(bin)
+        let mut cmd = std::process::Command::new(bin);
+        crate::proc_guard::suppress_console_window(&mut cmd);
+        let status = cmd
             .arg("whoami")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

@@ -62,7 +62,9 @@ fn write_agent_file_if_absent(project_dir: &Path) -> std::io::Result<bool> {
 
 /// 目录是否处于 git 工作树中（worktree 隔离的前提）。非仓库目录返回 false。
 fn is_git_work_tree(dir: &Path) -> bool {
-    let Ok(output) = std::process::Command::new("git")
+    let mut cmd = std::process::Command::new("git");
+    crate::proc_guard::suppress_console_window(&mut cmd);
+    let Ok(output) = cmd
         .arg("rev-parse")
         .arg("--is-inside-work-tree")
         .current_dir(dir)
