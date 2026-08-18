@@ -3,6 +3,7 @@ import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
 import { showConfirmDialog, showDeleteConfirm, showCopyToastMsg, showToast } from '../../ui';
 import { clearStreamingState } from '../chat/streaming';
+import { closePermissionDialogs } from '../permissions';
 import { loadData } from './load';
 import { groupConversationsByWorkspace } from '../sidebar/workspace-grouping';
 import { isConversationInstance } from './normalize';
@@ -22,6 +23,8 @@ export async function deleteConversation(id: string, sourcePath: string | null =
     });
 
     const deletedSourcePath = conversation.source_path ?? null;
+    // 关闭该会话进行中的问答/权限 UI（deny 落定挂起 promise，清理监听与 Enter 处理器）
+    closePermissionDialogs(id);
     clearStreamingState(id);
     appState.runningSessions.delete(id);
     appState.abortingSessions.delete(id);
@@ -69,8 +72,9 @@ export async function deleteWorkspaceConversations(workspacePath: string) {
       projectDir: workspacePath,
     });
 
-    // 清理已删除会话的流式状态
+    // 清理已删除会话的流式状态与进行中的问答/权限 UI
     for (const conv of ws.conversations) {
+      closePermissionDialogs(conv.id);
       clearStreamingState(conv.id);
       appState.runningSessions.delete(conv.id);
     }

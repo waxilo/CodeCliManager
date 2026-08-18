@@ -1,6 +1,6 @@
 import { appState } from '../../state';
 import { scheduleUiRefresh, afterUiRefresh } from '../../ui';
-import type { PermissionRequestPayload, AskUserQuestionOption, AskUserQuestionItem, AskUserQuestionInput, QuestionDialogResult } from '../../types';
+import type { PermissionRequestPayload, AskUserQuestionOption, AskUserQuestionItem, AskUserQuestionInput, QuestionDialogResult, PendingAskQuestionState } from '../../types';
 import { syncMessageInputPlaceholder } from '../chat/session-context';
 import { renderAskUserQuestionCardHtml } from '../chat/render-messages';
 import { getInteractionHost } from './interaction-panel';
@@ -99,6 +99,8 @@ export function showQuestionDialog(
             errorEl.hidden = false;
             errorEl.textContent = `请回答：${q.question}`;
           }
+          // 未答完时把该问题切到前台，用户直接看到要回答的题
+          activateAskQuestionTab(card, qIndex);
           return null;
         }
 
@@ -137,10 +139,22 @@ export function showQuestionDialog(
       finish({ action: 'deny' });
     };
 
-    // 同 requestId 的新请求覆盖旧条目（旧卡已过期），避免按 requestId 查找时命中旧 state
+    // 入表前驱逐过期条目：同 key（会话槽）或同 requestId 的旧请求先 finish(deny)，
+    // 让旧 promise 落定、旧卡/旧监听随 sync 清理，再写入新条目（避免悬挂与旧闭包串扰）
+    const prevByKey = appState.pendingAskQuestions.get(askKey);
+    if (prevByKey) {
+      prevByKey.finish?.({ action: 'deny' });
+      // finish 未自行清理（如测试桩）时兜底删除
+      if (appState.pendingAskQuestions.get(askKey) === prevByKey) {
+        appState.pendingAskQuestions.delete(askKey);
+      }
+    }
     for (const [k, s] of appState.pendingAskQuestions) {
       if (s.requestId === payload.requestId && k !== askKey) {
-        appState.pendingAskQuestions.delete(k);
+        s.finish?.({ action: 'deny' });
+        if (appState.pendingAskQuestions.get(k) === s) {
+          appState.pendingAskQuestions.delete(k);
+        }
       }
     }
     appState.pendingAskQuestions.set(askKey, {
@@ -169,6 +183,30 @@ export function showQuestionDialog(
   });
 }
 
+/** 是否所有问题都已有答案（answers 含部分进度时也算未答完） */
+function isAskFullyAnswered(state: PendingAskQuestionState): boolean {
+  return (
+    state.input.questions.length > 0 &&
+    state.input.questions.every((q) => (state.answers?.[q.question] || '').trim() !== '')
+  );
+}
+
+/** 切换问卡当前展示的问题 tab（多问题分页；单问题无 tab 时 no-op）。
+ *  roving tabindex：激活 tab 为 Tab 停靠点，其余移出 Tab 序 */
+function activateAskQuestionTab(card: HTMLElement, qIndex: number, opts?: { focus?: boolean }): void {  card.querySelectorAll<HTMLElement>('.ask-tab').forEach((tab) => {
+    const active = Number(tab.dataset.qIndex) === qIndex;
+    tab.classList.toggle('is-active', active);
+    tab.setAttribute('aria-selected', String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  card.querySelectorAll<HTMLElement>('.ask-block').forEach((block) => {
+    block.hidden = Number(block.dataset.qIndex) !== qIndex;
+  });
+  if (opts?.focus) {
+    card.querySelector<HTMLElement>(`.ask-tab[data-q-index="${qIndex}"]`)?.focus();
+  }
+}
+
 /** 绑定对话流内可交互选择卡事件 */
 export function bindInteractiveAskCards(container: HTMLElement): void {
   container.querySelectorAll<HTMLElement>('.ask-card.is-interactive').forEach((card) => {
@@ -179,6 +217,96 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
     const state = [...appState.pendingAskQuestions.values()].find((s) => s.requestId === requestId);
     if (!state?.finish) return;
 
+    // —— 多问题 tab：点击 / 方向键（ARIA tabs 模式，roving tabindex） ——
+    card.querySelectorAll<HTMLElement>('.ask-tab').forEach((tab) => {
+      tab.addEventListener('click', () => {
+        activateAskQuestionTab(card, Number(tab.dataset.qIndex));
+      });
+      tab.addEventListener('keydown', (event) => {
+        const tabs = Array.from(card.querySelectorAll<HTMLElement>('.ask-tab'));
+        const current = tabs.indexOf(tab);
+        let nextIdx: number | null = null;
+        if (event.key === 'ArrowRight') nextIdx = (current + 1) % tabs.length;
+        else if (event.key === 'ArrowLeft') nextIdx = (current - 1 + tabs.length) % tabs.length;
+        else if (event.key === 'Home') nextIdx = 0;
+        else if (event.key === 'End') nextIdx = tabs.length - 1;
+        if (nextIdx !== null) {
+          event.preventDefault();
+          activateAskQuestionTab(card, Number(tabs[nextIdx].dataset.qIndex), { focus: true });
+        }
+      });
+    });
+
+    // —— 进度刷新：每题是否已答 → tab 打勾 + 答案摘要 + 全部答完才放开提交 ——
+    const submitBtn = card.querySelector<HTMLButtonElement>('[data-ask-action="submit"]');
+    const progressEl = card.querySelector<HTMLElement>('[data-ask-progress]');
+    const refreshAskCardProgress = (): boolean => {
+      const qIndexes = Array.from(card.querySelectorAll<HTMLElement>('.ask-block')).map((b) =>
+        Number(b.dataset.qIndex),
+      );
+      let allAnswered = qIndexes.length > 0;
+      let answeredCount = 0;
+      // 作答结果同步回 state.answers：切会话/重建后恢复进度
+      const collected: Record<string, string> = {};
+      for (const qi of qIndexes) {
+        const block = card.querySelector(`.ask-block[data-q-index="${qi}"]`);
+        const checked = Array.from(
+          block?.querySelectorAll<HTMLInputElement>(`input[name="ask-q-${qi}"]:checked`) ?? [],
+        );
+        const customValue = (
+          block?.querySelector<HTMLInputElement>('input[data-ask-other-input="1"]')?.value || ''
+        ).trim();
+        const multiSelect = Boolean(state.input.questions[qi]?.multiSelect);
+        const answered = checked.length > 0 || customValue !== '';
+        if (answered) answeredCount += 1;
+        else allAnswered = false;
+        card.querySelectorAll(`.ask-tab[data-q-index="${qi}"]`).forEach((tab) => {
+          tab.classList.toggle('is-answered', answered);
+          const summary = answered ? customValue || checked.map((i) => i.value).join('、') : '';
+          const answerEl = tab.querySelector<HTMLElement>('.ask-tab-answer');
+          if (answerEl) {
+            answerEl.textContent = summary;
+          }
+          // 读屏可感知已答状态（进度条 aria-live 只在计数变化时播报，逐键不重复）
+          const label = tab.querySelector<HTMLElement>('.ask-tab-label')?.textContent || '';
+          tab.setAttribute('aria-label', answered ? `${label}，已答：${summary}` : label);
+        });
+        const question = state.input.questions[qi]?.question;
+        if (question) {
+          collected[question] = multiSelect
+            ? [...checked.map((i) => i.value), ...(customValue ? [customValue] : [])].join(', ')
+            : customValue || checked[0]?.value || '';
+        }
+      }
+      state.answers = Object.keys(collected).length > 0 ? collected : undefined;
+      if (submitBtn) {
+        submitBtn.disabled = !allAnswered;
+        submitBtn.title = allAnswered ? '' : '完成所有问题后可提交';
+        submitBtn.classList.toggle('is-ready', allAnswered);
+      }
+      if (progressEl) {
+        progressEl.textContent = allAnswered
+          ? '全部完成 ✓'
+          : `已答 ${answeredCount}/${qIndexes.length}`;
+      }
+      return allAnswered;
+    };
+
+    // —— 答完当前问题自动切到下一个未答问题（单选点选后；多选/自定义输入不打断） ——
+    const maybeAdvanceAskTab = (qIndex: number) => {
+      const tabs = Array.from(card.querySelectorAll<HTMLElement>('.ask-tab'));
+      if (tabs.length < 2) return;
+      const next = tabs.find(
+        (t) => Number(t.dataset.qIndex) > qIndex && !t.classList.contains('is-answered'),
+      );
+      if (next) activateAskQuestionTab(card, Number(next.dataset.qIndex), { focus: true });
+    };
+
+    const clearAskError = () => {
+      const err = card.querySelector<HTMLElement>('.ask-error');
+      if (err) err.hidden = true;
+    };
+
     card.querySelectorAll<HTMLInputElement>('input[type="radio"], input[type="checkbox"]').forEach((input) => {
       input.addEventListener('change', () => {
         // 同步选中样式
@@ -186,6 +314,11 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
           const inp = opt.querySelector('input');
           opt.classList.toggle('is-selected', !!inp?.checked);
         });
+        clearAskError();
+        const qi = Number(input.dataset.qIndex);
+        refreshAskCardProgress();
+        // 多选可能继续勾选，不自动切题；单选点选即完成，切下一题
+        if (input.type === 'radio') maybeAdvanceAskTab(qi);
       });
     });
 
@@ -197,12 +330,23 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
           state.submit?.();
         }
       });
+      // 边输入边计入「已答」，全部答完自动放开提交
+      input.addEventListener('input', () => {
+        clearAskError();
+        refreshAskCardProgress();
+      });
+      // 失焦且已填内容才切题：避免输入首个字符就切走导致后续输入丢失
+      input.addEventListener('blur', () => {
+        const qi = Number(input.dataset.qIndex);
+        if ((input.value || '').trim() !== '') maybeAdvanceAskTab(qi);
+      });
     });
 
     card.querySelector('[data-ask-action="deny"]')?.addEventListener('click', () => {
       state.finish?.({ action: 'deny' });
     });
-    card.querySelector('[data-ask-action="submit"]')?.addEventListener('click', () => {
+    submitBtn?.addEventListener('click', () => {
+      if (submitBtn.disabled) return;
       state.submit?.();
     });
   });
@@ -227,22 +371,23 @@ export function syncPendingAskToInteractionHost(): void {
     (appState.activeConversationId
       ? appState.pendingAskQuestions.get('pending')
       : undefined) ||
-    // 子代理等非当前会话 id 的问卡：无当前会话问卡时兜底展示任意待作答卡片
-    [...appState.pendingAskQuestions.values()].find((s) => s.finish && !s.answers);
+    // 子代理等非当前会话 id 的问卡：无当前会话问卡时兜底展示任意未答完的卡片
+    [...appState.pendingAskQuestions.values()].find((s) => s.finish && !isAskFullyAnswered(s));
 
   // 同会话工具权限面板正在展示时不抢占（AskUserQuestion 与工具权限互斥，防御性分支）；
   // 其他会话的残留面板不属于当前问卡，不阻断挂载。
   if (
     pendingAsk?.finish &&
-    !pendingAsk.answers &&
+    !isAskFullyAnswered(pendingAsk) &&
     appState.activeInteractionPanel &&
     appState.activeInteractionPanel.conversationId === pendingAsk.conversationId
   ) {
     return;
   }
 
-  // 无待问答：清掉输入框上方的问卡残留，host 空则隐藏
-  if (!pendingAsk?.finish || pendingAsk.answers) {
+  // 无待问答（条目已被 finish 删除）：清掉输入框上方的问卡残留，host 空则隐藏。
+  // 注意：answers 部分/全部写入≠结束——卡要保留到用户提交（finish）为止。
+  if (!pendingAsk?.finish) {
     const leftover = host.querySelector<HTMLElement>('.ask-card');
     if (leftover) leftover.remove();
     if (host.childElementCount === 0) host.hidden = true;
@@ -251,6 +396,10 @@ export function syncPendingAskToInteractionHost(): void {
 
   // 已有同 requestId 且已绑定好的卡片：保留现场，不打断用户正在做的选择
   // （用 dataset 遍历而非 CSS.escape 选择器，避免 jsdom 缺 CSS.escape 时测试炸掉）
+  // 先移除不属于当前待答卡的旧卡（刚 finish 的卡 / 其他会话残留卡）
+  host.querySelectorAll<HTMLElement>('.ask-card.is-interactive').forEach((c) => {
+    if (c.dataset.askRequestId !== pendingAsk.requestId) c.remove();
+  });
   const existing = Array.from(host.querySelectorAll<HTMLElement>('.ask-card.is-interactive')).find(
     (card) => card.dataset.askRequestId === pendingAsk.requestId && card.dataset.askBound === '1',
   );
@@ -262,7 +411,8 @@ export function syncPendingAskToInteractionHost(): void {
   const wrapper = document.createElement('div');
   wrapper.innerHTML = renderAskUserQuestionCardHtml(
     { questions: pendingAsk.input.questions },
-    null,
+    // 部分作答后重建：带 answers 恢复已答进度（选中态/打勾/摘要/提交可用性）
+    pendingAsk.answers ?? null,
     true,
     true,
     pendingAsk.requestId,

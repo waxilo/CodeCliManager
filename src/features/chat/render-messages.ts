@@ -158,6 +158,16 @@ export function renderAskUserQuestionCardHtml(
     return `<div class="ask-card"><div class="ask-card-empty">无法解析互动问题</div></div>`;
   }
 
+  // 多问题时用横向 tab 分页：一次只看一个问题，答完自动切到下一个
+  const multi = interactive && parsed.questions.length > 1;
+  const idSafe = requestId.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 12);
+  // 传入 answers 时（如重建恢复）按已答状态渲染初始 UI：tab 打勾/摘要、进度、提交可用性
+  const answeredCount = parsed.questions.filter(
+    (q) => (answers?.[q.question] || '').trim() !== '',
+  ).length;
+  const allAnsweredInitial =
+    parsed.questions.length > 0 && answeredCount === parsed.questions.length;
+
   const blocks = parsed.questions
     .map((q, qIndex) => {
       const selectedRaw = answers?.[q.question] || '';
@@ -186,6 +196,7 @@ export function renderAskUserQuestionCardHtml(
                   name="${name}"
                   value="${escapeHtml(opt.label)}"
                   data-q-index="${qIndex}"
+                  ${isSelected ? 'checked' : ''}
                 />
                 <span class="ask-option-label">${escapeHtml(opt.label)}</span>
                 ${desc ? `<span class="ask-option-desc" title="${escapeHtml(desc)}">${escapeHtml(desc)}</span>` : ''}
@@ -235,7 +246,12 @@ export function renderAskUserQuestionCardHtml(
           : '';
 
       return `
-        <section class="ask-block" data-q-index="${qIndex}">
+        <section
+          class="ask-block"
+          data-q-index="${qIndex}"
+          ${multi && qIndex > 0 ? 'hidden' : ''}
+          ${multi ? `id="ask-panel-${qIndex}-${idSafe}" role="tabpanel" aria-labelledby="ask-tab-${qIndex}-${idSafe}"` : ''}
+        >
           <div class="ask-question-row">
             ${q.header ? `<span class="ask-header">${escapeHtml(q.header)}</span>` : ''}
             <p class="ask-question">${escapeHtml(q.question)}</p>
@@ -246,24 +262,59 @@ export function renderAskUserQuestionCardHtml(
     })
     .join('');
 
+  const tabsHtml = multi
+    ? `<div class="ask-tabs-row">
+         <div class="ask-tabs" role="tablist" aria-label="问题">
+           ${parsed.questions
+             .map((q, qIndex) => {
+               const answeredText = (answers?.[q.question] || '').trim();
+               const answered = answeredText !== '';
+               const active = qIndex === 0;
+               return `
+           <button
+             type="button"
+             class="ask-tab${active ? ' is-active' : ''}${answered ? ' is-answered' : ''}"
+             data-q-index="${qIndex}"
+             id="ask-tab-${qIndex}-${idSafe}"
+             role="tab"
+             aria-selected="${active}"
+             aria-controls="ask-panel-${qIndex}-${idSafe}"
+             tabindex="${active ? 0 : -1}"
+             title="${escapeHtml(q.header || q.question)}"
+           >
+             <span class="ask-tab-check" aria-hidden="true">✓</span>
+             <span class="ask-tab-label">${escapeHtml(q.header || q.question)}</span>
+             <span class="ask-tab-answer" aria-hidden="true">${answered ? escapeHtml(answeredText) : ''}</span>
+           </button>
+         `;
+             })
+             .join('')}
+         </div>
+         <span class="ask-tabs-progress" data-ask-progress aria-live="polite">${
+           allAnsweredInitial ? '全部完成 ✓' : `已答 ${answeredCount}/${parsed.questions.length}`
+         }</span>
+       </div>`
+    : '';
+
   const actionsHtml = interactive
     ? `<div class="ask-card-actions">
          <button type="button" class="interaction-btn ghost" data-ask-action="deny">跳过</button>
-         <button type="button" class="interaction-btn primary" data-ask-action="submit">提交</button>
+         <button type="button" class="interaction-btn primary" data-ask-action="submit"${allAnsweredInitial ? '' : ' disabled'}${allAnsweredInitial ? '' : ' title="完成所有问题后可提交"'}>提交</button>
        </div>`
     : `<span class="ask-card-status">${pending ? '等待你的选择…' : answers ? '已选择' : '已提问'}</span>`;
 
   return `
     <div
-      class="ask-card${pending ? ' is-pending' : ''}${answers ? ' is-answered' : ''}${interactive ? ' is-interactive' : ''}"
+      class="ask-card${pending ? ' is-pending' : ''}${answers ? ' is-answered' : ''}${interactive ? ' is-interactive' : ''}${multi ? ' is-multi' : ''}"
       ${interactive ? `data-ask-request-id="${escapeHtml(requestId)}"` : ''}
     >
       <div class="ask-card-bar">
         <span class="ask-card-badge">互动</span>
         ${actionsHtml}
       </div>
+      ${tabsHtml}
       ${blocks}
-      ${interactive ? '<p class="ask-error" hidden></p>' : ''}
+      ${interactive ? '<p class="ask-error" role="alert" hidden></p>' : ''}
     </div>
   `;
 }
