@@ -81,7 +81,8 @@
 }
 
 .status-bar-git-value,
-.balance-status-bar-value {
+.balance-status-bar-value,
+.status-bar-dir-value {
   min-width: 0;
   font-size: 10px;
   line-height: 1;
