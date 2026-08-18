@@ -31,12 +31,18 @@
   overflow: hidden;
 }
 
+.status-bar-dir,
 .status-bar-git,
 .status-bar-balance {
   display: flex;
   align-items: center;
   gap: 6px;
   min-width: 0;
+}
+
+.status-bar-dir {
+  flex-shrink: 1;
+  max-width: 50%;
 }
 
 .status-bar-git {
@@ -48,6 +54,7 @@
   flex: 1;
 }
 
+.status-bar-dir[hidden],
 .status-bar-git[hidden],
 .status-bar-balance[hidden],
 .status-bar-divider[hidden] {
@@ -84,7 +91,8 @@
   text-overflow: ellipsis;
 }
 
-.status-bar-git-value {
+.status-bar-git-value,
+.status-bar-dir-value {
   font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
 }
 

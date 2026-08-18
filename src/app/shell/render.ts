@@ -60,9 +60,7 @@ import {
   hideFileSuggestions,
   bindDragDropFileRefs,
   showImportMenu,
-  previewFileByPath,
 } from '../../features/files';
-import { handleEditKeydown } from '../../features/conversations/edit-export';
 
 /** 合并连点/并发触发的全量重绘，避免 Win WebView2 上堆积卡死 */
 let isShellRendering = false;
@@ -293,29 +291,15 @@ export function attachEventListeners() {
     showImportMenu(target);
   });
 
-  // 文件引用芯片双击预览（事件委托，图片 / PDF / 文本通用）
-  document.querySelector('#message-list')?.addEventListener('dblclick', (e) => {
-    const chip = (e.target as HTMLElement).closest('.file-ref-chip') as HTMLElement | null;
-    if (chip?.dataset.filePath) {
-      void previewFileByPath(chip.dataset.filePath);
-    }
-  });
-
+  // 文件引用芯片双击预览与编辑输入框 Enter/Escape 均由 #conversation-list /
+  // #message-list 上的事件委托处理（见 menus.ts / refresh.ts），
+  // 列表/消息 innerHTML 重建后事件不丢失——不在全量渲染时直绑。
   if (appState.editingConversationId) {
     setTimeout(() => {
       const editInput = document.querySelector(`#edit-input-${appState.editingConversationId}`) as HTMLInputElement;
       if (editInput) {
         editInput.focus();
         editInput.select();
-        editInput.addEventListener('keydown', (e) => {
-          if (appState.editingConversationId) {
-            handleEditKeydown(
-              e,
-              appState.editingConversationId,
-              appState.editingConversationSourcePath,
-            );
-          }
-        });
       }
     }, 50);
   }

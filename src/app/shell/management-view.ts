@@ -125,6 +125,8 @@ export function mountActiveManagementView(): void {
   } else if (appState.isSettingsViewActive) {
     const updatePanel = document.querySelector('.settings-update-view');
     if (updatePanel && appState.settingsSection === 'app-update') {
+      // 事件委托挂在面板节点上：同节点复用/重建后监听依然有效，
+      // bind 内的 bound 守卫保证单份监听（新节点自动绑定，旧节点跳过）
       bindAppUpdatePopoverEvents(updatePanel);
       if (
         appState.appUpdateInfo.updateAvailable &&

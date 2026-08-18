@@ -4,14 +4,27 @@ import { showCopyToastMsg } from '../../ui';
 import { selectConversation, deleteConversation, exportConversationToMarkdown, startEdit, deleteWorkspaceConversations } from '../conversations';
 import { newChatInWorkspace } from './workspace-grouping';
 import { openPathInFileManager, openPathInShell } from '../chat/input-composer';
-import { cancelEdit, saveEdit } from '../conversations/edit-export';
+import { cancelEdit, saveEdit, handleEditKeydown } from '../conversations/edit-export';
 import { UNCATEGORIZED_WORKSPACE_KEY, toggleWorkspaceExpanded } from './render-list';
 import { copyTextToClipboard } from '../../utils/clipboard';
 export function handleConversationListKeydown(e: Event) {
   const event = e as KeyboardEvent;
+  const target = event.target as HTMLElement;
+
+  // 编辑输入框：Enter 提交 / Escape 取消（委托随 #conversation-list 常驻，
+  // 列表 innerHTML 重建后编辑态按键依然有效）
+  const editInput = target.closest<HTMLInputElement>('input.edit-input');
+  if (editInput && (event.key === 'Enter' || event.key === 'Escape')) {
+    const id = editInput.id.replace('edit-input-', '');
+    const sourcePath = editInput.dataset.sourcePath || null;
+    if (id) {
+      handleEditKeydown(event, id, sourcePath);
+      return;
+    }
+  }
+
   if (event.key !== 'Enter' && event.key !== ' ') return;
 
-  const target = event.target as HTMLElement;
   // 焦点在卡片内的操作按钮上时交给按钮自身处理，避免同时触发展开
   if (target.closest('button')) return;
 

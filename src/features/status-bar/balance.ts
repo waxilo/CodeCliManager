@@ -2,6 +2,7 @@ import { appState } from '../../state';
 import * as api from '../../api';
 import { isDeepSeekBaseUrl, isKiroRuntimeActive, formatDeepSeekBalanceText, formatKiroUsageText } from '../api-config/balance-helpers';
 import { refreshGitBranch } from './git-branch';
+import { getActiveConversation } from '../conversations/normalize';
 export function getMainBalanceBarEl(): HTMLElement | null {
   return document.querySelector('#balance-status-bar');
 }
@@ -9,12 +10,44 @@ export function getMainBalanceBarEl(): HTMLElement | null {
 export function syncStatusBarSections(): void {
   const bar = getMainBalanceBarEl();
   if (!bar) return;
+  const dirWrap = bar.querySelector('.status-bar-dir') as HTMLElement | null;
   const gitWrap = bar.querySelector('.status-bar-git') as HTMLElement | null;
   const balanceWrap = bar.querySelector('.status-bar-balance') as HTMLElement | null;
-  const divider = bar.querySelector('[data-status-divider]') as HTMLElement | null;
-  if (gitWrap) gitWrap.hidden = !appState.gitBranchCache;
-  if (balanceWrap) balanceWrap.hidden = !appState.mainBalanceCache;
-  if (divider) divider.hidden = !(appState.gitBranchCache && appState.mainBalanceCache);
+  const d1 = bar.querySelector('[data-status-divider="1"]') as HTMLElement | null;
+  const d2 = bar.querySelector('[data-status-divider="2"]') as HTMLElement | null;
+  const showDir = Boolean(appState.activeProjectDirCache);
+  const showGit = Boolean(appState.gitBranchCache);
+  const showBalance = Boolean(appState.mainBalanceCache);
+  if (dirWrap) dirWrap.hidden = !showDir;
+  if (gitWrap) gitWrap.hidden = !showGit;
+  if (balanceWrap) balanceWrap.hidden = !showBalance;
+  // 分隔线只出现在「可见的相邻 section」之间
+  if (d1) d1.hidden = !(showDir && showGit);
+  if (d2) d2.hidden = !((showDir || showGit) && showBalance);
+}
+
+/**
+ * 底栏工作目录：取当前激活会话的 project_dir；pending（新会话未创建）阶段
+ * 显示待选目录。在 refreshChatContent 每次渲染后同步（切会话/新会话/发送都会触发）。
+ */
+export function syncActiveProjectDir(): void {
+  let dir = '';
+  if (appState.activeConversationId) {
+    dir = getActiveConversation()?.project_dir || '';
+  }
+  if (!dir && appState.pendingProjectDir) {
+    dir = appState.pendingProjectDir;
+  }
+  if (dir === appState.activeProjectDirCache) return;
+  appState.activeProjectDirCache = dir || null;
+  const bar = getMainBalanceBarEl();
+  if (!bar) return;
+  const dirEl = bar.querySelector('[data-project-dir]') as HTMLElement | null;
+  if (dirEl) {
+    dirEl.textContent = dir;
+    dirEl.title = dir;
+  }
+  syncStatusBarSections();
 }
 
 export function setMainBalanceBarContent(profileId: string, label: string, value: string): void {

@@ -64,8 +64,7 @@ export function showQuestionDialog(
       if (settled) return;
       settled = true;
       document.removeEventListener('keydown', onKey);
-      appState.activeQuestionEnterHandler = null;
-      appState.activeAskQuestionCleanup = null;
+      appState.activeQuestionEnterHandlers.delete(askKey);
       syncMessageInputPlaceholder();
 
       // 清掉临时可点选卡；已选结果等会话历史回写后展示
@@ -138,14 +137,21 @@ export function showQuestionDialog(
       finish({ action: 'deny' });
     };
 
+    // 同 requestId 的新请求覆盖旧条目（旧卡已过期），避免按 requestId 查找时命中旧 state
+    for (const [k, s] of appState.pendingAskQuestions) {
+      if (s.requestId === payload.requestId && k !== askKey) {
+        appState.pendingAskQuestions.delete(k);
+      }
+    }
     appState.pendingAskQuestions.set(askKey, {
       requestId: payload.requestId,
       conversationId: askKey,
       input: parsed,
       finish,
+      submit: trySubmit,
     });
-    appState.activeAskQuestionCleanup = () => finish({ action: 'deny' });
-    appState.activeQuestionEnterHandler = () => trySubmit();
+    // 按 askKey 注册 Enter 提交回调：并发多卡互不覆盖（主输入框只提交当前会话对应卡）
+    appState.activeQuestionEnterHandlers.set(askKey, () => trySubmit());
     document.addEventListener('keydown', onKey);
 
     // 立即挂卡（不依赖聊天重建；若 refreshChatContent 因无会话对象提前返回，卡也已就位）。
@@ -183,12 +189,12 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
       });
     });
 
-    // 卡片「自定义回答」输入框：Enter 直接提交
+    // 卡片「自定义回答」输入框：Enter 直接提交（用本卡自己的 submit，并发多卡互不串扰）
     card.querySelectorAll<HTMLInputElement>('input[data-ask-other-input="1"]').forEach((input) => {
       input.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
-          appState.activeQuestionEnterHandler?.();
+          state.submit?.();
         }
       });
     });
@@ -197,7 +203,7 @@ export function bindInteractiveAskCards(container: HTMLElement): void {
       state.finish?.({ action: 'deny' });
     });
     card.querySelector('[data-ask-action="submit"]')?.addEventListener('click', () => {
-      appState.activeQuestionEnterHandler?.();
+      state.submit?.();
     });
   });
 }

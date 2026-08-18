@@ -105,6 +105,8 @@ export const appState = {
   mainBalanceGuard: createRequestGuard(),
   mainBalanceCache: null as MainBalanceCache | null,
   gitBranchCache: null as GitBranchCache | null,
+  /** 底栏展示的当前会话工作目录（null = 无会话/未知，不展示） */
+  activeProjectDirCache: null as string | null,
   isMcpViewActive: false,
   mcpMountToken: 0,
   mcpEscapeHandler: null as ((event: KeyboardEvent) => void) | null,
@@ -159,8 +161,8 @@ export const appState = {
   sessionRunStartedAt: new Map<string, number>(),
   /** sessionId → 临时状态文案（api_retry 等），下一个内容块/turn 结束时清除 */
   runStatusOverride: new Map<string, string>(),
-  activeQuestionEnterHandler: null as (() => boolean) | null,
-  activeAskQuestionCleanup: null as (() => void) | null,
+  /** askKey(sessionId|'pending') → 问卡 Enter 提交回调；并发多卡互不覆盖 */
+  activeQuestionEnterHandlers: new Map<string, () => boolean>(),
   streamRefreshBySession: new Map<string, StreamRefreshState>(),
   answerScroller: null as ScrollController | null,
   thinkingScrollers: new Map<string, ScrollController>(),

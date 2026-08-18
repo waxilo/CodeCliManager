@@ -61,23 +61,16 @@ export function showPermissionDialog(payload: PermissionRequestPayload): Promise
 }
 
 export function closePermissionDialogs(conversationId?: string): void {
-  // 结束对话流内进行中的问答选择卡
-  if (appState.activeAskQuestionCleanup) {
-    let shouldCloseAsk = !conversationId;
-    if (conversationId) {
-      for (const state of appState.pendingAskQuestions.values()) {
-        if (!state.finish) continue;
-        if (
-          state.conversationId === conversationId ||
-          (conversationId.startsWith('pending') && state.conversationId === 'pending')
-        ) {
-          shouldCloseAsk = true;
-          break;
-        }
-      }
-    }
-    if (shouldCloseAsk) {
-      appState.activeAskQuestionCleanup();
+  // 结束对话流内进行中的问答选择卡：按会话精确 deny，并发多卡互不影响。
+  // 未指定会话时关闭全部待作答问卡。
+  for (const state of [...appState.pendingAskQuestions.values()]) {
+    if (!state.finish) continue;
+    if (
+      !conversationId ||
+      state.conversationId === conversationId ||
+      (conversationId.startsWith('pending') && state.conversationId === 'pending')
+    ) {
+      state.finish({ action: 'deny' });
     }
   }
 

@@ -54,9 +54,10 @@ export async function mountApiConfigView() {
   appState.apiConfigEscapeHandler = onEscapeKey;
   document.addEventListener('keydown', onEscapeKey);
 
-  // 管理壳节点缓存复用：表单绑定与模型拉取已在首次挂载完成，二次挂载只重绑 Escape
+  // 管理壳节点缓存复用：表单绑定与模型拉取已在首次挂载完成，二次挂载只重绑 Escape。
+  // 注意：标志必须在首次挂载的异步绑定全部完成后才写入；若在挂载中途关闭再重开，
+  // 标志未写入 → 会重新走完整绑定，避免出现「重开后按钮无响应」。
   if ((overlay as HTMLElement).dataset.apiConfigCachedMounted === '1') return;
-  (overlay as HTMLElement).dataset.apiConfigCachedMounted = '1';
 
   const livePathEl = overlay.querySelector('.settings-live-path') as HTMLElement | null;
   let fetchedModels: FetchedModel[] = [];
@@ -724,7 +725,10 @@ export async function mountApiConfigView() {
   };
 
   const bindModelConfigEvents = () => {
-    overlay.querySelector('.settings-model-config-summary')?.addEventListener('click', () => {
+    const summary = overlay.querySelector('.settings-model-config-summary');
+    if (!summary || (summary as HTMLElement).dataset.bound === '1') return;
+    (summary as HTMLElement).dataset.bound = '1';
+    summary.addEventListener('click', () => {
       // 官方默认为只读，模型由订阅 / 官方登录决定，不打开模型配置
       if (overlay.dataset.profileId === OFFICIAL_PROFILE_ID) return;
       openModelConfigDialog();
@@ -1139,6 +1143,8 @@ export async function mountApiConfigView() {
     }
     bindProfileListEvents();
     bindModelConfigEvents();
+    // 全部绑定完成后再标记「缓存已挂载」，中途关闭重开不会跳过绑定
+    (overlay as HTMLElement).dataset.apiConfigCachedMounted = '1';
   } catch (e) {
     if (!isMountCurrent()) return;
     showToast('加载 API 配置失败: ' + String(e));

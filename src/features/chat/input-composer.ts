@@ -96,16 +96,22 @@ export function renderBalanceStatusBarHtml(): string {
   const branch = git?.branch ?? '';
   const label = balance?.label ?? '余额';
   const value = balance?.value ?? '';
+  const dir = appState.activeProjectDirCache || '';
+  const dirHidden = dir ? '' : ' hidden';
   const gitHidden = git ? '' : ' hidden';
   const balanceHidden = balance ? '' : ' hidden';
-  const dividerHidden = git && balance ? '' : ' hidden';
   return `
     <div id="balance-status-bar" class="balance-status-bar">
+      <span class="status-bar-dir" data-status-dir${dirHidden}>
+        <span class="balance-status-bar-label">目录</span>
+        <span class="status-bar-dir-value" data-project-dir title="${escapeHtml(dir)}">${escapeHtml(dir)}</span>
+      </span>
+      <span class="status-bar-divider" data-status-divider="1" hidden aria-hidden="true"></span>
       <span class="status-bar-git"${gitHidden}>
         <span class="balance-status-bar-label">分支</span>
         <span class="status-bar-git-value" data-git-branch title="${escapeHtml(branch)}">${escapeHtml(branch)}</span>
       </span>
-      <span class="status-bar-divider" data-status-divider${dividerHidden} aria-hidden="true"></span>
+      <span class="status-bar-divider" data-status-divider="2" hidden aria-hidden="true"></span>
       <span class="status-bar-balance"${balanceHidden}>
         <span class="balance-status-bar-label" data-balance-label>${escapeHtml(label)}</span>
         <span class="balance-status-bar-value" data-balance-value title="${escapeHtml(value)}">${escapeHtml(value)}</span>

@@ -66,6 +66,8 @@ export interface PendingAskQuestionState {
   input: AskUserQuestionInput;
   answers?: Record<string, string>;
   finish?: (result: QuestionDialogResult) => void;
+  /** 提交该卡片（收集答案并 finish submit）；按 requestId 绑定到卡片自身，避免并发卡片互相串扰 */
+  submit?: () => boolean;
 }
 
 /** 流式/进行中的可见工具 */

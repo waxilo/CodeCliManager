@@ -14,6 +14,8 @@ import { canSendMessage } from './session-context';
 import { getActiveSuggestionIndex, getFileSuggestionsContainer } from '../files/index';
 import { getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
 import { scheduleUiRefresh } from '../../ui';
+import { syncActiveProjectDir } from '../status-bar';
+import { previewFileByPath } from '../files/index';
 export function setupMessageListPostRender(container: HTMLElement): void {
   // 对话流内 AskUserQuestion 可点选卡片
   bindInteractiveAskCards(container);
@@ -47,6 +49,19 @@ export function setupMessageListPostRender(container: HTMLElement): void {
       }
     });
   });
+
+  // 文件引用芯片双击预览（事件委托挂在 #message-list 容器上：
+  // 增量壳路径（ensureChatMessageShell 新建列表）与每次挂载后都有效，
+  // 列表 innerHTML 重建不影响委托）
+  if (!(container as HTMLElement).dataset.dblclickBound) {
+    (container as HTMLElement).dataset.dblclickBound = '1';
+    container.addEventListener('dblclick', (e) => {
+      const chip = (e.target as HTMLElement).closest('.file-ref-chip') as HTMLElement | null;
+      if (chip?.dataset.filePath) {
+        void previewFileByPath(chip.dataset.filePath);
+      }
+    });
+  }
 
   // 初始化 Answer 区域滚动控制器
   initAnswerScroller();
@@ -704,6 +719,9 @@ export function refreshChatContent(): boolean {
     afterChatMounted(() => syncStreamingBlocksInPlace(sid));
   }
 
+  // 底栏工作目录：切会话 / 新会话 / 发送（pending）都会走到这里，幂等同步
+  syncActiveProjectDir();
+
   // 缓存本次渲染结果（不含流式块的「已提交消息」快照）：renderKey 含流式签名，
   // 流式更新时 miss → 走完整 diff（历史复用）；会话快照仍供回切 A→B→A 复用。
   renderCache.set(cacheKey, { renderKey, topbarHtml, loadEarlier, chunks, empty });
@@ -731,9 +749,12 @@ export function handleKeydown(e: KeyboardEvent) {
   }
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
-    // 互动问答进行中：Enter 提交选项/自定义回答，不发成普通追问
-    if (appState.activeQuestionEnterHandler) {
-      if (appState.activeQuestionEnterHandler()) return;
+    // 互动问答进行中：Enter 提交当前会话对应的问卡（后台会话的卡不拦截主输入框）
+    const askHandlers = appState.activeQuestionEnterHandlers;
+    const askHandler =
+      askHandlers.get(appState.activeConversationId || 'pending') ?? askHandlers.get('pending');
+    if (askHandler) {
+      if (askHandler()) return;
       return;
     }
     // 运行中也允许 Enter：有内容则追问，无内容不触发停止

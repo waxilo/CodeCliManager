@@ -52,6 +52,8 @@ export function mountSettingsView() {
   const onEscapeKey = (event: KeyboardEvent) => {
     if (event.key !== 'Escape') return;
     if (!appState.isSettingsViewActive) return;
+    // 确认弹窗打开时，Escape 由弹窗自身处理（关闭弹窗），不连带关闭设置页
+    if (document.querySelector('.confirm-overlay')) return;
     event.preventDefault();
     closeSettingsView();
   };

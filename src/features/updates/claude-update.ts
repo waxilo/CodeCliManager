@@ -157,8 +157,8 @@ export async function checkClaudeCodeUpdate(force = false): Promise<void> {
 export function refreshClaudeUpdatePopoverIfOpen() {
   const panel = document.querySelector('#claude-update-popover, #settings-claude-update-view');
   if (panel) {
+    // 事件委托挂在 panel 节点上，innerHTML 重建子节点后依然有效——无需重绑
     panel.innerHTML = renderClaudeUpdatePopoverBody();
-    bindClaudeUpdatePopoverEvents(panel);
   }
 }
 
@@ -166,11 +166,19 @@ export function renderSettingsUpdateSectionIfOpen(): void {
   if (!appState.isSettingsViewActive || (appState.settingsSection !== 'app-update' && appState.settingsSection !== 'claude-update')) return;
   const view = document.querySelector<HTMLElement>('.settings-update-view');
   if (!view) return;
-  view.innerHTML = appState.settingsSection === 'app-update'
+  // 两个 section 复用同一 .settings-update-view 节点：直接替换元素本身
+  // （新节点无 bound → 绑定新委托；旧节点连同旧委托一起销毁，不叠加监听）
+  const parent = view.parentElement;
+  if (!parent) return;
+  const fresh = document.createElement('div');
+  fresh.className = 'settings-update-view';
+  fresh.id = view.id;
+  parent.replaceChild(fresh, view);
+  fresh.innerHTML = appState.settingsSection === 'app-update'
     ? renderAppUpdatePopoverBody()
     : renderClaudeUpdatePopoverBody();
-  if (appState.settingsSection === 'app-update') bindAppUpdatePopoverEvents(view);
-  else bindClaudeUpdatePopoverEvents(view);
+  if (appState.settingsSection === 'app-update') bindAppUpdatePopoverEvents(fresh);
+  else bindClaudeUpdatePopoverEvents(fresh);
 }
 
 export async function runClaudeCodeInstall(): Promise<void> {
@@ -352,35 +360,47 @@ export function renderClaudeUpdatePopoverBody(): string {
 }
 
 export function bindClaudeUpdatePopoverEvents(panel: Element) {
-  // 管理壳节点缓存复用：二次挂载时跳过重绑，避免同节点上监听叠加
+  // 管理壳节点缓存复用：二次挂载时跳过重绑，避免同节点上监听叠加。
+  // 事件委托挂在面板节点上：innerHTML 重渲染后按钮点击依然有效
+  // （直接绑定 + data-bound 残留会让重渲染出来的按钮丢失事件，出现「点了没反应」）。
   const el = panel as HTMLElement;
   if (el.dataset.bound === '1') return;
   el.dataset.bound = '1';
 
-  panel.querySelector('.claude-update-popover-close')?.addEventListener('click', () => {
-    if (panel.id === 'settings-claude-update-view') return;
-    closeClaudeUpdatePopover();
+  el.addEventListener('click', (event) => {
+    const target = (event.target as HTMLElement | null)?.closest(
+      '.claude-update-popover-close, [data-action]',
+    ) as HTMLElement | null;
+    if (!target) return;
+
+    if (target.classList.contains('claude-update-popover-close')) {
+      if (panel.id === 'settings-claude-update-view') return;
+      closeClaudeUpdatePopover();
+      return;
+    }
+
+    const btn = target as HTMLButtonElement;
+    const action = btn.dataset.action;
+    if (action === 'recheck') {
+      if (appState.claudeUpdateCheckStatus === 'checking' || appState.claudeUpdateCheckStatus === 'updating' || appState.claudeUpdateCheckStatus === 'installing') return;
+      btn.disabled = true;
+      btn.textContent = '检查中…';
+      void checkClaudeCodeUpdate(true);
+    } else if (action === 'install') {
+      void runClaudeCodeInstall();
+    } else if (action === 'update') {
+      void runClaudeCodeSilentUpdate();
+    }
   });
 
-  const registryInput = panel.querySelector<HTMLInputElement>('#claude-update-registry');
-  registryInput?.addEventListener('change', () => {
-    setNpmRegistry(registryInput.value);
-  });
-
-  panel.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const action = btn.dataset.action;
-      if (action === 'recheck') {
-        if (appState.claudeUpdateCheckStatus === 'checking' || appState.claudeUpdateCheckStatus === 'updating' || appState.claudeUpdateCheckStatus === 'installing') return;
-        btn.disabled = true;
-        btn.textContent = '检查中…';
-        void checkClaudeCodeUpdate(true);
-      } else if (action === 'install') {
-        void runClaudeCodeInstall();
-      } else if (action === 'update') {
-        void runClaudeCodeSilentUpdate();
-      }
-    });
+  // npm 镜像输入框：input 事件冒泡，同样走面板委托（重建后依然有效）；
+  // 用 input 而非 change，边输入边写入 localStorage，面板被重建时值不会丢失
+  el.addEventListener('input', (event) => {
+    const input = (event.target as HTMLElement | null)?.closest(
+      '#claude-update-registry',
+    ) as HTMLInputElement | null;
+    if (!input) return;
+    setNpmRegistry(input.value);
   });
 }
 
