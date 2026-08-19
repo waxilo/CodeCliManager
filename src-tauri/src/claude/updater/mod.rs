@@ -660,10 +660,7 @@ pub(crate) fn run_claude_native_install(app: &AppHandle, claude_bin: &Path) -> R
 }
 
 /// 当系统目录不可写时，静默安装到用户 `~/.local`（无需 sudo）。
-pub(crate) fn run_npm_user_prefix_install(
-    app: &AppHandle,
-    npm_registry: Option<&str>,
-) -> Result<String, String> {
+pub(crate) fn run_npm_user_prefix_install(app: &AppHandle) -> Result<String, String> {
     let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())?;
     let prefix = home.join(".local");
     let bin_dir = prefix.join("bin");
@@ -679,10 +676,6 @@ pub(crate) fn run_npm_user_prefix_install(
         prefix.to_string_lossy().as_ref(),
         "@anthropic-ai/claude-code@latest",
     ]);
-    // 可选 npm 镜像（设置页配置）：直连镜像仓库加速下载；未配置时用用户 npm 全局 registry
-    if let Some(registry) = npm_registry.filter(|r| !r.trim().is_empty()) {
-        cmd.arg("--registry").arg(registry.trim());
-    }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -714,7 +707,6 @@ pub(crate) fn run_npm_user_prefix_install(
 
 pub(crate) fn run_claude_code_update_silent_blocking(
     app: &AppHandle,
-    npm_registry: Option<&str>,
 ) -> Result<ClaudeCodeSilentUpdateResult, String> {
     let (installed_before, path) = read_installed_claude_version()?;
     let claude_bin = PathBuf::from(&path);
@@ -758,7 +750,7 @@ pub(crate) fn run_claude_code_update_silent_blocking(
 
     // 4) 最后回退：npm 安装到 ~/.local
     if message.is_none() {
-        match run_npm_user_prefix_install(app, npm_registry) {
+        match run_npm_user_prefix_install(app) {
             Ok(msg) => message = Some(msg),
             Err(err) => {
                 errors.push(format!("用户目录 npm 安装: {err}"));
@@ -787,11 +779,8 @@ pub(crate) fn run_claude_code_update_silent_blocking(
 #[tauri::command]
 pub async fn run_claude_code_update_silent(
     app: AppHandle,
-    npm_registry: Option<String>,
 ) -> Result<ClaudeCodeSilentUpdateResult, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        run_claude_code_update_silent_blocking(&app, npm_registry.as_deref())
-    })
-    .await
-    .map_err(|e| format!("静默更新任务失败: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || run_claude_code_update_silent_blocking(&app))
+        .await
+        .map_err(|e| format!("静默更新任务失败: {e}"))?
 }

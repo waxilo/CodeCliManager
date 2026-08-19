@@ -13,8 +13,6 @@ export function runClaudeCodeInstall(): Promise<ClaudeCodeInstallResult> {
   return invoke<ClaudeCodeInstallResult>('run_claude_code_install');
 }
 
-export function runClaudeCodeUpdateSilent(npmRegistry?: string): Promise<ClaudeCodeSilentUpdateResult> {
-  return invoke<ClaudeCodeSilentUpdateResult>('run_claude_code_update_silent', {
-    npmRegistry: npmRegistry || null,
-  });
+export function runClaudeCodeUpdateSilent(): Promise<ClaudeCodeSilentUpdateResult> {
+  return invoke<ClaudeCodeSilentUpdateResult>('run_claude_code_update_silent');
 }

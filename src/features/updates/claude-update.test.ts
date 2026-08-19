@@ -50,14 +50,11 @@ describe('claude 更新弹层按钮（重建后事件不丢失）', () => {
     await new Promise((r) => setTimeout(r, 20));
   });
 
-  it('npm 镜像输入框 input 走委托，边输入边保存（重建不丢值）', () => {
+  it('弹层不再包含 npm 镜像输入框', () => {
     const host = document.createElement('div');
     host.innerHTML = renderClaudeUpdatePopoverBody();
     bindClaudeUpdatePopoverEvents(host);
-    const input = host.querySelector<HTMLInputElement>('#claude-update-registry')!;
-    input.value = 'https://registry.npmmirror.com';
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    expect(localStorage.getItem('codemanager-npm-registry')).toBe('https://registry.npmmirror.com');
-    localStorage.clear();
+    expect(host.querySelector('#claude-update-registry')).toBeNull();
+    expect(host.querySelector('.claude-update-registry-row')).toBeNull();
   });
 });

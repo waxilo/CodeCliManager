@@ -1,6 +1,7 @@
 import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
 import { loadMcpServers, openMcpEditorDialog } from './editor-dialog';
+import { openMcpImportDialog } from './import-dialog';
 import { stashComposerDraft, restoreComposerDraft } from '../files/index';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
 
@@ -83,6 +84,7 @@ export async function mountMcpView() {
 
   view.querySelector('.settings-close-btn')?.addEventListener('click', close);
   view.querySelector('#mcp-add-btn')?.addEventListener('click', () => openMcpEditorDialog(null));
+  view.querySelector('#mcp-import-btn')?.addEventListener('click', () => openMcpImportDialog());
 
   await loadMcpServers();
 }

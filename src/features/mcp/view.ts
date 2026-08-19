@@ -11,7 +11,10 @@ export function renderMcpViewHtml(): string {
         <button type="button" class="settings-close-btn" aria-label="返回聊天">✕</button>
       </div>
       <div class="mcp-toolbar">
-        <button type="button" class="settings-btn-primary mcp-add-btn" id="mcp-add-btn">+ 添加服务器</button>
+        <div class="mcp-toolbar-actions">
+          <button type="button" class="settings-btn-primary mcp-add-btn" id="mcp-add-btn">+ 添加服务器</button>
+          <button type="button" class="mcp-import-btn" id="mcp-import-btn" title="粘贴 Claude Code 格式的 mcpServers JSON 批量导入">导入 JSON</button>
+        </div>
         <span class="mcp-config-path" title="${escapeHtml(appState.mcpConfigPath)}">${escapeHtml(appState.mcpConfigPath ? `配置文件：${appState.mcpConfigPath}` : '')}</span>
       </div>
       <div class="mcp-list" id="mcp-list">

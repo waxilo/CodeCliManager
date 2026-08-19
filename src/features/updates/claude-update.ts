@@ -30,24 +30,6 @@ export function setupClaudeUpdateProgressListener(): void {
   });
 }
 
-/** npm 镜像地址（可选）：存 localStorage，静默更新时传给后端 npm 安装路径 */
-const NPM_REGISTRY_STORAGE_KEY = 'codemanager-npm-registry';
-
-export function getNpmRegistry(): string {
-  try {
-    return localStorage.getItem(NPM_REGISTRY_STORAGE_KEY) || '';
-  } catch {
-    return '';
-  }
-}
-
-function setNpmRegistry(value: string): void {
-  try {
-    localStorage.setItem(NPM_REGISTRY_STORAGE_KEY, value.trim());
-  } catch {
-    // ignore
-  }
-}
 
 export function shouldShowClaudeUpdateBadge(): boolean {
   return Boolean(appState.claudeUpdateInfo?.updateAvailable && appState.claudeUpdateInfo.latest);
@@ -232,7 +214,7 @@ export async function runClaudeCodeSilentUpdate(): Promise<void> {
   refreshClaudeUpdatePopoverIfOpen();
 
   try {
-    const result = await api.runClaudeCodeUpdateSilent(getNpmRegistry());
+    const result = await api.runClaudeCodeUpdateSilent();
     showCopyToastMsg(
       result.usedElevation ? '已通过系统授权完成更新' : 'Claude Code 已静默更新'
     );
@@ -335,16 +317,6 @@ export function renderClaudeUpdatePopoverBody(): string {
     ` : ''}
     ${(installing || updating) ? progressLine : ''}
     ${error && !updating ? `<p class="claude-update-popover-error">${escapeHtml(error)}</p>` : ''}
-    <div class="claude-update-registry-row">
-      <label for="claude-update-registry">npm 镜像（可选，仅 npm 安装路径）</label>
-      <input
-        id="claude-update-registry"
-        type="text"
-        placeholder="https://registry.npmmirror.com"
-        value="${escapeHtml(getNpmRegistry())}"
-        ${checking || updating || installing ? 'disabled' : ''}
-      />
-    </div>
     <div class="claude-update-popover-actions">
       <button type="button" class="claude-update-action" data-action="recheck" ${checking || updating || installing ? 'disabled' : ''}>
         ${checking ? '检查中…' : '重新检查'}
@@ -393,15 +365,6 @@ export function bindClaudeUpdatePopoverEvents(panel: Element) {
     }
   });
 
-  // npm 镜像输入框：input 事件冒泡，同样走面板委托（重建后依然有效）；
-  // 用 input 而非 change，边输入边写入 localStorage，面板被重建时值不会丢失
-  el.addEventListener('input', (event) => {
-    const input = (event.target as HTMLElement | null)?.closest(
-      '#claude-update-registry',
-    ) as HTMLInputElement | null;
-    if (!input) return;
-    setNpmRegistry(input.value);
-  });
 }
 
 export function closeClaudeUpdatePopover() {

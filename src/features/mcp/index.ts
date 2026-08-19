@@ -7,3 +7,4 @@ export {
   deleteMcpServer,
   openMcpEditorDialog,
 } from './editor-dialog';
+export { openMcpImportDialog, parseMcpServersJson } from './import-dialog';

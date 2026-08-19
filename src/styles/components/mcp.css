@@ -330,3 +330,219 @@
   cursor: not-allowed;
 }
 
+
+/* MCP 从 JSON 导入 */
+.mcp-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.mcp-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mcp-import-btn {
+  height: 36px;
+  padding: 0 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+  font-size: 14px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.mcp-import-btn:hover {
+  background: var(--color-bg-surface-hover);
+}
+
+.mcp-import-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
+}
+
+.mcp-import-dialog {
+  width: min(600px, 100%);
+}
+
+.mcp-import-hint {
+  margin: 0 0 8px;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.mcp-import-example {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-deep);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  white-space: pre;
+  overflow-x: auto;
+}
+
+.mcp-import-textarea {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  color: var(--color-text);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.mcp-import-textarea:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
+}
+
+.mcp-import-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.mcp-import-errors {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 45%, var(--color-border));
+  border-radius: var(--radius-md);
+  background: var(--color-danger-bg);
+}
+
+.mcp-import-error {
+  margin: 2px 0;
+  font-size: 12px;
+  color: var(--color-danger);
+}
+
+/* 软警告：字段被忽略等（黄色，不阻断导入） */
+.mcp-import-warnings {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 45%, var(--color-border));
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+}
+
+.mcp-import-warning {
+  margin: 2px 0;
+  font-size: 12px;
+  color: var(--color-warning-text);
+}
+
+.mcp-import-preview-title {
+  margin: 0 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.mcp-import-item {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+}
+
+.mcp-import-item + .mcp-import-item {
+  margin-top: 8px;
+}
+
+.mcp-import-item-name-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mcp-import-item-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-import-item-meta {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-badge-exists {
+  border-color: color-mix(in srgb, var(--color-warning) 50%, transparent);
+  color: var(--color-warning);
+}
+
+.mcp-import-conflict-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--color-warning);
+}
+
+.mcp-import-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+/* 导入进度：逐条状态 */
+.mcp-import-item-status-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mcp-import-status {
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.mcp-import-status.is-ok {
+  color: var(--color-success, #3fb950);
+}
+
+.mcp-import-status.is-failed {
+  color: var(--color-danger);
+}
+
+.mcp-import-status.is-running {
+  color: var(--color-text-muted);
+}
+
+.mcp-import-item-reason {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--color-danger);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-import-progress-hint {
+  margin: 12px 0 0;
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
