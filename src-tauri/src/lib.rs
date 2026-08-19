@@ -1,6 +1,7 @@
 use tauri::Manager;
 
 mod claude;
+mod claude_global_config;
 mod commands;
 mod config;
 mod config_io;
@@ -17,6 +18,7 @@ mod updater_manifest;
 mod usage;
 mod window;
 
+use claude_global_config::{get_global_prompts, get_global_skills};
 use commands::*;
 use kiro::KiroProxyState;
 use session::{active_session_keys, session_stop_graceful};
@@ -90,6 +92,8 @@ pub fn run() {
             check_claude_code_update,
             run_claude_code_install,
             run_claude_code_update_silent,
+            get_global_skills,
+            get_global_prompts,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

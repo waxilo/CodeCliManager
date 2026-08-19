@@ -18,7 +18,7 @@ import { shellApi } from './api';
 import { scheduleUiRefresh } from '../../ui';
 import { renderApiConfigSidebarHtml, renderSettingsSidebarHtml } from '../../features/settings/view';
 import { renderApiConfigViewHtml, mountApiConfigView } from '../../features/api-config';
-import { renderSettingsViewHtml, mountSettingsView } from '../../features/settings';
+import { renderSettingsViewHtml, mountSettingsView, mountGlobalConfigSection } from '../../features/settings';
 import { renderMcpViewHtml, mountMcpView } from '../../features/mcp';
 import { bindAppUpdatePopoverEvents, checkAppUpdate } from '../../features/updates/app-update';
 import { bindClaudeUpdatePopoverEvents } from '../../features/updates/claude-update';
@@ -138,6 +138,8 @@ export function mountActiveManagementView(): void {
       }
     } else if (updatePanel && appState.settingsSection === 'claude-update') {
       bindClaudeUpdatePopoverEvents(updatePanel);
+    } else if (appState.settingsSection === 'global-config') {
+      void mountGlobalConfigSection();
     }
     mountSettingsView();
   } else if (appState.isMcpViewActive) {

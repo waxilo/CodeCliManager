@@ -3,6 +3,7 @@ import { shouldShowAppUpdateBadge, renderAppUpdateIcon } from '../updates/app-up
 import { shouldShowClaudeUpdateBadge, renderClaudeUpdateIcon } from '../updates/claude-update';
 import { renderAppUpdatePopoverBody } from '../updates/app-update';
 import { renderClaudeUpdatePopoverBody } from '../updates/claude-update';
+import { renderGlobalConfigSectionHtml } from './global-config';
 export function renderApiConfigSidebarHtml(): string {
   return `
     <div class="api-config-sidebar settings-sidebar">
@@ -33,6 +34,15 @@ export function renderSettingsSidebarHtml(): string {
           <span>Claude Code 更新</span>
           ${shouldShowClaudeUpdateBadge() ? '<span class="settings-section-item-dot" aria-label="有更新"></span>' : ''}
         </button>
+        <button type="button" class="settings-section-item${appState.settingsSection === 'global-config' ? ' is-active' : ''}" data-settings-section="global-config">
+          <span class="settings-section-item-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6z"/>
+              <path d="M9 14l2 2 4-4"/>
+            </svg>
+          </span>
+          <span>全局 Skills 与提示词</span>
+        </button>
       </div>
     </div>
   `;
@@ -41,6 +51,9 @@ export function renderSettingsSidebarHtml(): string {
 export function renderSettingsViewHtml(): string {
   if (appState.settingsSection === 'claude-update') {
     return `<div class="settings-update-view" id="settings-claude-update-view">${renderClaudeUpdatePopoverBody()}</div>`;
+  }
+  if (appState.settingsSection === 'global-config') {
+    return renderGlobalConfigSectionHtml();
   }
   return `<div class="settings-update-view" id="settings-app-update-view">${renderAppUpdatePopoverBody()}</div>`;
 }

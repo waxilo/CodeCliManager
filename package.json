@@ -1,12 +1,12 @@
 {
   "name": "codecli-manager",
   "private": true,
-  "version": "0.2.43",
+  "version": "0.2.44",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test": "vitest run --environment jsdom",
+    "test": "vitest run --environment jsdom --exclude \"**/.claude/**\"",
     "preview": "vite preview",
     "tauri": "tauri"
   },

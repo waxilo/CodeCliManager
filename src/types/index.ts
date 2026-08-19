@@ -64,3 +64,4 @@ export type {
   SettingsSection,
   ThemeMode,
 } from './updates';
+export type { GlobalSkillEntry, GlobalPromptEntry, GlobalPromptsState } from './global-config';

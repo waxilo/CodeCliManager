@@ -1,4 +1,9 @@
 export {
+  getGlobalSkills,
+  getGlobalPrompts,
+} from './global-config';
+
+export {
   getConversations,
   getConversation,
   deleteConversation,

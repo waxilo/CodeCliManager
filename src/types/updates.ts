@@ -34,6 +34,6 @@ export interface AppUpdateInfo {
   error: string | null;
 }
 
-export type SettingsSection = 'app-update' | 'claude-update';
+export type SettingsSection = 'app-update' | 'claude-update' | 'global-config';
 
 export type ThemeMode = 'light' | 'dark';
