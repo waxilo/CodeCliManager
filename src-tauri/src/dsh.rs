@@ -416,11 +416,15 @@ mod tests {
     fn cli_bin_dirs_include_current_path() {
         let dirs = cli_bin_dirs();
         assert!(dirs.len() >= 5);
-        // 当前 PATH 的目录被纳入（自定义安装位置可被解析到）
+        // 当前 PATH 的目录被纳入（自定义安装位置可被解析到）；分隔符按平台（Windows 为 ';'）
         if let Ok(path_var) = std::env::var("PATH") {
-            let first = path_var.split(':').next().unwrap_or("");
+            let sep = if cfg!(target_os = "windows") { ";" } else { ":" };
+            let first = path_var.split(sep).next().unwrap_or("");
             if !first.is_empty() {
-                assert!(dirs.iter().any(|d| d.to_string_lossy() == first));
+                assert!(
+                    dirs.iter().any(|d| d.to_string_lossy().eq_ignore_ascii_case(first)),
+                    "PATH 首段 {first} 应被 cli_bin_dirs 纳入"
+                );
             }
         }
     }
