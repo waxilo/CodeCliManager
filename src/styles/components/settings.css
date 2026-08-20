@@ -637,3 +637,242 @@
   outline: none;
   box-shadow: 0 0 0 3px var(--color-accent-ring);
 }
+
+/* 设置页「DSH 工作台」分区 */
+.dsh-section {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.dsh-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dsh-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+  color: var(--color-text);
+}
+
+.dsh-subtitle {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.dsh-info-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dsh-info-item {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dsh-info-label {
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.dsh-info-value {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--color-text);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dsh-status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--color-text-muted);
+  flex-shrink: 0;
+}
+
+.dsh-status-dot.is-running {
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 25%, transparent);
+}
+
+.dsh-update-hint {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 45%, var(--color-border));
+  border-radius: var(--radius-md);
+  background: var(--color-warning-bg);
+  font-size: 12px;
+  color: var(--color-warning-text);
+}
+
+.dsh-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.dsh-btn {
+  height: 34px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+  font-size: 13px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dsh-btn:hover:not(:disabled) {
+  background: var(--color-bg-surface-hover);
+}
+
+.dsh-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dsh-progress {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-deep);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.dsh-error {
+  margin: 0;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--color-danger) 45%, var(--color-border));
+  border-radius: var(--radius-md);
+  background: var(--color-danger-bg);
+  font-size: 12px;
+  color: var(--color-danger);
+}
+
+/* DSH 全屏嵌入视图（替代整个 CCM 界面） */
+.dsh-embed {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-bg-base);
+}
+
+.dsh-embed-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  padding: 0 12px 0 12px;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-composer-footer);
+  box-sizing: border-box;
+  user-select: none;
+  /* 拖动/双击最大化由 embed.ts 的 JS 处理（startDragging + toggleMaximize） */
+}
+
+/* 高度与主标题栏逐平台一致（app-titlebar: 38/28/32） */
+.platform-macos .dsh-embed-bar {
+  height: 28px;
+}
+
+.platform-windows .dsh-embed-bar {
+  height: 32px;
+}
+
+/* macOS 红绿灯按钮占左上角约 78px：嵌入条整体右移避让（与主标题栏 leading 一致） */
+.platform-macos .dsh-embed-bar {
+  padding-left: 92px;
+}
+
+/* macOS 下按钮与主标题栏按钮同尺寸（22px） */
+.platform-macos .dsh-embed-btn {
+  height: 22px;
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.dsh-embed-title {
+  flex-shrink: 0;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--color-text);
+  white-space: nowrap;
+}
+
+.dsh-embed-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
+}
+
+.dsh-embed-btn {
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.dsh-embed-btn:hover {
+  background: var(--color-bg-surface-hover);
+}
+
+.dsh-embed-btn.primary {
+  border-color: transparent;
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+}
+
+.dsh-embed-btn.primary:hover {
+  background: var(--color-accent-hover);
+}
+
+.dsh-embed-frame {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+
+/* 设置侧栏分区间的分隔线 */
+.settings-section-divider {
+  height: 1px;
+  margin: 6px 10px;
+  background: var(--color-border);
+  flex-shrink: 0;
+}

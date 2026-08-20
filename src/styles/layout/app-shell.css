@@ -63,7 +63,9 @@
   font-weight: 600;
   color: var(--color-text);
   pointer-events: none;
-  max-width: min(320px, 50vw);
+  /* 动态避让右侧操作按钮区（按钮总宽约 360px + 左侧留白 78px）：
+     窗口较窄时标题自动收缩/隐藏，避免与按钮重叠 */
+  max-width: max(0px, min(320px, calc(50vw - 440px)));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

@@ -1,4 +1,11 @@
 export {
+  dshStatus,
+  dshInstall,
+  dshStart,
+  dshStop,
+} from './dsh';
+
+export {
   getGlobalSkills,
   getGlobalPrompts,
 } from './global-config';

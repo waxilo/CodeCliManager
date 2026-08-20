@@ -298,7 +298,7 @@ pub async fn check_claude_code_update() -> ClaudeCodeUpdateInfo {
     }
 }
 
-/// 等待子进程完成：实时转发 stdout/stderr 每行给前端（claude-update-progress 事件），
+/// 等待子进程完成：实时转发 stdout/stderr 每行给前端（event_name 指定进度事件名），
 /// 附带总超时与「无输出 stall」检测（120 秒无新输出即中断——npm 网络挂起等场景
 /// 不必等满 300/600 秒）。返回（退出状态，合并输出文本）。
 pub(crate) fn run_update_child_with_progress(
@@ -306,6 +306,7 @@ pub(crate) fn run_update_child_with_progress(
     label: &str,
     timeout: Duration,
     mut child: Child,
+    event_name: &str,
 ) -> Result<(std::process::ExitStatus, String), String> {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -337,7 +338,7 @@ pub(crate) fn run_update_child_with_progress(
         while let Ok(line) = rx.try_recv() {
             last_output_at = Instant::now();
             let _ = app.emit(
-                "claude-update-progress",
+                event_name,
                 serde_json::json!({ "text": line }),
             );
             if !line.trim().is_empty() {
@@ -551,7 +552,13 @@ pub(crate) fn run_claude_update_process(app: &AppHandle, claude_bin: &Path) -> R
         .spawn()
         .map_err(|e| format!("启动 Claude Code 更新失败（{}）: {}", claude_bin.display(), e))?;
     let (status, combined) =
-        run_update_child_with_progress(app, "Claude Code 更新", CLAUDE_UPDATE_TIMEOUT, child)?;
+        run_update_child_with_progress(
+            app,
+            "Claude Code 更新",
+            CLAUDE_UPDATE_TIMEOUT,
+            child,
+            "claude-update-progress",
+        )?;
     if status.success() {
         Ok(if combined.is_empty() {
             "Claude Code 已更新".to_string()
@@ -590,6 +597,7 @@ pub(crate) fn run_claude_update_elevated_macos(app: &AppHandle, claude_bin: &Pat
         "系统授权更新",
         CLAUDE_UPDATE_TIMEOUT,
         child,
+        "claude-update-progress",
     )?;
     if status.success() {
         Ok(if combined.is_empty() {
@@ -640,6 +648,7 @@ pub(crate) fn run_claude_native_install(app: &AppHandle, claude_bin: &Path) -> R
         "Claude Code 原生安装",
         CLAUDE_INSTALL_TIMEOUT,
         child,
+        "claude-update-progress",
     )?;
     if status.success() {
         Ok(if combined.is_empty() {
@@ -687,6 +696,7 @@ pub(crate) fn run_npm_user_prefix_install(app: &AppHandle) -> Result<String, Str
         "npm 用户目录安装",
         CLAUDE_INSTALL_TIMEOUT,
         child,
+        "claude-update-progress",
     )?;
     if status.success() {
         Ok(format!(

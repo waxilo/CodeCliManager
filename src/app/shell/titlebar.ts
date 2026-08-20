@@ -46,14 +46,31 @@ export function renderKiroIcon(): string {
   `;
 }
 
+function renderDshIcon(): string {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="2" y="4" width="20" height="14" rx="2"/>
+      <path d="M8 21h8M12 18v3"/>
+    </svg>
+  `;
+}
+
 export function renderTitlebarActions(): string {
   const settingsTitle = shouldShowSettingsUpdateBadge() ? '设置（有可用更新）' : '设置';
   const showKiro = Boolean(appState.kiroStatus?.available);
+  // DSH 入口：仅当前配置为 DeepSeek 且 Kiro 代理未运行时展示
+  const showDsh = appState.activeProfileIsDeepSeek && !Boolean(appState.kiroStatus?.running);
   return `
     <button type="button" class="toolbar-settings-btn settings-btn${appState.isApiConfigViewActive ? ' is-active' : ''}" id="api-config-btn" title="管理 Claude Code API 配置" aria-label="API 配置" aria-pressed="${appState.isApiConfigViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderApiConfigIcon()}</span>
       <span class="toolbar-settings-btn-label">API 配置</span>
     </button>
+    ${showDsh ? `
+    <button type="button" class="toolbar-settings-btn settings-btn" id="dsh-btn" title="打开 DeepSeek Harness 工作台" aria-label="DSH 工作台">
+      <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderDshIcon()}</span>
+      <span class="toolbar-settings-btn-label">DSH</span>
+    </button>
+    ` : ''}
     ${showKiro ? `
     <button type="button" class="toolbar-settings-btn settings-btn${appState.isKiroViewActive ? ' is-active' : ''}" id="kiro-proxy-btn" title="${appState.kiroStatus?.running ? 'Kiro 代理运行中' : '管理本机 Kiro 代理'}" aria-label="${appState.kiroStatus?.running ? 'Kiro 代理（运行中）' : 'Kiro 代理'}" aria-pressed="${appState.isKiroViewActive}">
       <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderKiroIcon()}</span>

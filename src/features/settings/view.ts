@@ -4,6 +4,7 @@ import { shouldShowClaudeUpdateBadge, renderClaudeUpdateIcon } from '../updates/
 import { renderAppUpdatePopoverBody } from '../updates/app-update';
 import { renderClaudeUpdatePopoverBody } from '../updates/claude-update';
 import { renderGlobalConfigSectionHtml } from './global-config';
+import { renderDshSectionHtml } from '../dsh/settings-section';
 export function renderApiConfigSidebarHtml(): string {
   return `
     <div class="api-config-sidebar settings-sidebar">
@@ -34,6 +35,16 @@ export function renderSettingsSidebarHtml(): string {
           <span>Claude Code 更新</span>
           ${shouldShowClaudeUpdateBadge() ? '<span class="settings-section-item-dot" aria-label="有更新"></span>' : ''}
         </button>
+        <button type="button" class="settings-section-item${appState.settingsSection === 'dsh' ? ' is-active' : ''}" data-settings-section="dsh">
+          <span class="settings-section-item-icon">
+            <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="2" y="4" width="20" height="14" rx="2"/>
+              <path d="M8 21h8M12 18v3"/>
+            </svg>
+          </span>
+          <span>DSH 更新</span>
+        </button>
+        <div class="settings-section-divider" role="separator"></div>
         <button type="button" class="settings-section-item${appState.settingsSection === 'global-config' ? ' is-active' : ''}" data-settings-section="global-config">
           <span class="settings-section-item-icon">
             <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -54,6 +65,9 @@ export function renderSettingsViewHtml(): string {
   }
   if (appState.settingsSection === 'global-config') {
     return renderGlobalConfigSectionHtml();
+  }
+  if (appState.settingsSection === 'dsh') {
+    return renderDshSectionHtml();
   }
   return `<div class="settings-update-view" id="settings-app-update-view">${renderAppUpdatePopoverBody()}</div>`;
 }

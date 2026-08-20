@@ -2,6 +2,7 @@ use tauri::Manager;
 
 mod claude;
 mod claude_global_config;
+mod dsh;
 mod commands;
 mod config;
 mod config_io;
@@ -19,6 +20,7 @@ mod usage;
 mod window;
 
 use claude_global_config::{get_global_prompts, get_global_skills};
+use dsh::{dsh_install, dsh_start, dsh_status, dsh_stop};
 use commands::*;
 use kiro::KiroProxyState;
 use session::{active_session_keys, session_stop_graceful};
@@ -32,6 +34,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(KiroProxyState::default())
+        .manage(dsh::DshState::default())
         .setup(|app| {
             updater_manifest::start_updater_manifest_proxy();
             apply_responsive_window_size(app);
@@ -94,6 +97,10 @@ pub fn run() {
             run_claude_code_update_silent,
             get_global_skills,
             get_global_prompts,
+            dsh_status,
+            dsh_install,
+            dsh_start,
+            dsh_stop,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -108,6 +115,7 @@ pub fn run() {
                         let _ = session_stop_graceful(&key, "应用退出");
                     }
                 }
+                dsh::shutdown_dsh_process(&app);
                 let _ = app;
             }
         })

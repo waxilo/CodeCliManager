@@ -7,6 +7,7 @@ export function setProviderBalanceVisible(overlay: HTMLElement, visible: boolean
   if (wrap) wrap.hidden = !visible;
 }
 
+
 export function setProviderBalanceText(overlay: HTMLElement, text: string) {
   const el = overlay.querySelector('[data-provider-balance]') as HTMLElement | null;
   if (el) el.textContent = text;

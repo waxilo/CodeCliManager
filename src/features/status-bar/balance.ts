@@ -1,4 +1,5 @@
 import { appState } from '../../state';
+import { shellApi } from '../../app/shell/api';
 import * as api from '../../api';
 import { isDeepSeekBaseUrl, isKiroRuntimeActive, formatDeepSeekBalanceText, formatKiroUsageText } from '../api-config/balance-helpers';
 import { refreshGitBranch } from './git-branch';
@@ -80,6 +81,13 @@ export async function refreshMainBalanceBar(): Promise<void> {
 
     const activeProfile = state.profiles.find((p) => p.id === state.activeProfileId);
     const baseUrl = (activeProfile?.baseUrl || state.current?.baseUrl || '').trim();
+    // 标题栏 DSH 入口条件缓存（kiro 运行时由渲染侧再叠加判断）；
+    // 值变化时刷新标题栏按钮显隐（配置切换后即时生效）
+    const prevDeepSeek = appState.activeProfileIsDeepSeek;
+    appState.activeProfileIsDeepSeek = isDeepSeekBaseUrl(baseUrl);
+    if (prevDeepSeek !== appState.activeProfileIsDeepSeek) {
+      shellApi.syncTitlebarActions();
+    }
     const profileName = activeProfile?.name || '官方默认';
     const profileId = activeProfile?.id ?? '';
     const kiroRunning = Boolean(appState.kiroStatus?.running);

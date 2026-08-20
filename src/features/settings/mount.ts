@@ -1,9 +1,12 @@
 import { appState } from '../../state';
 import { shellApi } from '../../app/shell/api';
+import * as api from '../../api';
 import { getIsSidebarCollapsed, setSidebarCollapsed, showCopyToastMsg } from '../../ui';
 import { stashComposerDraft, restoreComposerDraft } from '../files/index';
 import { setPermissionMode } from '../permissions/permission-mode';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
+import { checkAppUpdate } from '../updates/app-update';
+import { checkClaudeCodeUpdate } from '../updates/claude-update';
 
 export function openSettingsView() {
   if (appState.isSettingsViewActive) return;
@@ -23,6 +26,26 @@ export function openSettingsView() {
   stashComposerDraft();
   appState.isSettingsViewActive = true;
   shellApi.enterManagementView('settings');
+  // 每次打开设置页：异步自动检测所有版本更新（CCM / Claude Code / DSH），不阻塞渲染。
+  // 各检查函数自带并发防护（进行中的 promise 复用），重复打开安全。
+  if (appState.appUpdateCheckStatus !== 'checking') {
+    void checkAppUpdate();
+  }
+  if (
+    appState.claudeUpdateCheckStatus !== 'checking' &&
+    appState.claudeUpdateCheckStatus !== 'updating' &&
+    appState.claudeUpdateCheckStatus !== 'installing'
+  ) {
+    void checkClaudeCodeUpdate();
+  }
+  void api
+    .dshStatus()
+    .then((s) => {
+      appState.dshStatus = s;
+    })
+    .catch(() => {
+      // 检测失败不打扰；DSH 分区内可手动刷新
+    });
 }
 
 /** 退出设置页状态（不触发 render） */

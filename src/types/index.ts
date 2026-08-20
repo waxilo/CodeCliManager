@@ -65,3 +65,4 @@ export type {
   ThemeMode,
 } from './updates';
 export type { GlobalSkillEntry, GlobalPromptEntry, GlobalPromptsState } from './global-config';
+export type { DshStatusData } from './dsh';

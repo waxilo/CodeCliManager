@@ -19,11 +19,19 @@ describe('设置页「全局 Skills 与提示词」分区', () => {
     promptsMock.mockReset();
   });
 
-  it('侧栏包含分区入口且激活态正确', () => {
+  it('侧栏包含分区入口且激活态正确；全局 Skills 位于分隔线之后', () => {
     appState.settingsSection = 'app-update';
     const html = renderSettingsSidebarHtml();
     expect(html).toContain('data-settings-section="global-config"');
     expect(html).toContain('全局 Skills 与提示词');
+    // 分隔线：global-config 在其后（最下面），dsh 在其前
+    const dividerAt = html.indexOf('settings-section-divider');
+    const globalAt = html.indexOf('data-settings-section="global-config"');
+    const dshAt = html.indexOf('data-settings-section="dsh"');
+    expect(dividerAt).toBeGreaterThan(-1);
+    expect(globalAt).toBeGreaterThan(dividerAt);
+    expect(dshAt).toBeGreaterThan(-1);
+    expect(dshAt).toBeLessThan(dividerAt);
 
     const doc = new DOMParser().parseFromString(html, 'text/html');
     // 当前分区（app-update）激活，global-config 未激活

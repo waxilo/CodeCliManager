@@ -10,6 +10,7 @@ import {
   bindSidebarResizer,
   toggleTheme,
 } from '../../ui';
+import { renderDshEmbedHtml, enterDshMode, bindDshEmbedEvents } from '../../features/dsh/embed';
 import { patchTitlebarActions, renderTitlebarActions } from './titlebar';
 import {
   clearStashedMainDom,
@@ -106,6 +107,7 @@ function performRender() {
           ${renderTitlebarActions()}
         </div>
       </header>
+      ${appState.dshModeActive ? renderDshEmbedHtml() : `
       <div class="app-container${getIsSidebarCollapsed() ? ' is-sidebar-collapsed' : ''}${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
       <div class="sidebar${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : ''}${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? ` is-${getActiveSidebarTab()}` : ''}">
         ${appState.isApiConfigViewActive ? renderApiConfigSidebarHtml() : appState.isSettingsViewActive ? renderSettingsSidebarHtml() : appState.isMcpViewActive ? '' : `
@@ -136,6 +138,7 @@ function performRender() {
       </div>
       ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderBalanceStatusBarHtml() : ''}
     </div>
+      `}
   `;
   
   attachEventListeners();
@@ -178,6 +181,9 @@ function bindTitlebarActionEvents(): void {
       openApiConfigView();
     }
   });
+  document.querySelector('#dsh-btn')?.addEventListener('click', () => {
+    void enterDshMode();
+  });
   document.querySelector('#kiro-proxy-btn')?.addEventListener('click', () => {
     if (appState.isKiroViewActive) {
       closeKiroView();
@@ -202,6 +208,9 @@ function bindTitlebarActionEvents(): void {
 }
 
 export function attachEventListeners() {
+  if (appState.dshModeActive) {
+    bindDshEmbedEvents();
+  }
   document.querySelector('#new-chat-btn')?.addEventListener('click', newChat);
 
   document.querySelector('#refresh-btn')?.addEventListener('click', async () => {

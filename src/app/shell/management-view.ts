@@ -19,6 +19,7 @@ import { scheduleUiRefresh } from '../../ui';
 import { renderApiConfigSidebarHtml, renderSettingsSidebarHtml } from '../../features/settings/view';
 import { renderApiConfigViewHtml, mountApiConfigView } from '../../features/api-config';
 import { renderSettingsViewHtml, mountSettingsView, mountGlobalConfigSection } from '../../features/settings';
+import { mountDshSection } from '../../features/dsh/settings-section';
 import { renderMcpViewHtml, mountMcpView } from '../../features/mcp';
 import { bindAppUpdatePopoverEvents, checkAppUpdate } from '../../features/updates/app-update';
 import { bindClaudeUpdatePopoverEvents } from '../../features/updates/claude-update';
@@ -140,6 +141,8 @@ export function mountActiveManagementView(): void {
       bindClaudeUpdatePopoverEvents(updatePanel);
     } else if (appState.settingsSection === 'global-config') {
       void mountGlobalConfigSection();
+    } else if (appState.settingsSection === 'dsh') {
+      mountDshSection();
     }
     mountSettingsView();
   } else if (appState.isMcpViewActive) {

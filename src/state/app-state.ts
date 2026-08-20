@@ -4,6 +4,7 @@ import type {
   StreamingState,
   PendingAskQuestionState,
   KiroStatusData,
+  DshStatusData,
   McpServerEntry,
   ClaudeCodeUpdateInfo,
   ClaudeUpdateCheckStatus,
@@ -97,6 +98,12 @@ export const appState = {
   apiConfigEscapeHandler: null as ((event: KeyboardEvent) => void) | null,
   settingsEscapeHandler: null as ((event: KeyboardEvent) => void) | null,
   kiroStatus: null as KiroStatusData | null,
+  /** 当前活跃 API profile 是否为 DeepSeek（标题栏 DSH 入口显示条件） */
+  activeProfileIsDeepSeek: false,
+  dshStatus: null as DshStatusData | null,
+  dshProgressText: '',
+  /** DSH 模式：主窗口整体切换为 DeepSeek Harness 页面 */
+  dshModeActive: false,
   kiroUsageGuard: createRequestGuard(),
   isKiroViewActive: false,
   kiroMountToken: 0,
