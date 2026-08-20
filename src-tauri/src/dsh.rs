@@ -425,11 +425,14 @@ pub fn dsh_start(state: State<DshState>) -> Result<DshStatusData, String> {
 
 /// 按端口查找并结束占用进程（覆盖 CCM 被强杀后残留的孤儿 dsh 进程）。
 /// Windows 用 netstat+taskkill，macOS/Linux 用 lsof+kill。
-fn kill_port_owner(port: u16) {
+/// 按端口查找并结束占用进程。返回是否杀到了至少一个进程。
+/// Windows 用 netstat+taskkill，macOS/Linux 用 lsof+kill（均套扩展 PATH）。
+fn kill_port_owner(port: u16) -> bool {
+    let mut killed = false;
     #[cfg(target_os = "windows")]
     {
-        // 注意：必须套用扩展 PATH——GUI 进程自身 PATH 不含系统目录（unix 上
-        // execvp 用调用进程 PATH，Windows 上 CreateProcess 同样按调用进程 PATH 搜索）
+        // 注意：必须套用扩展 PATH——GUI 进程自身 PATH 不含系统目录
+        // （CreateProcess 按调用进程 PATH 搜索）
         let mut netstat_cmd = Command::new("netstat");
         apply_cli_runtime_env(&mut netstat_cmd);
         netstat_cmd.arg("-ano");
@@ -438,12 +441,25 @@ fn kill_port_owner(port: u16) {
             let text = String::from_utf8_lossy(&out.stdout);
             let needle = format!(":{port}");
             for line in text.lines() {
-                if line.contains(&needle) && line.to_ascii_lowercase().contains("listen") {
-                    let pid = line.split_whitespace().last().unwrap_or("");
-                    if pid.chars().all(|c| c.is_ascii_digit()) {
-                        let mut kill_cmd = Command::new("taskkill");
-                        apply_cli_runtime_env(&mut kill_cmd);
-                        let _ = kill_cmd.args(["/F", "/T", "/PID", pid]).output();
+                // 精确匹配：Local Address 段含 :port 且状态为 LISTENING，
+                // 避免误杀 Foreign Address 为 :port 的连接行（CCM 自身的探测连接）
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let local_addr_ok = parts
+                    .first()
+                    .map(|a| a.contains(&needle) || a.contains(&format!("]:{port}")))
+                    .unwrap_or(false);
+                let state_ok = parts
+                    .iter()
+                    .any(|p| p.eq_ignore_ascii_case("LISTENING"));
+                if local_addr_ok && state_ok {
+                    if let Some(pid) = parts.last() {
+                        if pid.chars().all(|c| c.is_ascii_digit()) {
+                            eprintln!("[dsh] Windows 清理端口 {port} 占用进程 PID {pid}");
+                            let mut kill_cmd = Command::new("taskkill");
+                            apply_cli_runtime_env(&mut kill_cmd);
+                            let _ = kill_cmd.args(["/F", "/T", "/PID", pid]).output();
+                            killed = true;
+                        }
                     }
                 }
             }
@@ -460,28 +476,42 @@ fn kill_port_owner(port: u16) {
             let text = String::from_utf8_lossy(&out.stdout);
             for pid in text.split_whitespace() {
                 if pid.chars().all(|c| c.is_ascii_digit()) {
+                    eprintln!("[dsh] 清理端口 {port} 占用进程 PID {pid}");
                     let mut kill_cmd = Command::new("kill");
                     apply_cli_runtime_env(&mut kill_cmd);
                     let _ = kill_cmd.args(["-9", pid]).output();
+                    killed = true;
                 }
             }
+        } else if let Err(e) = lsof {
+            eprintln!("[dsh] lsof 查询失败: {e}");
         }
     }
+    killed
 }
 
-/// 停止 DSH 服务：先杀本进程启动的子进程，若端口仍被占用（孤儿/外部实例）则按端口清理
+/// 停止 DSH 服务：先杀本进程启动的子进程，再多轮复查端口，
+/// 仍被占用（孤儿/外部实例/子进程残留）则按端口清理，直到释放或超时。
 #[tauri::command]
 pub fn dsh_stop(state: State<DshState>) -> Result<DshStatusData, String> {
     if let Some(mut child) = state.0.lock().unwrap().take() {
+        eprintln!("[dsh] 停止：kill 本进程启动的子进程");
         let _ = child.kill();
         let _ = child.wait();
     }
-    // 短暂等待进程退出后复查端口；仍被占用 → 清理残留
-    thread::sleep(Duration::from_millis(400));
-    if is_port_open(DSH_PORT) {
-        kill_port_owner(DSH_PORT);
-        thread::sleep(Duration::from_millis(300));
+    // 多轮检测：等待进程自然退出；仍占用则按端口清理（最多约 3 秒）
+    for round in 0..6 {
+        thread::sleep(Duration::from_millis(500));
+        if !is_port_open(DSH_PORT) {
+            eprintln!("[dsh] 停止完成（第 {round} 轮端口已释放）");
+            return Ok(build_quick_status());
+        }
+        if round == 0 || round == 2 || round == 4 {
+            eprintln!("[dsh] 端口 {DSH_PORT} 仍被占用，按端口清理残留（第 {} 轮）", round / 2 + 1);
+            kill_port_owner(DSH_PORT);
+        }
     }
+    eprintln!("[dsh] 停止后端口 {DSH_PORT} 仍被占用（3 秒内未能释放）");
     Ok(build_quick_status())
 }
 

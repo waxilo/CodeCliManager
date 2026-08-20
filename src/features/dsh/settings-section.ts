@@ -207,7 +207,13 @@ async function runDshStart(section: HTMLElement, btn: HTMLButtonElement): Promis
   }
 }
 
-async function runDshStop(_section: HTMLElement): Promise<void> {
+async function runDshStop(section: HTMLElement): Promise<void> {
+  // 停止是阻塞操作（可能等待端口释放）：按钮禁用 + loading 文案反馈
+  const stopBtn = section.querySelector<HTMLButtonElement>('[data-dsh-action="stop"]');
+  if (stopBtn) {
+    stopBtn.disabled = true;
+    stopBtn.textContent = '停止中…';
+  }
   try {
     await api.dshStop();
   } catch {
