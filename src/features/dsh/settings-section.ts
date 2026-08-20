@@ -57,7 +57,6 @@ export function renderDshSectionHtml(): string {
           <button type="button" class="settings-btn-primary" data-dsh-action="install"${installDisabled ? ' disabled' : ''} title="${installDisabled ? '当前已是最新版本' : hasUpdate ? '更新到最新版本' : '安装 DSH 到 npm 全局'}">${installLabel}</button>
           <button type="button" class="dsh-btn" data-dsh-action="start">${running ? '打开页面' : '启动服务'}</button>
           <button type="button" class="dsh-btn" data-dsh-action="stop" ${running ? '' : 'disabled'}>停止服务</button>
-          <button type="button" class="dsh-btn" data-dsh-action="refresh">刷新状态</button>
         </div>
         <p class="dsh-progress" data-dsh-progress hidden></p>
         <p class="dsh-error" data-dsh-error hidden></p>
@@ -80,9 +79,7 @@ export function bindDshSectionEvents(section: HTMLElement): void {
     (btn as HTMLElement).dataset.bound = '1';
     btn.addEventListener('click', () => {
       const action = btn.dataset.dshAction;
-      if (action === 'refresh') {
-        void refreshDshStatus();
-      } else if (action === 'install') {
+      if (action === 'install') {
         void runDshInstall(section, btn);
       } else if (action === 'start') {
         void runDshStart(section, btn);
@@ -93,7 +90,7 @@ export function bindDshSectionEvents(section: HTMLElement): void {
   });
 }
 
-async function refreshDshStatus(): Promise<void> {
+export async function refreshDshStatus(): Promise<void> {
   try {
     appState.dshStatus = await api.dshStatus();
   } catch {
@@ -142,9 +139,18 @@ function applyDshStatus(section: HTMLElement, s: DshStatusData | null): void {
         : '安装 DSH 到 npm 全局';
   }
   const startBtn = section.querySelector<HTMLButtonElement>('[data-dsh-action="start"]');
-  if (startBtn) startBtn.textContent = running ? '打开页面' : '启动服务';
-  const stopBtn = section.querySelector<HTMLButtonElement>('[data-dsh-action="stop"]');
-  if (stopBtn) stopBtn.disabled = !running;
+  if (startBtn) {
+    startBtn.disabled = false;
+    startBtn.textContent = running ? '打开页面' : '启动服务';
+  }
+  // 停止进行中：stop 按钮状态由 runDshStop 管理，避免并发刷新改写（loading 中途消失/二次触发）
+  if (section.dataset.dshStopping !== '1') {
+    const stopBtn = section.querySelector<HTMLButtonElement>('[data-dsh-action="stop"]');
+    if (stopBtn) {
+      stopBtn.disabled = !running;
+      stopBtn.textContent = '停止服务';
+    }
+  }
 
   const hintEl = section.querySelector('[data-dsh-hint]');
   if (hintEl) {
@@ -195,30 +201,39 @@ async function runDshInstall(section: HTMLElement, btn: HTMLButtonElement): Prom
   }
 }
 
-async function runDshStart(section: HTMLElement, btn: HTMLButtonElement): Promise<void> {
+async function runDshStart(_section: HTMLElement, btn: HTMLButtonElement): Promise<void> {
   btn.disabled = true;
   btn.textContent = '启动中…';
   try {
+    // enterDshMode 内部失败时自行 toast 并 return（不向外抛）
     await enterDshMode();
-  } catch (e) {
-    showDshMessage(section, `启动失败：${String(e)}`, true);
   } finally {
+    // 刷新状态恢复按钮（失败路径 disabled 一并复位，可在分区内重试）
     await refreshDshStatus();
   }
 }
 
 async function runDshStop(section: HTMLElement): Promise<void> {
-  // 停止是阻塞操作（可能等待端口释放）：按钮禁用 + loading 文案反馈
+  // 停止是阻塞操作（可能等待端口释放）：按钮禁用 + loading 文案反馈。
+  // in-flight 标记：阻止期间其他 refreshDshStatus（install/start 完成、重挂载）
+  // 改写按钮状态，避免 loading 中途消失与二次触发。
   const stopBtn = section.querySelector<HTMLButtonElement>('[data-dsh-action="stop"]');
   if (stopBtn) {
     stopBtn.disabled = true;
     stopBtn.textContent = '停止中…';
   }
+  section.dataset.dshStopping = '1';
   try {
     await api.dshStop();
   } catch {
     // 忽略：刷新状态即可
   } finally {
+    delete section.dataset.dshStopping;
+    // 先恢复文案并保持禁用（等刷新按新状态归位），避免并发刷新抢先恢复可点状态
+    if (stopBtn) {
+      stopBtn.textContent = '停止服务';
+      stopBtn.disabled = true;
+    }
     await refreshDshStatus();
   }
 }

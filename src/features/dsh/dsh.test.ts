@@ -1,6 +1,11 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { appState } from '../../state';
-import { renderDshSectionHtml, mountDshSection, bindDshSectionEvents } from './settings-section';
+import {
+  renderDshSectionHtml,
+  mountDshSection,
+  bindDshSectionEvents,
+  refreshDshStatus as refreshDshStatusForTest,
+} from './settings-section';
 
 const statusMock = vi.fn();
 const installMock = vi.fn();
@@ -152,9 +157,75 @@ describe('设置页「DSH 工作台」分区', () => {
     expect(appState.dshModeActive).toBe(true);
   });
 
+  it('停止服务：进行中显示「停止中…」，完成后文案与状态归位', async () => {
+    stopMock.mockResolvedValue(baseStatus({ running: false }));
+    // 首次查询：运行中；停止后刷新查询：已停止
+    statusMock
+      .mockResolvedValueOnce(baseStatus({ running: true }))
+      .mockResolvedValue(baseStatus({ running: false }));
+    document.body.innerHTML = '<div id="settings-dsh-view"></div>';
+    appState.dshStatus = await statusMock();
+    document.querySelector('#settings-dsh-view')!.innerHTML = renderDshSectionHtml();
+    const section = document.querySelector<HTMLElement>('.dsh-section')!;
+    bindDshSectionEvents(section);
+    const stopBtn = document.querySelector<HTMLButtonElement>('[data-dsh-action="stop"]')!;
+    expect(stopBtn.disabled).toBe(false);
+    stopBtn.click();
+    // 点击后立即进入 loading（dshStop 挂起时）
+    expect(stopBtn.disabled).toBe(true);
+    expect(stopBtn.textContent).toContain('停止中');
+    await new Promise((r) => setTimeout(r, 20));
+    // 完成后：文案恢复、按钮按新状态（running=false → 禁用）、状态刷新
+    expect(stopBtn.textContent).toContain('停止服务');
+    expect(stopBtn.disabled).toBe(true);
+    expect(section.querySelector('[data-dsh-status-text]')!.textContent).toContain('未运行');
+    expect(statusMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('停止失败：文案与按钮状态仍归位（可再次点击）', async () => {
+    stopMock.mockRejectedValue(new Error('boom'));
+    statusMock.mockResolvedValue(baseStatus({ running: true }));
+    document.body.innerHTML = '<div id="settings-dsh-view"></div>';
+    appState.dshStatus = await statusMock();
+    document.querySelector('#settings-dsh-view')!.innerHTML = renderDshSectionHtml();
+    const section = document.querySelector<HTMLElement>('.dsh-section')!;
+    bindDshSectionEvents(section);
+    const stopBtn = document.querySelector<HTMLButtonElement>('[data-dsh-action="stop"]')!;
+    stopBtn.click();
+    await new Promise((r) => setTimeout(r, 20));
+    // 停止失败：running 仍 true → 按钮恢复可点 + 文案归位
+    expect(stopBtn.disabled).toBe(false);
+    expect(stopBtn.textContent).toContain('停止服务');
+  });
+
+  it('停止进行中：其他刷新不改写停止按钮状态（防二次触发）', async () => {
+    let resolveStop: (v: unknown) => void = () => {};
+    stopMock.mockImplementation(() => new Promise((res) => { resolveStop = res; }));
+    statusMock.mockResolvedValue(baseStatus({ running: true }));
+    document.body.innerHTML = '<div id="settings-dsh-view"></div>';
+    appState.dshStatus = await statusMock();
+    document.querySelector('#settings-dsh-view')!.innerHTML = renderDshSectionHtml();
+    const section = document.querySelector<HTMLElement>('.dsh-section')!;
+    bindDshSectionEvents(section);
+    const stopBtn = document.querySelector<HTMLButtonElement>('[data-dsh-action="stop"]')!;
+    stopBtn.click();
+    await Promise.resolve();
+    // stop 挂起中：模拟其他路径触发的状态刷新
+    await refreshDshStatusForTest();
+    expect(stopBtn.disabled).toBe(true);
+    expect(stopBtn.textContent).toContain('停止中');
+    // 完成：归位
+    resolveStop({ servers: [], configPath: '' });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(stopBtn.textContent).toContain('停止服务');
+  });
+
   it('「停止服务」调用 dshStop', async () => {
     stopMock.mockResolvedValue(baseStatus({ running: false }));
-    statusMock.mockResolvedValue(baseStatus({ running: true }));
+    // 首次查询：运行中；停止后刷新查询：已停止
+    statusMock
+      .mockResolvedValueOnce(baseStatus({ running: true }))
+      .mockResolvedValue(baseStatus({ running: false }));
     document.body.innerHTML = '<div id="settings-dsh-view"></div>';
     appState.dshStatus = await statusMock();
     document.querySelector('#settings-dsh-view')!.innerHTML = renderDshSectionHtml();
