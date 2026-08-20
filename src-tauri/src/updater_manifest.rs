@@ -334,8 +334,9 @@ fn pick_mirror_prefix(client: &Client) -> Option<&'static str> {
 
 /// 真实内容传输探测：对镜像根路径发 `Range` 请求，必须实际读到 ≥1KB 才算可用。
 /// 仅 TCP 连通（如 gh-proxy.com 曾出现）但传输停滞的镜像会被淘汰。
+/// 探测目标用真实清单路径（RANGE 小范围），比首页更能代表资产下载可达性。
 fn probe_mirror(client: &Client, prefix: &str) -> bool {
-    let probe_url = format!("{prefix}https://github.com/");
+    let probe_url = format!("{prefix}{UPSTREAM_LATEST_JSON}");
     let Ok(resp) = client
         .get(&probe_url)
         .header(reqwest::header::RANGE, "bytes=0-2048")

@@ -45,10 +45,63 @@ fn is_port_open(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
 }
 
+/// 候选的 CLI 可执行目录（npm / dsh 常见安装位置；与 apply_cli_runtime_env 对齐）
+fn cli_bin_dirs() -> Vec<PathBuf> {
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut dirs: Vec<PathBuf> = vec![
+        home.join(".local/bin"),
+        home.join(".npm-global/bin"),
+        home.join("bin"),
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+    ];
+    #[cfg(target_os = "windows")]
+    dirs.extend([
+        home.join("AppData").join("Roaming").join("npm"),
+        home.join("AppData").join("Local").join("Programs").join("nodejs"),
+        PathBuf::from("C:\\Program Files\\nodejs"),
+        PathBuf::from("C:\\Program Files (x86)\\nodejs"),
+    ]);
+    // 当前进程 PATH 里的目录也纳入（用户自定义安装位置）
+    if let Ok(path_var) = std::env::var("PATH") {
+        for seg in path_var.split(if cfg!(target_os = "windows") { ";" } else { ":" }) {
+            if !seg.is_empty() {
+                dirs.push(PathBuf::from(seg));
+            }
+        }
+    }
+    dirs
+}
+
+/// 解析可执行文件完整路径。
+/// - Windows：npm/dsh 是 .cmd 批处理，且 CreateProcess 按调用进程 PATH 搜索（不读子进程 env），
+///   必须显式给出完整路径（.cmd 优先，其次 .exe）；
+/// - Unix：execvpe 会按子进程修改后的 PATH 搜索，直接返回命令名即可。
+fn resolve_executable(cmd_name: &str) -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        for dir in cli_bin_dirs() {
+            for name in [format!("{cmd_name}.cmd"), format!("{cmd_name}.exe"), cmd_name.to_string()] {
+                let p = dir.join(&name);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = cmd_name;
+        Some(PathBuf::from(cmd_name))
+    }
+}
+
 /// 带超时的命令捕获：避免 npm view 等网络命令挂起阻塞状态查询。
 /// 超时或失败返回 None（调用方按「未知/未安装」处理）。
 fn run_command_capture(program: &str, args: &[&str], timeout: Duration) -> Option<String> {
-    let mut cmd = Command::new(program);
+    let executable = resolve_executable(program)?;
+    let mut cmd = Command::new(executable);
     cmd.args(args);
     apply_cli_runtime_env(&mut cmd);
     cmd.stdout(Stdio::piped());
@@ -226,7 +279,9 @@ pub async fn dsh_install(app: AppHandle) -> Result<String, String> {
 }
 
 async fn run_npm_dsh_install(app: &AppHandle) -> Result<String, String> {
-    let mut cmd = Command::new("npm");
+    let npm = resolve_executable("npm")
+        .ok_or_else(|| "未找到 npm：请先安装 Node.js/npm（或确认其已在 PATH 中）".to_string())?;
+    let mut cmd = Command::new(npm);
     apply_cli_runtime_env(&mut cmd);
     cmd.args(["install", "-g", "@deepseek-ai/dsh"]);
     cmd.stdout(Stdio::piped());
@@ -263,7 +318,9 @@ pub fn dsh_start(state: State<DshState>) -> Result<DshStatusData, String> {
         // 已有实例（可能是外部启动的 dsh）：直接复用
         return Ok(build_quick_status());
     }
-    let mut cmd = Command::new("dsh");
+    let dsh_bin = resolve_executable("dsh")
+        .ok_or_else(|| "未找到 dsh 命令：请先在「设置 → DSH 更新」中安装".to_string())?;
+    let mut cmd = Command::new(dsh_bin);
     apply_cli_runtime_env(&mut cmd);
     // 自动填充 API Key：当前活跃配置为 DeepSeek 时注入 DEEPSEEK_API_KEY，
     // DSH 凭据层优先继承环境变量（dsh-credentials-local），首次进入无需手动填写。
@@ -353,6 +410,32 @@ mod tests {
         assert!(json.contains("\"latestVersion\""));
         assert!(json.contains("\"running\""));
         assert!(!json.contains("installed_version"));
+    }
+
+    #[test]
+    fn cli_bin_dirs_include_current_path() {
+        let dirs = cli_bin_dirs();
+        assert!(dirs.len() >= 5);
+        // 当前 PATH 的目录被纳入（自定义安装位置可被解析到）
+        if let Ok(path_var) = std::env::var("PATH") {
+            let first = path_var.split(':').next().unwrap_or("");
+            if !first.is_empty() {
+                assert!(dirs.iter().any(|d| d.to_string_lossy() == first));
+            }
+        }
+    }
+
+    #[test]
+    fn resolve_executable_unix_returns_name() {
+        #[cfg(not(target_os = "windows"))]
+        {
+            assert_eq!(resolve_executable("dsh").as_deref(), Some(std::path::Path::new("dsh")));
+        }
+        #[cfg(target_os = "windows")]
+        {
+            // Windows 上若本机恰好有 npm 则能解析到完整路径
+            let _ = resolve_executable("npm");
+        }
     }
 
     #[test]

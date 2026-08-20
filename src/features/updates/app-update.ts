@@ -233,7 +233,12 @@ export function renderAppUpdatePopoverBody(): string {
     ${hint ? `<p class="claude-update-popover-status">${hint}</p>` : ''}
     ${hasUpdate && appState.appUpdateInfo.body ? renderAppUpdateNotes(appState.appUpdateInfo.body) : ''}
     ${downloading ? renderAppUpdateProgressHtml() : ''}
-    ${error && !downloading ? `<p class="claude-update-popover-error">${escapeHtml(error)}</p>` : ''}
+    ${error && !downloading ? `
+      <p class="claude-update-popover-error">${escapeHtml(error)}</p>
+      <p class="claude-update-popover-error claude-update-manual-hint">
+        镜像下载受限时可<a href="${escapeHtml(RELEASES_URL)}" target="_blank" rel="noopener noreferrer">手动下载安装包</a>（浏览器通常可走系统代理，下载更快）
+      </p>
+    ` : ''}
     <div class="claude-update-popover-actions">
       <button type="button" class="claude-update-action" data-action="recheck" ${checking || downloading ? 'disabled' : ''}>
         ${checking ? '检查中…' : '重新检查'}
@@ -348,8 +353,12 @@ export async function relaunchAfterUpdate(): Promise<void> {
   }
 }
 
-/** 下载停滞毫秒数：超过仍无字节增长则判定镜像失效，中断并重选镜像重试 */
-const DOWNLOAD_STALL_MS = 30_000;
+/** 下载停滞毫秒数：超过仍无字节增长则判定镜像失效，中断并重选镜像重试。
+ *  30s 偏长（用户感知「进度 0 很久」）；15s 内无字节增长即可判定当前镜像失效。 */
+const DOWNLOAD_STALL_MS = 15_000;
+
+/** 手动下载兜底入口（镜像全部失效时引导用户浏览器下载，通常可走系统代理） */
+const RELEASES_URL = 'https://github.com/waxilo/CodeCliManager/releases/latest';
 const MAX_DOWNLOAD_ATTEMPTS = 3;
 
 /**
