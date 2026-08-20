@@ -9,7 +9,9 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 
 use crate::claude::runtime::apply_cli_runtime_env;
-use crate::claude::updater::{run_update_child_with_progress, CLAUDE_INSTALL_TIMEOUT};
+use crate::claude::updater::{
+    apply_create_no_window, run_update_child_with_progress, CLAUDE_INSTALL_TIMEOUT,
+};
 use crate::config::load_api_profiles_store;
 use crate::model_fetch::is_deepseek_base_url;
 
@@ -43,6 +45,27 @@ fn is_port_open(port: u16) -> bool {
         SocketAddr::from(([127, 0, 0, 1], 3080))
     });
     TcpStream::connect_timeout(&addr, Duration::from_millis(300)).is_ok()
+}
+
+/// HTTP 就绪探测：TCP 可连不代表服务已能响应请求（启动慢/端口被其他程序占用）。
+/// 用阻塞 reqwest（blocking feature 未开时退化 TCP 探测）。这里用最小 HTTP 请求：
+/// 直接建立 TCP 连接并发一个 GET，读到任意 HTTP 响应即视为就绪。
+fn is_http_ready(port: u16) -> bool {
+    let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap_or_else(|_| {
+        SocketAddr::from(([127, 0, 0, 1], 3080))
+    });
+    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_millis(500)) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(1500)));
+    use std::io::Write;
+    let _ = stream.write_all(b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    use std::io::Read;
+    let mut buf = [0u8; 64];
+    match stream.read(&mut buf) {
+        Ok(n) => n > 0,
+        Err(_) => false,
+    }
 }
 
 /// 候选的 CLI 可执行目录（npm / dsh 常见安装位置；与 apply_cli_runtime_env 对齐）
@@ -104,6 +127,8 @@ fn run_command_capture(program: &str, args: &[&str], timeout: Duration) -> Optio
     let mut cmd = Command::new(executable);
     cmd.args(args);
     apply_cli_runtime_env(&mut cmd);
+    // Windows：版本探测也会闪控制台黑框，同样抑制
+    apply_create_no_window(&mut cmd);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let mut child = cmd.spawn().ok()?;
@@ -181,6 +206,23 @@ fn npm_global_node_modules_candidates() -> Vec<PathBuf> {
             .join("npm/node_modules"),
         dirs::data_dir().unwrap_or_default().join("npm/node_modules"),
     ]);
+    // nvm 用户：~/.nvm/versions/node/<v*/lib/node_modules（版本目录逐个展开）
+    if let Ok(versions_dir) = fs::read_dir(home.join(".nvm/versions/node")) {
+        for entry in versions_dir.flatten() {
+            if entry.path().is_dir() {
+                candidates.push(entry.path().join("lib/node_modules"));
+            }
+        }
+    }
+    // fnm：~/.local/share/fnm/node-versions/<v*/installation/lib/node_modules
+    if let Ok(versions_dir) = fs::read_dir(home.join(".local/share/fnm/node-versions")) {
+        for entry in versions_dir.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                candidates.push(p.join("installation/lib/node_modules"));
+            }
+        }
+    }
     candidates
 }
 
@@ -281,9 +323,24 @@ pub async fn dsh_install(app: AppHandle) -> Result<String, String> {
 async fn run_npm_dsh_install(app: &AppHandle) -> Result<String, String> {
     let npm = resolve_executable("npm")
         .ok_or_else(|| "未找到 npm：请先安装 Node.js/npm（或确认其已在 PATH 中）".to_string())?;
+    let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())?;
+    // 用户目录前缀全局安装（-g --prefix ~/.local）：
+    // - 保持「全局安装」语义（系统级 npm 全局，所有终端可用）
+    // - 装在用户可写目录，无需 sudo（/usr/local 不可写时不会失败）
+    let prefix = home.join(".local");
     let mut cmd = Command::new(npm);
     apply_cli_runtime_env(&mut cmd);
-    cmd.args(["install", "-g", "@deepseek-ai/dsh"]);
+    // Windows：抑制 npm.cmd 弹出的控制台黑框
+    apply_create_no_window(&mut cmd);
+    cmd.args([
+        "install",
+        "-g",
+        "--prefix",
+        prefix.to_string_lossy().as_ref(),
+        "@deepseek-ai/dsh",
+        "--no-audit",
+        "--no-fund",
+    ]);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
     let child = cmd
@@ -297,11 +354,16 @@ async fn run_npm_dsh_install(app: &AppHandle) -> Result<String, String> {
         DSH_PROGRESS_EVENT,
     )?;
     if status.success() {
-        Ok(if combined.is_empty() {
+        let bin = prefix.join("bin").join("dsh");
+        let hint = if combined.is_empty() {
             "DSH 已安装/更新".to_string()
         } else {
             combined
-        })
+        };
+        Ok(format!(
+            "{hint}\n安装位置：{}（已加入 PATH 探测）",
+            bin.display()
+        ))
     } else {
         Err(if combined.is_empty() {
             format!("DSH 安装失败（退出码 {}）", status.code().unwrap_or(-1))
@@ -322,6 +384,8 @@ pub fn dsh_start(state: State<DshState>) -> Result<DshStatusData, String> {
         .ok_or_else(|| "未找到 dsh 命令：请先在「设置 → DSH 更新」中安装".to_string())?;
     let mut cmd = Command::new(dsh_bin);
     apply_cli_runtime_env(&mut cmd);
+    // Windows：抑制常驻服务进程的控制台黑框
+    apply_create_no_window(&mut cmd);
     // 自动填充 API Key：当前活跃配置为 DeepSeek 时注入 DEEPSEEK_API_KEY，
     // DSH 凭据层优先继承环境变量（dsh-credentials-local），首次进入无需手动填写。
     // 明文 Key 只在 Rust 侧读取，不经过前端。
@@ -337,10 +401,10 @@ pub fn dsh_start(state: State<DshState>) -> Result<DshStatusData, String> {
         .map_err(|e| format!("启动 DSH 失败: {e}（请先在设置中安装 DSH）"))?;
     *state.0.lock().unwrap() = Some(child);
 
-    // 轮询端口就绪（最长 20 秒）
+    // 轮询 HTTP 就绪（最长 20 秒）：TCP 可连但 HTTP 未就绪（启动慢/端口被占）继续等待
     let deadline = std::time::Instant::now() + DSH_START_WAIT;
     while std::time::Instant::now() < deadline {
-        if is_port_open(DSH_PORT) {
+        if is_http_ready(DSH_PORT) {
             return Ok(build_quick_status());
         }
         thread::sleep(Duration::from_millis(300));

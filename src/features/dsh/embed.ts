@@ -21,15 +21,19 @@ export function renderDshEmbedHtml(): string {
           <button type="button" class="dsh-embed-btn primary" id="dsh-exit-btn" title="返回 CodeCliManager">← 返回 CCM</button>
         </div>
       </div>
+      <div class="dsh-embed-status" data-dsh-embed-status>正在加载 DeepSeek Harness…</div>
       <iframe
         class="dsh-embed-frame"
         src="http://127.0.0.1:3080"
         title="DeepSeek Harness"
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"
+        allow="clipboard-read; clipboard-write"
       ></iframe>
     </div>
   `;
 }
+
+/** iframe 加载超时（毫秒）：超过仍未触发 load 视为服务未响应 */
+const IFRAME_LOAD_TIMEOUT_MS = 15_000;
 
 /** 进入 DSH 模式：确保服务在运行后切换页面 */
 export async function enterDshMode(): Promise<void> {
@@ -51,14 +55,20 @@ export function exitDshMode(): void {
   shellApi.render();
 }
 
-/** 绑定 DSH 全屏视图的交互（返回 / 刷新 / 顶栏拖动与双击最大化） */
+/** 绑定 DSH 全屏视图的交互（返回 / 刷新 / 加载状态提示） */
 export function bindDshEmbedEvents(): void {
   document.querySelector('#dsh-exit-btn')?.addEventListener('click', exitDshMode);
-  document.querySelector('#dsh-reload-btn')?.addEventListener('click', () => {
+  const reloadBtn = document.querySelector<HTMLButtonElement>('#dsh-reload-btn');
+  reloadBtn?.addEventListener('click', () => {
     const frame = document.querySelector<HTMLIFrameElement>('.dsh-embed-frame');
+    const statusEl = document.querySelector<HTMLElement>('[data-dsh-embed-status]');
     if (frame) {
       const src = frame.src;
       frame.src = '';
+      if (statusEl) {
+        statusEl.hidden = false;
+        statusEl.textContent = '正在重新加载 DeepSeek Harness…';
+      }
       // 清空后重设，强制重新加载
       requestAnimationFrame(() => {
         frame.src = src;
@@ -66,4 +76,23 @@ export function bindDshEmbedEvents(): void {
     }
   });
 
+  // iframe 加载状态：成功隐藏提示；超时提示服务未响应（可点刷新重试）
+  const frame = document.querySelector<HTMLIFrameElement>('.dsh-embed-frame');
+  const statusEl = document.querySelector<HTMLElement>('[data-dsh-embed-status]');
+  if (frame && statusEl) {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      statusEl.hidden = false;
+      statusEl.textContent =
+        'DSH 服务未响应（http://127.0.0.1:3080），请点击「刷新」重试，或到「设置 → DSH 更新」查看服务状态';
+    }, IFRAME_LOAD_TIMEOUT_MS);
+    frame.addEventListener('load', () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      statusEl.hidden = true;
+    });
+  }
 }
