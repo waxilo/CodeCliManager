@@ -376,9 +376,15 @@ async fn run_npm_dsh_install(app: &AppHandle) -> Result<String, String> {
 /// 启动 DSH Web 服务（已运行则直接复用），等待端口就绪后返回状态
 #[tauri::command]
 pub fn dsh_start(state: State<DshState>) -> Result<DshStatusData, String> {
-    if is_port_open(DSH_PORT) {
+    if is_http_ready(DSH_PORT) {
         // 已有实例（可能是外部启动的 dsh）：直接复用
         return Ok(build_quick_status());
+    }
+    if is_port_open(DSH_PORT) {
+        // 端口被占但 HTTP 未就绪：多半是强杀 CCM 后残留的僵尸 dsh，先清理再启动
+        eprintln!("[dsh] 端口 {DSH_PORT} 被占但服务未就绪，清理残留进程后重启");
+        kill_port_owner(DSH_PORT);
+        thread::sleep(Duration::from_millis(400));
     }
     let dsh_bin = resolve_executable("dsh")
         .ok_or_else(|| "未找到 dsh 命令：请先在「设置 → DSH 更新」中安装".to_string())?;
@@ -417,12 +423,55 @@ pub fn dsh_start(state: State<DshState>) -> Result<DshStatusData, String> {
     Err("DSH 服务启动超时（20 秒内端口未就绪），请查看 dsh web 输出".to_string())
 }
 
-/// 停止由 CCM 启动的 DSH 服务（外部实例不受影响）
+/// 按端口查找并结束占用进程（覆盖 CCM 被强杀后残留的孤儿 dsh 进程）。
+/// Windows 用 netstat+taskkill，macOS/Linux 用 lsof+kill。
+fn kill_port_owner(port: u16) {
+    #[cfg(target_os = "windows")]
+    {
+        let netstat = Command::new("netstat").arg("-ano").output();
+        if let Ok(out) = netstat {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let needle = format!(":{port}");
+            for line in text.lines() {
+                if line.contains(&needle) && line.to_ascii_lowercase().contains("listen") {
+                    let pid = line.split_whitespace().last().unwrap_or("");
+                    if pid.chars().all(|c| c.is_ascii_digit()) {
+                        let _ = Command::new("taskkill")
+                            .args(["/F", "/T", "/PID", pid])
+                            .output();
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let lsof = Command::new("lsof")
+            .args(["-tiTCP", &port.to_string(), "-sTCP:LISTEN"])
+            .output();
+        if let Ok(out) = lsof {
+            let text = String::from_utf8_lossy(&out.stdout);
+            for pid in text.split_whitespace() {
+                if pid.chars().all(|c| c.is_ascii_digit()) {
+                    let _ = Command::new("kill").args(["-9", pid]).output();
+                }
+            }
+        }
+    }
+}
+
+/// 停止 DSH 服务：先杀本进程启动的子进程，若端口仍被占用（孤儿/外部实例）则按端口清理
 #[tauri::command]
 pub fn dsh_stop(state: State<DshState>) -> Result<DshStatusData, String> {
     if let Some(mut child) = state.0.lock().unwrap().take() {
         let _ = child.kill();
         let _ = child.wait();
+    }
+    // 短暂等待进程退出后复查端口；仍被占用 → 清理残留
+    thread::sleep(Duration::from_millis(400));
+    if is_port_open(DSH_PORT) {
+        kill_port_owner(DSH_PORT);
+        thread::sleep(Duration::from_millis(300));
     }
     Ok(build_quick_status())
 }
