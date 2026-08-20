@@ -32,8 +32,9 @@ export function renderDshEmbedHtml(): string {
   `;
 }
 
-/** iframe 加载超时（毫秒）：超过仍未触发 load 视为服务未响应 */
-const IFRAME_LOAD_TIMEOUT_MS = 15_000;
+/** iframe 加载超时（毫秒）：超过仍未触发 load 视为服务未响应。
+ *  服务刚启动/自愈时可能较慢，超时后自动重载一次再给出未响应提示。 */
+const IFRAME_LOAD_TIMEOUT_MS = 10_000;
 
 /** 进入 DSH 模式：确保服务在运行后切换页面 */
 export async function enterDshMode(): Promise<void> {
@@ -76,17 +77,34 @@ export function bindDshEmbedEvents(): void {
     }
   });
 
-  // iframe 加载状态：成功隐藏提示；超时提示服务未响应（可点刷新重试）
+  // iframe 加载状态：成功隐藏提示；超时先自动重载一次，仍无响应再提示（可点刷新重试）
   const frame = document.querySelector<HTMLIFrameElement>('.dsh-embed-frame');
   const statusEl = document.querySelector<HTMLElement>('[data-dsh-embed-status]');
   if (frame && statusEl) {
     let settled = false;
-    const timer = window.setTimeout(() => {
+    let retried = false;
+    const fail = () => {
       if (settled) return;
       settled = true;
       statusEl.hidden = false;
       statusEl.textContent =
         'DSH 服务未响应（http://127.0.0.1:3080），请点击「刷新」重试，或到「设置 → DSH 更新」查看服务状态';
+    };
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      if (!retried) {
+        // 服务可能刚启动/自愈中：自动重载一次
+        retried = true;
+        statusEl.hidden = false;
+        statusEl.textContent = '正在重新加载 DeepSeek Harness…';
+        const src = frame.src;
+        frame.src = '';
+        requestAnimationFrame(() => {
+          frame.src = src;
+        });
+        return;
+      }
+      fail();
     }, IFRAME_LOAD_TIMEOUT_MS);
     frame.addEventListener('load', () => {
       if (settled) return;
@@ -94,5 +112,20 @@ export function bindDshEmbedEvents(): void {
       clearTimeout(timer);
       statusEl.hidden = true;
     });
+    // CSP 拦截诊断：若 iframe 因 frame-src 被阻止，明确提示（定位配置问题）
+    document.addEventListener(
+      'securitypolicyviolation',
+      (e) => {
+        if (settled) return;
+        if (e.violatedDirective.includes('frame-src') || e.violatedDirective.includes('child-src')) {
+          settled = true;
+          clearTimeout(timer);
+          statusEl.hidden = false;
+          statusEl.textContent =
+            'DSH 页面被内容安全策略（CSP）拦截：' + e.violatedDirective + '，请更新应用后重试';
+        }
+      },
+      { once: true },
+    );
   }
 }

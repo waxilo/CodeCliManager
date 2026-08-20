@@ -428,7 +428,12 @@ pub fn dsh_start(state: State<DshState>) -> Result<DshStatusData, String> {
 fn kill_port_owner(port: u16) {
     #[cfg(target_os = "windows")]
     {
-        let netstat = Command::new("netstat").arg("-ano").output();
+        // 注意：必须套用扩展 PATH——GUI 进程自身 PATH 不含系统目录（unix 上
+        // execvp 用调用进程 PATH，Windows 上 CreateProcess 同样按调用进程 PATH 搜索）
+        let mut netstat_cmd = Command::new("netstat");
+        apply_cli_runtime_env(&mut netstat_cmd);
+        netstat_cmd.arg("-ano");
+        let netstat = netstat_cmd.output();
         if let Ok(out) = netstat {
             let text = String::from_utf8_lossy(&out.stdout);
             let needle = format!(":{port}");
@@ -436,9 +441,9 @@ fn kill_port_owner(port: u16) {
                 if line.contains(&needle) && line.to_ascii_lowercase().contains("listen") {
                     let pid = line.split_whitespace().last().unwrap_or("");
                     if pid.chars().all(|c| c.is_ascii_digit()) {
-                        let _ = Command::new("taskkill")
-                            .args(["/F", "/T", "/PID", pid])
-                            .output();
+                        let mut kill_cmd = Command::new("taskkill");
+                        apply_cli_runtime_env(&mut kill_cmd);
+                        let _ = kill_cmd.args(["/F", "/T", "/PID", pid]).output();
                     }
                 }
             }
@@ -446,14 +451,18 @@ fn kill_port_owner(port: u16) {
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let lsof = Command::new("lsof")
-            .args(["-tiTCP", &port.to_string(), "-sTCP:LISTEN"])
-            .output();
+        // 套用扩展 PATH：macOS 的 lsof 在 /usr/sbin，GUI 进程自身 PATH 找不到
+        let mut lsof_cmd = Command::new("lsof");
+        apply_cli_runtime_env(&mut lsof_cmd);
+        lsof_cmd.args(["-tiTCP", &port.to_string(), "-sTCP:LISTEN"]);
+        let lsof = lsof_cmd.output();
         if let Ok(out) = lsof {
             let text = String::from_utf8_lossy(&out.stdout);
             for pid in text.split_whitespace() {
                 if pid.chars().all(|c| c.is_ascii_digit()) {
-                    let _ = Command::new("kill").args(["-9", pid]).output();
+                    let mut kill_cmd = Command::new("kill");
+                    apply_cli_runtime_env(&mut kill_cmd);
+                    let _ = kill_cmd.args(["-9", pid]).output();
                 }
             }
         }
