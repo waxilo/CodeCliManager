@@ -709,13 +709,17 @@
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-success) 25%, transparent);
 }
 
-.dsh-update-hint {
-  margin: 0;
-  padding: 8px 12px;
-  border: 1px solid color-mix(in srgb, var(--color-warning) 45%, var(--color-border));
-  border-radius: var(--radius-md);
+/* 有更新时高亮「最新版本」卡片（替代原先的提示条） */
+.dsh-info-item.is-update {
+  border-color: color-mix(in srgb, var(--color-warning) 45%, var(--color-border));
   background: var(--color-warning-bg);
-  font-size: 12px;
+}
+
+.dsh-info-item.is-update .dsh-info-label {
+  color: var(--color-warning-text);
+}
+
+.dsh-info-item.is-update .dsh-info-value {
   color: var(--color-warning-text);
 }
 

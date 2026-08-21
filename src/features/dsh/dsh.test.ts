@@ -58,11 +58,12 @@ describe('设置页「DSH 工作台」分区', () => {
     expect(html).toContain('未运行');
     const stopBtn = document.querySelector<HTMLButtonElement>('[data-dsh-action="stop"]')!;
     expect(stopBtn.disabled).toBe(true);
-    // 提示行常驻占位（防布局跳动）：已最新时显示中性文案
-    const hint = document.querySelector<HTMLElement>('[data-dsh-hint]')!;
-    expect(hint).not.toBeNull();
-    expect(hint.textContent).toContain('当前已是最新版本');
-    expect(hint.classList.contains('is-muted')).toBe(true);
+    // 已最新：最新版本卡片不高亮（提示条已移除）
+    const latestCard = document
+      .querySelector<HTMLElement>('[data-dsh-latest]')!
+      .closest('.dsh-info-item')!;
+    expect(latestCard).not.toBeNull();
+    expect(latestCard.classList.contains('is-update')).toBe(false);
   });
 
   it('运行中：停止按钮可用，启动按钮变为「打开页面」，有新版本时提示', async () => {
@@ -75,7 +76,13 @@ describe('设置页「DSH 工作台」分区', () => {
     const html = document.querySelector('#settings-dsh-view')!.innerHTML;
     expect(html).toContain('运行中');
     expect(html).toContain('打开页面');
-    expect(html).toContain('发现新版本');
+    // 有新版本：最新版本卡片高亮（替代提示条）
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-dsh-latest]')!
+        .closest('.dsh-info-item')!
+        .classList.contains('is-update'),
+    ).toBe(true);
     expect(
       document.querySelector<HTMLButtonElement>('[data-dsh-action="stop"]')!.disabled,
     ).toBe(false);
@@ -127,7 +134,13 @@ describe('设置页「DSH 工作台」分区', () => {
     )!;
     expect(installBtn.textContent).toContain('更新');
     expect(installBtn.disabled).toBe(false);
-    expect(document.querySelector('.dsh-update-hint')!.textContent).toContain('9.9.9');
+    // 有新版本：最新版本卡片高亮（替代提示条）
+    expect(
+      document
+        .querySelector<HTMLElement>('[data-dsh-latest]')!
+        .closest('.dsh-info-item')!
+        .classList.contains('is-update'),
+    ).toBe(true);
     const section = document.querySelector<HTMLElement>('.dsh-section')!;
     bindDshSectionEvents(section);
     installBtn.click();

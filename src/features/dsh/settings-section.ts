@@ -21,13 +21,8 @@ export function renderDshSectionHtml(): string {
       ? '更新'
       : '已是最新版本';
   const installDisabled = Boolean(s?.installedVersion && !hasUpdate);
-  // 常驻提示行：内容按状态变化但始终占位，避免整块高度突变导致页面跳动
-  const hintText = !s?.installedVersion
-    ? '尚未安装 DSH，可点击「安装」'
-    : hasUpdate
-      ? `发现新版本 ${escapeHtml(s?.latestVersion || '')}，可一键更新`
-      : '当前已是最新版本';
-  const hintClass = !s?.installedVersion || hasUpdate ? '' : ' is-muted';
+  // 有更新时高亮「最新版本」卡片（替代原先的提示条，避免冗余提示）
+  const latestCardClass = hasUpdate ? ' is-update' : '';
   return `
     <div class="settings-update-view" id="settings-dsh-view">
       <div class="dsh-section">
@@ -40,7 +35,7 @@ export function renderDshSectionHtml(): string {
             <span class="dsh-info-label">已装版本</span>
             <span class="dsh-info-value" data-dsh-installed>${installed}</span>
           </div>
-          <div class="dsh-info-item">
+          <div class="dsh-info-item${latestCardClass}">
             <span class="dsh-info-label">最新版本</span>
             <span class="dsh-info-value" data-dsh-latest>${latest}</span>
           </div>
@@ -52,7 +47,6 @@ export function renderDshSectionHtml(): string {
             </span>
           </div>
         </div>
-        <p class="dsh-update-hint${hintClass}" data-dsh-hint>${hintText}</p>
         <div class="dsh-actions">
           <button type="button" class="settings-btn-primary" data-dsh-action="install"${installDisabled ? ' disabled' : ''} title="${installDisabled ? '当前已是最新版本' : hasUpdate ? '更新到最新版本' : '安装 DSH 到 npm 全局'}">${installLabel}</button>
           <button type="button" class="dsh-btn" data-dsh-action="start">${running ? '打开页面' : '启动服务'}</button>
@@ -152,14 +146,9 @@ function applyDshStatus(section: HTMLElement, s: DshStatusData | null): void {
     }
   }
 
-  const hintEl = section.querySelector('[data-dsh-hint]');
-  if (hintEl) {
-    hintEl.textContent = !s?.installedVersion
-      ? '尚未安装 DSH，可点击「安装」'
-      : hasUpdate
-        ? `发现新版本 ${s?.latestVersion || ''}，可一键更新`
-        : '当前已是最新版本';
-    hintEl.classList.toggle('is-muted', Boolean(s?.installedVersion) && !hasUpdate);
+  // 有更新时高亮「最新版本」卡片，替代原先的提示条
+  if (latestEl) {
+    latestEl.closest('.dsh-info-item')?.classList.toggle('is-update', hasUpdate);
   }
 }
 
