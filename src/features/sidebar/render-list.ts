@@ -234,7 +234,7 @@ function renderSidebarEmptyHtml(title: string, hint: string): string {
   `;
 }
 
-/** 活跃会话 tab：近 RECENT_HOURS 小时内更新的会话平铺展示（按最近更新降序） */
+/** 活跃会话 tab：近 RECENT_HOURS 小时内更新的会话按工作区（文件夹）分组展示 */
 export function renderActiveConversations(): string {
   const recent = getRecentConversations();
 
@@ -243,11 +243,15 @@ export function renderActiveConversations(): string {
     return renderSidebarEmptyHtml('近一天没有新会话', '开始一段新对话后，会话会显示在这里');
   }
 
+  // 与归档会话一致：按 project_dir 分组成工作区卡片，方便按文件夹查看活跃会话
+  const views = buildSidebarWorkspaceViews(recent);
   const label = `<div class="sidebar-section-label"><span>活跃会话</span><span class="sidebar-section-label-count">${recent.length} 个会话</span></div>`;
-  const rows = recent.map((c) => renderConversationItemHtml(c)).join('');
+  const cards = views
+    .map((ws) => renderWorkspaceCardHtml(ws, appState.expandedWorkspaces.has(ws.key)))
+    .join('');
   appState.newConversationIds.clear();
 
-  return label + `<div class="active-conversations">${rows}</div>`;
+  return label + cards;
 }
 
 /** 归档会话 tab：超过 RECENT_HOURS 未更新的会话按工作区分组展示 */

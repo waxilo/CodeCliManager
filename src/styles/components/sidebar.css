@@ -510,14 +510,6 @@
   gap: 1px;
 }
 
-/* 活跃会话 tab：近一天会话平铺列表（无项目卡片缩进） */
-.active-conversations {
-  padding: 2px 8px 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-}
-
 /* ── 侧边栏多视图页签（工作区 / 子代理 / 目录） ─────────────────── */
 .sidebar-tabs {
   flex-shrink: 0;

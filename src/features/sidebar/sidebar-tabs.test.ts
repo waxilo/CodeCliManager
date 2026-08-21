@@ -150,6 +150,24 @@ describe('活跃 / 归档会话拆分', () => {
     expect(html.indexOf('会话-newest')).toBeLessThan(html.indexOf('会话-newer'));
   });
 
+  it('活跃 tab 按文件夹分组展示：不同工作区各成一卡', () => {
+    const now = Date.now();
+    appState.conversations = [
+      conv('a', now - 1 * HOUR),
+      { ...conv('b', now - 1 * HOUR), project_dir: '/other' },
+    ];
+    renderCurrentTab();
+    expect(getActiveSidebarTab()).toBe('active');
+    const html = document.querySelector('#conversation-list')!.innerHTML;
+    // 工作区显示名来自 project_dir 末段
+    expect(html).toContain('proj');
+    expect(html).toContain('other');
+    // 两个会话分别挂在各自文件夹卡片下
+    expect(html).toContain('会话-a');
+    expect(html).toContain('会话-b');
+    expect(document.querySelectorAll('.workspace-card').length).toBe(2);
+  });
+
   it('归档 tab 只列超过 24h 的会话，按工作区分组展示', () => {
     const now = Date.now();
     appState.conversations = [
