@@ -323,6 +323,36 @@ describe('resident session re-busy after turn-complete', () => {
   });
 });
 
+describe('session-error clears stuck running state after failed restart', () => {
+  beforeEach(resetSessionState);
+
+  it('removes the session from runningSessions so the status strip cannot stay at executing', () => {
+    const sid = 'session-error-stuck-1';
+    // 模拟：切模型重启后新进程异常退出，后端发 session-error（随后 session-ended
+    // 会被 runningSessions 拦截忽略）——错误事件必须自行清掉运行标记。
+    appState.runningSessions.add(sid);
+    appState.modelRestartingSessions.add(sid);
+    appState.streamingBySession.set(sid, {
+      blocks: [{ type: 'text', content: '半截回答', finalized: false }],
+      thinkingDone: true,
+      currentBlockIdx: 0,
+    });
+
+    handleSessionError({ conversationId: sid, error: '切换模型后进程异常退出' });
+
+    expect(appState.runningSessions.has(sid)).toBe(false);
+    expect(appState.modelRestartingSessions.has(sid)).toBe(false);
+  });
+
+  it('clears the pending run marker when the error has no conversation id', () => {
+    appState.runningSessions.add('pending');
+
+    handleSessionError({ conversationId: '', error: '启动失败' });
+
+    expect(appState.runningSessions.has('pending')).toBe(false);
+  });
+});
+
 describe('assistantTextCovers content-level coverage', () => {
   it('short progress does not cover the longer final stream text', () => {
     const progress = '正在读取代码...';

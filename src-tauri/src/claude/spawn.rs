@@ -146,7 +146,11 @@ pub(crate) fn spawn_claude_stream(
         &normalize_process_model(model),
     );
     // execute_prompt 返回 runId 后可能立刻收到取消；进程注册完成时兑现该取消。
-    if is_session_aborted(&registry_key) {
+    // 注意：切模型重启停旧进程时会在会话键上留下 aborted 标记，该标记属于旧进程；
+    // model_restart 仍在说明本进程是重启后的继任者，不能误杀（否则新进程被强杀，
+    // 前端状态条永远停在「执行中」）。
+    let is_restart_successor = is_model_restart(&registry_key);
+    if should_kill_new_spawn(is_session_aborted(&registry_key), is_restart_successor) {
         if let Ok(mut child) = child_arc.lock() {
             force_kill_process_tree(&mut child);
         }
@@ -154,6 +158,15 @@ pub(crate) fn spawn_claude_stream(
         clear_session_aborted(&registry_key);
         drop(stdin);
         return Ok(StreamOutcome::Cancelled(conversation_id.cloned()));
+    }
+    if is_restart_successor {
+        // 取走 model_restart / graceful_shutdown：它们描述的是正在退出的旧进程。
+        // 若不取走，新进程首轮 result 会被「退出中」逻辑抑制 turn-complete，
+        // 且可能被引导直接退出 —— 前端同样会永远停在「执行中」。
+        // aborted 刻意保留：旧进程的退出分类仍需要它（强杀路径不会误报错误），
+        // 新进程首个 result 到达时（is_stream_aborted 分支）会自然清掉。
+        let _ = take_model_restart(&registry_key);
+        let _ = take_graceful_shutdown(&registry_key);
     }
 
     let mut captured_session_id = conversation_id.filter(|c| !c.is_empty()).cloned();

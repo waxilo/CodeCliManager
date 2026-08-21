@@ -722,6 +722,19 @@ export function handleSessionError(payload: SessionErrorPayload) {
   const errorText = payload.error.trim();
   if (!errorText) return;
 
+  // 会话出错意味着后端将结束（或已结束）该会话进程：清掉运行/停止标记。
+  // 否则「切模型重启 / 重新生成后进程异常退出」时，session-ended 会被
+  // runningSessions 拦截忽略，输入框状态条与时长永远停在「执行中」。
+  if (sid) {
+    appState.runningSessions.delete(sid);
+    appState.abortingSessions.delete(sid);
+    appState.modelRestartingSessions.delete(sid);
+  } else {
+    appState.runningSessions.delete('pending');
+    appState.abortingSessions.delete('pending');
+    appState.modelRestartingSessions.delete('pending');
+  }
+
   const isCurrentSession = !sid || sid === appState.activeConversationId;
   if (isCurrentSession) clearPendingRequestState();
   clearStreamingState(sid || 'pending');

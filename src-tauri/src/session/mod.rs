@@ -590,6 +590,15 @@ pub(crate) fn try_send_interrupt(session_key: &str) -> bool {
     }
 }
 
+/// 新 spawn 注册时是否应按「用户取消」强杀。
+///
+/// 切模型重启 / 进程重拉会先优雅停止旧进程，并在会话键上留下 aborted 标记；
+/// 该标记属于正在退出的旧进程。model_restart 仍在时说明本进程是重启后的
+/// 继任者，不能把旧标记误当作新的用户取消。
+pub(crate) fn should_kill_new_spawn(aborted: bool, model_restart: bool) -> bool {
+    aborted && !model_restart
+}
+
 /// 会话本轮是否正在输出（result 前为 true；常驻进程空闲时为 false）
 pub(crate) static TURN_ACTIVE: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 
@@ -1057,6 +1066,41 @@ mod tests {
             .map(|_| new_unique_id("test-"))
             .collect::<HashSet<_>>();
         assert_eq!(ids.len(), 1_000);
+    }
+
+    #[test]
+    fn kill_new_spawn_only_for_real_abort_not_restart_successor() {
+        // 用户真实取消：aborted 且非重启继任者 → 强杀新进程
+        assert!(should_kill_new_spawn(true, false));
+        // 切模型重启的继任进程：旧进程停机留下的 aborted 属于旧进程 → 不误杀
+        assert!(!should_kill_new_spawn(true, true));
+        // 旧进程已收尾清理（aborted 已清）→ 不误杀
+        assert!(!should_kill_new_spawn(false, true));
+        assert!(!should_kill_new_spawn(false, false));
+    }
+
+    #[test]
+    fn restart_successor_takes_shutdown_flags_but_keeps_aborted_for_old_process() {
+        let key = new_unique_id("restart-flag-");
+        // 切模型重启：旧进程停机流程打上三枚会话级标记
+        mark_model_restart(&key);
+        mark_graceful_shutdown(&key);
+        mark_session_aborted(&key);
+
+        // 继任新进程注册时：识别为继任者并取走 model_restart / graceful
+        let is_restart_successor = is_model_restart(&key);
+        assert!(is_restart_successor);
+        assert!(!should_kill_new_spawn(is_session_aborted(&key), is_restart_successor));
+        let _ = take_model_restart(&key);
+        let _ = take_graceful_shutdown(&key);
+
+        // 新进程的 turn-complete 不应再被「退出中」逻辑抑制
+        assert!(!is_stream_model_restart(&key, &None));
+        assert!(!is_graceful_shutdown(&key, &None));
+        // aborted 刻意保留给旧进程退出分类；新进程首个 result 时自然清除
+        assert!(is_session_aborted(&key));
+        clear_session_aborted(&key);
+        assert!(!is_session_aborted(&key));
     }
 
     #[test]
