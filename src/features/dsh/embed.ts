@@ -4,6 +4,7 @@ import * as api from '../../api';
 import { showToast } from '../../ui';
 
 
+
 /**
  * DSH 模式：整个主窗口切换为 DeepSeek Harness 页面（iframe 全屏）。
  * 切换是纯前端状态驱动：enterDshMode 先确保服务在跑，然后置位
@@ -16,6 +17,7 @@ export function renderDshEmbedHtml(): string {
     <div class="dsh-embed">
       <div class="dsh-embed-bar" data-tauri-drag-region="deep">
         <span class="dsh-embed-title">DeepSeek Harness</span>
+        <span class="dsh-embed-balance" data-dsh-embed-balance></span>
         <div class="dsh-embed-actions">
           <button type="button" class="dsh-embed-btn" id="dsh-reload-btn" title="刷新页面">刷新</button>
           <button type="button" class="dsh-embed-btn primary" id="dsh-exit-btn" title="返回 CodeCliManager">← 返回 CCM</button>
@@ -49,6 +51,31 @@ export async function enterDshMode(): Promise<void> {
   shellApi.render();
 }
 
+/** 拉取并展示 DeepSeek 剩余余额（仅当前配置为 DeepSeek 时） */
+async function refreshDshEmbedBalance(): Promise<void> {
+  const el = document.querySelector<HTMLElement>('[data-dsh-embed-balance]');
+  if (!el) return;
+  if (!appState.activeProfileIsDeepSeek) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  el.hidden = false;
+  el.textContent = '余额查询中…';
+  try {
+    const balance = await api.fetchDeepseekBalance({
+      baseUrl: appState.activeProfileBaseUrl,
+      apiKey: null,
+      profileId: appState.activeProfileId,
+    });
+    const text = `${balance.totalBalance} ${balance.currency}`;
+    el.textContent = `余额 ${text}`;
+    el.title = `剩余余额 ${text}（赠送 ${balance.grantedBalance} / 充值 ${balance.toppedUpBalance} · ${balance.isAvailable ? '可用' : '不足'}）`;
+  } catch {
+    el.textContent = '余额查询失败';
+  }
+}
+
 /** 退出 DSH 模式：恢复 CCM 界面 */
 export function exitDshMode(): void {
   if (!appState.dshModeActive) return;
@@ -76,6 +103,9 @@ export function bindDshEmbedEvents(): void {
       });
     }
   });
+
+  // 顶栏余额：进入 DSH 面板时拉取当前 DeepSeek 配置的剩余余额
+  void refreshDshEmbedBalance();
 
   // iframe 加载状态：成功隐藏提示；超时先自动重载一次，仍无响应再提示（可点刷新重试）
   const frame = document.querySelector<HTMLIFrameElement>('.dsh-embed-frame');

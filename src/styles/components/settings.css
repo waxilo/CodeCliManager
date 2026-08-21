@@ -897,3 +897,19 @@
 .dsh-embed-status[hidden] {
   display: none;
 }
+
+/* DSH 顶栏余额 */
+.dsh-embed-balance {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  text-align: right;
+}
+
+.dsh-embed-balance[hidden] {
+  display: none;
+}

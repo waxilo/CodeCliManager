@@ -6,16 +6,19 @@ import {
   bindDshSectionEvents,
   refreshDshStatus as refreshDshStatusForTest,
 } from './settings-section';
+import { renderDshEmbedHtml, bindDshEmbedEvents } from './embed';
 
 const statusMock = vi.fn();
 const installMock = vi.fn();
 const startMock = vi.fn();
 const stopMock = vi.fn();
+const fetchBalanceMock = vi.fn();
 vi.mock('../../api', () => ({
   dshStatus: (...args: unknown[]) => statusMock(...args),
   dshInstall: (...args: unknown[]) => installMock(...args),
   dshStart: (...args: unknown[]) => startMock(...args),
   dshStop: (...args: unknown[]) => stopMock(...args),
+  fetchDeepseekBalance: (...args: unknown[]) => fetchBalanceMock(...args),
 }));
 
 vi.mock('@tauri-apps/api/event', () => ({
@@ -42,6 +45,7 @@ describe('设置页「DSH 工作台」分区', () => {
     installMock.mockReset();
     startMock.mockReset();
     stopMock.mockReset();
+    fetchBalanceMock.mockReset();
   });
 
   it('渲染版本、状态与按钮（未运行 / 停止按钮禁用）', async () => {
@@ -237,3 +241,57 @@ describe('设置页「DSH 工作台」分区', () => {
   });
 });
 
+describe('DSH 顶栏余额展示', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '';
+    appState.activeProfileIsDeepSeek = false;
+    appState.activeProfileBaseUrl = '';
+    appState.activeProfileId = '';
+    fetchBalanceMock.mockReset();
+  });
+
+  it('DeepSeek 配置下进入 DSH 面板：顶栏展示剩余余额', async () => {
+    appState.activeProfileIsDeepSeek = true;
+    appState.activeProfileBaseUrl = 'https://api.deepseek.com';
+    appState.activeProfileId = 'p1';
+    fetchBalanceMock.mockResolvedValue({
+      isAvailable: true,
+      currency: 'CNY',
+      totalBalance: '113.45',
+      grantedBalance: '10',
+      toppedUpBalance: '103.45',
+    });
+    document.body.innerHTML = renderDshEmbedHtml();
+    bindDshEmbedEvents();
+    await new Promise((r) => setTimeout(r, 20));
+    const el = document.querySelector<HTMLElement>('[data-dsh-embed-balance]')!;
+    expect(el.hidden).toBe(false);
+    expect(el.textContent).toContain('余额 113.45 CNY');
+    expect(fetchBalanceMock).toHaveBeenCalledWith({
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: null,
+      profileId: 'p1',
+    });
+  });
+
+  it('非 DeepSeek 配置：余额元素隐藏', async () => {
+    appState.activeProfileIsDeepSeek = false;
+    document.body.innerHTML = renderDshEmbedHtml();
+    bindDshEmbedEvents();
+    await new Promise((r) => setTimeout(r, 10));
+    const el = document.querySelector<HTMLElement>('[data-dsh-embed-balance]')!;
+    expect(el.hidden).toBe(true);
+    expect(fetchBalanceMock).not.toHaveBeenCalled();
+  });
+
+  it('余额查询失败：显示失败提示', async () => {
+    appState.activeProfileIsDeepSeek = true;
+    appState.activeProfileBaseUrl = 'https://api.deepseek.com';
+    fetchBalanceMock.mockRejectedValue(new Error('network'));
+    document.body.innerHTML = renderDshEmbedHtml();
+    bindDshEmbedEvents();
+    await new Promise((r) => setTimeout(r, 20));
+    const el = document.querySelector<HTMLElement>('[data-dsh-embed-balance]')!;
+    expect(el.textContent).toContain('余额查询失败');
+  });
+});

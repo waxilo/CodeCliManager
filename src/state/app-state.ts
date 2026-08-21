@@ -100,6 +100,9 @@ export const appState = {
   kiroStatus: null as KiroStatusData | null,
   /** 当前活跃 API profile 是否为 DeepSeek（标题栏 DSH 入口显示条件） */
   activeProfileIsDeepSeek: false,
+  /** 当前活跃 API profile 的 baseUrl / id（供 DSH 顶栏等复用余额查询） */
+  activeProfileBaseUrl: '',
+  activeProfileId: '',
   dshStatus: null as DshStatusData | null,
   dshProgressText: '',
   /** DSH 模式：主窗口整体切换为 DeepSeek Harness 页面 */

@@ -81,15 +81,17 @@ export async function refreshMainBalanceBar(): Promise<void> {
 
     const activeProfile = state.profiles.find((p) => p.id === state.activeProfileId);
     const baseUrl = (activeProfile?.baseUrl || state.current?.baseUrl || '').trim();
+    const profileId = activeProfile?.id ?? '';
     // 标题栏 DSH 入口条件缓存（kiro 运行时由渲染侧再叠加判断）；
     // 值变化时刷新标题栏按钮显隐（配置切换后即时生效）
     const prevDeepSeek = appState.activeProfileIsDeepSeek;
     appState.activeProfileIsDeepSeek = isDeepSeekBaseUrl(baseUrl);
+    appState.activeProfileBaseUrl = baseUrl;
+    appState.activeProfileId = profileId;
     if (prevDeepSeek !== appState.activeProfileIsDeepSeek) {
       shellApi.syncTitlebarActions();
     }
     const profileName = activeProfile?.name || '官方默认';
-    const profileId = activeProfile?.id ?? '';
     const kiroRunning = Boolean(appState.kiroStatus?.running);
     const kiroPort = appState.kiroStatus?.port ?? null;
 
