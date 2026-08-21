@@ -99,7 +99,9 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     const card = list.querySelector('[data-stream-id="live-tool-task1"]');
     expect(card).not.toBeNull();
     expect(card!.textContent).toContain('1K tokens');
-    expect(card!.textContent).toContain('子代理执行中');
+    // 状态徽标已收敛到卡片头部（运行中），底部进度行不再重复展示
+    expect(card!.textContent).toContain('运行中');
+    expect(card!.querySelector('.live-subagent-progress .tool-status')).toBeNull();
   });
 
   it('无活动工具时清空所有实时工具卡', () => {

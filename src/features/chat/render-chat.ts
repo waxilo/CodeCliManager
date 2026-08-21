@@ -404,24 +404,18 @@ export function renderLiveToolChunks(tools: ActiveToolState[]): RenderedMessageC
   });
 }
 
-/** 运行中子代理的实时进度行（tokens · 工具次数 · 耗时 + 状态徽标），
- *  完成/失败后展示终态徽标，等待历史落盘接管（样式见 tool-cards.css）。 */
+/** 运行中子代理的实时进度行（tokens · 工具次数 · 耗时）。
+ *  状态徽标已由卡片头部展示（运行中/完成/失败），这里只保留进度元信息，
+ *  避免同一状态在两处重复展示；无进度信息时不渲染该行。 */
 function renderLiveSubagentProgressLine(tool: ActiveToolState): string {
   const parts: string[] = [];
   if (tool.progress?.totalTokens) parts.push(`${formatTokenCount(tool.progress.totalTokens)} tokens`);
   if (tool.progress?.toolUses) parts.push(`${tool.progress.toolUses} 次工具`);
   if (tool.progress?.durationMs) parts.push(formatDuration(tool.progress.durationMs));
-  const meta = parts.length ? `<span class="tool-meta">${parts.join(' · ')}</span>` : '';
-  const badge =
-    tool.status === 'failed'
-      ? '<span class="tool-status tool-status-error">子代理失败</span>'
-      : tool.status === 'done'
-        ? '<span class="tool-status tool-status-done">子代理完成</span>'
-        : '<span class="tool-status tool-status-running">子代理执行中</span>';
+  if (!parts.length) return '';
   return `
     <div class="live-subagent-progress">
-      ${meta}
-      ${badge}
+      <span class="tool-meta">${parts.join(' · ')}</span>
     </div>
   `;
 }
