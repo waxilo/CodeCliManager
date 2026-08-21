@@ -190,14 +190,19 @@ fn build_quick_status() -> DshStatusData {
 
 /// 候选的 npm 全局包目录（node_modules 根）。不依赖 npm 命令——
 /// dsh/npm 是 node shebang 脚本，GUI 环境 PATH 不含 node 时（nvm/volta/fnm 用户）直接失败。
+///
+/// 顺序与 cli_bin_dirs() / extended_path_for_cli() 保持一致：用户目录安装优先。
+/// ccm 的 dsh_install 固定装到 ~/.local，dsh_start 也优先解析 ~/.local/bin/dsh；
+/// 若系统目录（/usr/local 等）里还有旧版残留，必须先读用户目录的新版，
+/// 否则会出现「更新成功但已装版本永远显示旧版、一直提示发现新版本」。
 fn npm_global_node_modules_candidates() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut candidates: Vec<PathBuf> = vec![
-        PathBuf::from("/usr/local/lib/node_modules"),
-        PathBuf::from("/opt/homebrew/lib/node_modules"),
         home.join(".local/lib/node_modules"),
         home.join(".npm-global/lib/node_modules"),
         home.join("bin/node_modules"),
+        PathBuf::from("/opt/homebrew/lib/node_modules"),
+        PathBuf::from("/usr/local/lib/node_modules"),
     ];
     #[cfg(target_os = "windows")]
     candidates.extend([
@@ -320,6 +325,19 @@ pub async fn dsh_install(app: AppHandle) -> Result<String, String> {
     run_npm_dsh_install(&app).await
 }
 
+/// 从 npm 安装输出中剔除 warn/notice 噪音行（进度事件仍实时转发原始行，只影响最终摘要）。
+/// 例：`npm warn deprecated node-domexception@1.0.0: ...` 这类提示会让人误以为安装报错。
+fn filter_npm_summary_output(output: &str) -> String {
+    output
+        .lines()
+        .filter(|line| {
+            let t = line.trim_start();
+            !t.starts_with("npm warn") && !t.starts_with("npm notice")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 async fn run_npm_dsh_install(app: &AppHandle) -> Result<String, String> {
     let npm = resolve_executable("npm")
         .ok_or_else(|| "未找到 npm：请先安装 Node.js/npm（或确认其已在 PATH 中）".to_string())?;
@@ -346,13 +364,16 @@ async fn run_npm_dsh_install(app: &AppHandle) -> Result<String, String> {
     let child = cmd
         .spawn()
         .map_err(|e| format!("启动 npm 安装失败: {e}（请确认已安装 Node.js/npm）"))?;
-    let (status, combined) = run_update_child_with_progress(
+    let (status, raw_combined) = run_update_child_with_progress(
         app,
         "DSH 安装",
         CLAUDE_INSTALL_TIMEOUT,
         child,
         DSH_PROGRESS_EVENT,
     )?;
+    // 摘要里滤掉 npm warn/notice 噪音（进度事件仍实时转发原始行）：
+    // 例如 node-domexception 弃用提示会让人误以为安装报错。
+    let combined = filter_npm_summary_output(&raw_combined);
     if status.success() {
         let bin = prefix.join("bin").join("dsh");
         let hint = if combined.is_empty() {
@@ -629,5 +650,33 @@ mod tests {
         // 当前机器真实安装位置应被覆盖（集成性质：本机 /usr/local/lib/node_modules）
         #[cfg(target_os = "macos")]
         assert!(candidates.contains(&PathBuf::from("/usr/local/lib/node_modules")));
+    }
+
+    #[test]
+    fn npm_global_candidates_prefer_user_home_over_system_dirs() {
+        // 与 cli_bin_dirs() / extended_path_for_cli() 一致：用户目录安装优先。
+        // ccm 的 dsh_install 固定装到 ~/.local；若系统目录存在旧版残留，
+        // 检测必须先命中用户目录的新版，否则「更新成功但一直显示旧版本」。
+        let candidates = npm_global_node_modules_candidates();
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let user_local = home.join(".local/lib/node_modules");
+        let system_local = PathBuf::from("/usr/local/lib/node_modules");
+        let user_pos = candidates.iter().position(|p| *p == user_local);
+        let system_pos = candidates.iter().position(|p| *p == system_local);
+        if let (Some(u), Some(s)) = (user_pos, system_pos) {
+            assert!(u < s, "~/.local/lib/node_modules 必须在 /usr/local 之前：{candidates:?}");
+        } else {
+            assert!(user_pos.is_some(), "缺少用户目录候选: {candidates:?}");
+        }
+    }
+
+    #[test]
+    fn npm_summary_output_filters_warn_and_notice_lines() {
+        let output = "npm warn deprecated node-domexception@1.0.0: Use your platform's native DOMException instead\nnpm notice\nchanged 455 packages in 7s\n\nadded 1 package\n";
+        let filtered = filter_npm_summary_output(output);
+        assert!(!filtered.contains("npm warn"));
+        assert!(!filtered.contains("npm notice"));
+        assert!(filtered.contains("changed 455 packages in 7s"));
+        assert!(filtered.contains("added 1 package"));
     }
 }
