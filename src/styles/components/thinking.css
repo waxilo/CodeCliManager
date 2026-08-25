@@ -139,6 +139,38 @@
   margin-bottom: 8px;
 }
 
+/* 友好错误提示：取代一长串原始报文的高层说明 */
+.message-error-hint {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-error-text);
+  margin-bottom: 8px;
+}
+
+/* 原始错误详情：默认折叠，点击展开（保留技术细节但不主动刷屏） */
+.message-error-detail {
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.message-error-detail summary {
+  cursor: pointer;
+  color: var(--color-text-muted);
+  user-select: none;
+}
+
+.message-error-detail summary:hover {
+  color: var(--color-text);
+}
+
+.message-error-detail .markdown-body {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--color-error-bg) 60%, transparent);
+  font-size: 12px;
+}
+
 .message.error .markdown-body {
   color: var(--color-error-text);
 }

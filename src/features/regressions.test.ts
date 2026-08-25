@@ -240,6 +240,71 @@ describe('新建会话后侧边栏刷新', () => {
     expect(appState.conversations.some((c) => c.id === 'conv-err')).toBe(true);
     expect(document.querySelector('#conversation-list')!.innerHTML).toContain('conv-err');
   });
+
+  it('同一失败回合：真实 API 错误与 [ede_diagnostic] 合并为一张卡，不再刷两张', () => {
+    appState.activeConversationId = 'conv-merg';
+    appState.conversations = [
+      {
+        id: 'conv-merg',
+        title: 't',
+        messages: [],
+        platform: 'claude',
+        project_dir: null,
+        source_path: null,
+        created_at: 1,
+        updated_at: 1,
+      },
+    ];
+
+    // 先报真实 API 错误（上游 502）
+    handleSessionError({
+      conversationId: 'conv-merg',
+      error:
+        'API Error: 502 Improperly formed request. This is a server-side issue, usually temporary — try again in a moment.',
+    });
+    // 随后 Claude Code 对同一失败回合补一条内部诊断
+    handleSessionError({
+      conversationId: 'conv-merg',
+      error: '[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null',
+    });
+
+    const conv = appState.conversations.find((c) => c.id === 'conv-merg')!;
+    const errors = conv.messages.filter((m) => m.role === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].content).toContain('API Error: 502');
+    expect(errors[0].content).toContain('[ede_diagnostic]');
+  });
+
+  it('同一回合相邻的多个真实错误同样合并为一张卡', () => {
+    appState.activeConversationId = 'conv-merg2';
+    appState.conversations = [
+      {
+        id: 'conv-merg2',
+        title: 't',
+        messages: [],
+        platform: 'claude',
+        project_dir: null,
+        source_path: null,
+        created_at: 1,
+        updated_at: 1,
+      },
+    ];
+
+    handleSessionError({
+      conversationId: 'conv-merg2',
+      error: 'API Error: 502 Improperly formed request.',
+    });
+    handleSessionError({
+      conversationId: 'conv-merg2',
+      error: 'API Error: empty assistant response',
+    });
+
+    const conv = appState.conversations.find((c) => c.id === 'conv-merg2')!;
+    const errors = conv.messages.filter((m) => m.role === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].content).toContain('502 Improperly formed');
+    expect(errors[0].content).toContain('empty assistant response');
+  });
 });
 
 describe('subagent tool cleanup', () => {

@@ -768,12 +768,26 @@ export function handleSessionError(payload: SessionErrorPayload) {
       refreshActiveTabContent();
     }
 
-    const hasSameError = conversation.messages.some(
-      (message) => message.role === 'error' && message.content === errorText,
-    );
-    if (!hasSameError) {
-      conversation.messages.push(errorMessage);
-      conversation.updated_at = errorMessage.timestamp;
+    const nowSec = Math.floor(Date.now() / 1000);
+    const last = conversation.messages[conversation.messages.length - 1];
+    // 同一失败回合往往连发多条 session-error（真实 API 错误 + Claude Code 的内部
+    // `[ede_diagnostic]` 等），它们都是同一个问题，别刷成多张卡。相邻错误消息几乎只
+    // 可能来自同一回合（不同回合之间总有用户/助手消息隔开），故把「紧接着的最近错误」
+    // 合并进一张卡；用 120s 窗口挡住跨回合误合并。
+    const lastIsRecentError =
+      !!last && last.role === 'error' && nowSec - last.timestamp <= 120;
+
+    if (lastIsRecentError && !last.content.includes(errorText)) {
+      last.content = `${last.content}\n${errorText}`;
+      conversation.updated_at = nowSec;
+    } else {
+      const hasSameError = conversation.messages.some(
+        (message) => message.role === 'error' && message.content === errorText,
+      );
+      if (!hasSameError) {
+        conversation.messages.push(errorMessage);
+        conversation.updated_at = errorMessage.timestamp;
+      }
     }
     if (isCurrentSession) {
       appState.pendingUserMessage = null;

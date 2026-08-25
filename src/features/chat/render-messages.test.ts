@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { processToolMessages, filterVisibleMessages, renderToolMessageHtml, renderMessageListHtml } from './render-messages';
+import { processToolMessages, filterVisibleMessages, renderToolMessageHtml, renderMessageListHtml, parseErrorHint } from './render-messages';
 import type { Message, TaskNotificationData } from '../../types';
 
 function toolUse(id: string | undefined, name: string, input: Record<string, unknown>): Message {
@@ -283,5 +283,61 @@ describe('renderMessageListHtml 全流程：真实 81f4d1ee 数据形态的 Agen
     expect(html).not.toContain('call_04_WK4xGAr2L1NVRrBZNAaO9561');
     expect(html).not.toContain('>完成</span>');
     // 其他工具（如 AskUserQuestion / TodoWrite）不受影响
+  });
+});
+
+describe('错误提示友好化 parseErrorHint', () => {
+  it('502 Improperly formed request → 提示推理网关拒绝并给出处理建议', () => {
+    const res = parseErrorHint(
+      'API Error: 502 Improperly formed request. This is a server-side issue, usually temporary — try again in a moment. If it persists, check your inference gateway (127.0.0.1:5050).',
+    );
+    expect(res.isKnown).toBe(true);
+    expect(res.hint).toContain('推理网关');
+    expect(res.hint).toContain('502');
+    expect(res.hint).toContain('切换模型');
+  });
+
+  it('[ede_diagnostic] → 提示本轮没有生成有效内容', () => {
+    const res = parseErrorHint(
+      '[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null',
+    );
+    expect(res.isKnown).toBe(true);
+    expect(res.hint).toContain('没有生成有效内容');
+  });
+
+  it('合并内容（502 + ede_diagnostic）优先按真实 API 错误提示', () => {
+    const res = parseErrorHint(
+      'API Error: 502 Improperly formed request. try again in a moment.\n' +
+        '[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null',
+    );
+    expect(res.isKnown).toBe(true);
+    expect(res.hint).toContain('推理网关');
+    expect(res.hint).toContain('502');
+  });
+
+  it('提取报文里的实际网关地址，而非硬编码 5050', () => {
+    const res = parseErrorHint(
+      'API Error: 502 Improperly formed request. check your inference gateway (127.0.0.1:59999).',
+    );
+    expect(res.hint).toContain('127.0.0.1:59999');
+    expect(res.hint).not.toContain('5050');
+  });
+
+  it('通用 API Error 取首行作为提示', () => {
+    const res = parseErrorHint('API Error: 上游超时\n更多细节');
+    expect(res.isKnown).toBe(true);
+    expect(res.hint).toBe('上游超时');
+  });
+
+  it('无法识别的普通错误原样返回', () => {
+    const res = parseErrorHint('shell failed');
+    expect(res.isKnown).toBe(false);
+    expect(res.hint).toBe('shell failed');
+  });
+
+  it('空内容返回默认提示', () => {
+    const res = parseErrorHint('');
+    expect(res.isKnown).toBe(true);
+    expect(res.hint).toContain('模型调用失败');
   });
 });

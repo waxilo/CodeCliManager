@@ -746,6 +746,64 @@ export function renderToolMessageHtml(msg: Message, msgIdAttr = ''): string {
   return toolContent;
 }
 
+/**
+ * 把后端 / Claude Code 的原始错误文本缩成用户友好的提示。
+ *  - isKnown=true：命中已知模式，前端展示友好 hint + 折叠原始报文；
+ *  - isKnown=false：无法识别，直接展示原始内容，不额外做友好化。
+ */
+export function parseErrorHint(content: string): { hint: string; isKnown: boolean } {
+  const raw = (content || '').trim();
+  if (!raw) return { hint: '模型调用失败，请重试。', isKnown: true };
+
+  // 上游推理网关 502（Improperly formed request / schema 不识别）——优先级最高
+  if (
+    /502/i.test(raw) &&
+    /improperly formed|improperly-formatted|malformed|not defined in the schema/i.test(raw)
+  ) {
+    // 网关端口可能非默认（5050 被占用时回退随机端口），从原始报文里取实际地址，取不到再兜底默认
+    const gateway = raw.match(/127\.0\.0\.1:\d+|localhost:\d+/)?.[0] ?? '127.0.0.1:5050';
+    return {
+      hint: `推理网关（${gateway}）拒绝了请求（502）：通常是当前模型不可用，或请求参数不被该模型支持。请切换模型，或稍后重试。`,
+      isKnown: true,
+    };
+  }
+
+  if (/\bempty assistant response\b/i.test(raw)) {
+    return { hint: '模型没有返回任何内容，请重试（或切换模型）。', isKnown: true };
+  }
+
+  if (/upstream claimed tool_use but returned no tool call/i.test(raw)) {
+    return { hint: '模型声明要调用工具却没有返回结果，请重试。', isKnown: true };
+  }
+
+  if (/\boverloaded_error\b|usually temporary|try again in a moment|server-side issue/i.test(raw)) {
+    return { hint: '上游服务暂时繁忙，请稍后重试。', isKnown: true };
+  }
+
+  // 通用 API / 鉴权 / 限流错误：取首行作为可读提示
+  if (
+    /^(API Error:|Error:)/i.test(raw) ||
+    /authentication_error|rate_limit_error/i.test(raw)
+  ) {
+    const firstLine = raw
+      .split('\n')[0]
+      .replace(/^(API Error:)\s*/i, '')
+      .trim();
+    return { hint: firstLine || '模型调用失败，请重试。', isKnown: true };
+  }
+
+  // Claude Code 内部诊断：回合未产出有效 assistant 内容（同一失败回合的第二症状，
+  // 通常与上面的真实 API 错误合并成一卡展示，故放在 API 错误判定之后）
+  if (raw.includes('[ede_diagnostic]')) {
+    return {
+      hint: '这一轮没有生成有效内容（可能是模型请求失败或中途被打断）。请重试，或切换一个可用的模型。',
+      isKnown: true,
+    };
+  }
+
+  return { hint: raw, isKnown: false };
+}
+
 export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = false): string {
   const msgIdAttr = `data-message-id="${escapeHtml(msg.id)}"`;
   if (msg.role === 'tool') {
@@ -770,11 +828,17 @@ export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = fa
   }
 
   if (msg.role === 'error') {
+    const { hint, isKnown } = parseErrorHint(msg.content);
+    const rawHtml = `<div class="markdown-body">${renderMarkdown(msg.content)}</div>`;
+    const body = isKnown
+      ? `<div class="message-error-hint">${escapeHtml(hint)}</div>` +
+        `<details class="message-error-detail"><summary>查看原始错误</summary>${rawHtml}</details>`
+      : rawHtml;
     return `
       <div class="message error" ${msgIdAttr}>
         <div class="message-content message-error-content">
           <div class="message-error-title">调用失败</div>
-          <div class="markdown-body">${renderMarkdown(msg.content)}</div>
+          ${body}
           <div class="message-footer">
             <div class="message-time">${formatTime(msg.timestamp)}</div>
           </div>
