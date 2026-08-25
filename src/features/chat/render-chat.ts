@@ -1,7 +1,7 @@
 import { appState, MAX_VISIBLE_MESSAGES } from '../../state';
 import type { Message, Conversation, StreamBlock, ActiveToolState } from '../../types';
-import { escapeHtml, formatDuration } from '../../utils';
-import { formatTokenCount } from './context-indicator';
+import { escapeHtml } from '../../utils';
+import { formatSubagentUsage } from './subagent-usage';
 import {
   renderMessageListHtml,
   renderMessageHtmlChunks,
@@ -367,9 +367,11 @@ export function renderLiveToolChunks(tools: ActiveToolState[]): RenderedMessageC
   return sorted.map((tool) => {
     const id = `live-tool-${tool.toolUseId}`;
     const config = TOOL_CONFIG_MAP[tool.toolName] || getDefaultToolConfig();
-    const progressLine =
+    // 子代理（Task/Agent）：把「tokens · 工具次数 · 耗时」提到标题行右侧，
+    // 而不是另占一行（见 .tool-meta）。其余工具不需摘要元信息。
+    const summaryMeta =
       tool.toolName === 'Task' || tool.toolName === 'Agent'
-        ? renderLiveSubagentProgressLine(tool)
+        ? renderLiveSubagentMeta(tool)
         : '';
     const html = `<div class="message tool live-tool-card${tool.status === 'running' ? ' streaming' : ''}" data-stream-id="${escapeHtml(id)}">
       <div class="message-content">${renderToolMessageHtml({
@@ -389,8 +391,9 @@ export function renderLiveToolChunks(tools: ActiveToolState[]): RenderedMessageC
             icon: config.iconColor,
             primary: config.borderColor,
           },
+          summaryMeta,
         },
-      })}${progressLine}</div>
+      })}</div>
     </div>`;
     return {
       id,
@@ -404,20 +407,16 @@ export function renderLiveToolChunks(tools: ActiveToolState[]): RenderedMessageC
   });
 }
 
-/** 运行中子代理的实时进度行（tokens · 工具次数 · 耗时）。
- *  状态徽标已由卡片头部展示（运行中/完成/失败），这里只保留进度元信息，
- *  避免同一状态在两处重复展示；无进度信息时不渲染该行。 */
-function renderLiveSubagentProgressLine(tool: ActiveToolState): string {
-  const parts: string[] = [];
-  if (tool.progress?.totalTokens) parts.push(`${formatTokenCount(tool.progress.totalTokens)} tokens`);
-  if (tool.progress?.toolUses) parts.push(`${tool.progress.toolUses} 次工具`);
-  if (tool.progress?.durationMs) parts.push(formatDuration(tool.progress.durationMs));
-  if (!parts.length) return '';
-  return `
-    <div class="live-subagent-progress">
-      <span class="tool-meta">${parts.join(' · ')}</span>
-    </div>
-  `;
+/** 运行中子代理的头部摘要元信息 HTML（tokens · 工具次数 · 耗时）。
+ *  状态徽标已由卡片头部展示（运行中/完成/失败），这里把用量提到同一行右侧，
+ *  避免单独成行；无进度信息时不渲染该 span。 */
+function renderLiveSubagentMeta(tool: ActiveToolState): string {
+  const metaStr = formatSubagentUsage({
+    totalTokens: tool.progress?.totalTokens,
+    toolUses: tool.progress?.toolUses,
+    durationMs: tool.progress?.durationMs,
+  });
+  return metaStr ? `<span class="tool-meta">${escapeHtml(metaStr)}</span>` : '';
 }
 
 /**

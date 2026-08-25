@@ -29,7 +29,7 @@ import {
 import { ScrollController, scheduleUiRefresh } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
 import { mergeStreamBlocks } from './render-chat';
-import { formatTokenCount } from './context-indicator';
+import { formatSubagentUsage } from './subagent-usage';
 
 const TOOL_CHUNK_KINDS = new Set([
   'tool_use_start',
@@ -907,13 +907,13 @@ export function syncStreamingBlocksInPlace(sessionId: string): void {
         `[data-stream-id="live-tool-${id}"]`,
       );
       if (!cardEl) continue;
-      const metaEl = cardEl.querySelector('.live-subagent-progress .tool-meta');
+      const metaEl = cardEl.querySelector('.tool-card-header .tool-meta');
       if (!metaEl) continue;
-      const parts: string[] = [];
-      if (tool.progress?.totalTokens) parts.push(`${formatTokenCount(tool.progress.totalTokens)} tokens`);
-      if (tool.progress?.toolUses) parts.push(`${tool.progress.toolUses} 次工具`);
-      if (tool.progress?.durationMs) parts.push(formatDuration(tool.progress.durationMs));
-      metaEl.textContent = parts.join(' · ');
+      metaEl.textContent = formatSubagentUsage({
+        totalTokens: tool.progress?.totalTokens,
+        toolUses: tool.progress?.toolUses,
+        durationMs: tool.progress?.durationMs,
+      });
     }
   }
 

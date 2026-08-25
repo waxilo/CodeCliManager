@@ -31,6 +31,9 @@ export interface ToolMessageData {
   colorScheme: ToolColorScheme;
   /** 子代理完成通知（status / summary / 完整报告），由 history 解析合并 */
   taskNotification?: TaskNotificationData;
+  /** 头部摘要元信息 HTML（如「3 次工具 · 5.0s」）已被渲染为 .tool-meta span；
+   *  用于把调用次数/耗时提到标题行右侧，而不是另占一行 */
+  summaryMeta?: string;
 }
 
 export interface Message {

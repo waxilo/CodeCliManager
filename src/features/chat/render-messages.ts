@@ -4,6 +4,7 @@ import { escapeHtml, formatTime, formatDuration } from '../../utils';
 import { renderMarkdownCached as renderMarkdown } from '../../markdown';
 import { parseFileRefs, isImageFile } from '../files';
 import { parseAskUserQuestionInput } from '../permissions/ask-question';
+import { formatSubagentUsage } from './subagent-usage';
 import * as api from '../../api';
 import { dedupeAdjacentDuplicateMessages } from '../conversations/normalize';
 import { getFileSuggestionIcon, getImageMime, resolveFilePath, stripFileRefTags, stripFileRefsFromDisplay } from '../files/index';
@@ -666,12 +667,13 @@ export function renderToolMessageHtml(msg: Message, msgIdAttr = ''): string {
       : done
         ? '<span class="tool-status tool-status-done">完成</span>'
         : '<span class="tool-status tool-status-running">运行中</span>';
-    const metaParts: string[] = [];
-    if (tn.total_tokens) metaParts.push(`${tn.total_tokens} tokens`);
-    if (tn.tool_uses) metaParts.push(`${tn.tool_uses} 次工具`);
-    if (tn.duration_ms) metaParts.push(formatDuration(tn.duration_ms));
-    const meta = metaParts.length
-      ? `<span class="tool-meta">${escapeHtml(metaParts.join(' · '))}</span>`
+    const metaStr = formatSubagentUsage({
+      totalTokens: tn.total_tokens,
+      toolUses: tn.tool_uses,
+      durationMs: tn.duration_ms,
+    });
+    const meta = metaStr
+      ? `<span class="tool-meta">${escapeHtml(metaStr)}</span>`
       : '';
     const report = tn.result?.trim();
     return `
@@ -727,6 +729,7 @@ export function renderToolMessageHtml(msg: Message, msgIdAttr = ''): string {
           <span class="tool-icon" style="color: ${colorScheme.icon}">${escapeHtml(config.icon)}</span>
           <span class="tool-label">${escapeHtml(config.label)}</span>
           <span class="tool-title-text">${escapeHtml(titleText)}</span>
+          ${td.summaryMeta ?? ''}
           ${statusBadge}
           <span class="tool-chevron">▾</span>
         </summary>

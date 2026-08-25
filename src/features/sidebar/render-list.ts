@@ -2,7 +2,7 @@ import { appState } from '../../state';
 import { escapeHtml, toMillis, formatCompactTime } from '../../utils';
 import type { Conversation } from '../../types';
 import { isConversationInstance } from '../conversations/normalize';
-import { groupConversationsByWorkspace, formatModelLabel, saveExpandedWorkspaces } from './workspace-grouping';
+import { groupConversationsByWorkspace, saveExpandedWorkspaces } from './workspace-grouping';
 import { refreshActiveTabContent } from './sidebar-tabs';
 
 /** 未分类分组的固定 key */
@@ -30,7 +30,6 @@ export interface SidebarWorkspaceView {
   displayName: string;
   conversations: import('../../types').Conversation[];
   latestActivity: number;
-  modelLabel: string;
   hasActive: boolean;
   runningCount: number;
   isUncategorized: boolean;
@@ -112,18 +111,13 @@ export function buildSidebarWorkspaceViews(
       (max, c) => Math.max(max, toMillis(c.updated_at), toMillis(c.created_at)),
       0,
     );
-    // 模型标签取最近活动会话上记录的模型
-    const newest = [...matched].sort(
-      (a, b) => toMillis(b.updated_at || b.created_at) - toMillis(a.updated_at || a.created_at),
-    )[0];
 
     return {
       key,
       path,
       displayName,
-  conversations: matched,
+      conversations: matched,
       latestActivity,
-      modelLabel: formatModelLabel(matched.find((c) => c.last_model)?.last_model ?? newest?.last_model),
       hasActive: matched.some((conversation) =>
         isConversationInstance(
           conversation,
@@ -165,13 +159,6 @@ const CONVERSATION_RUNNING_DOT_HTML =
 const CONVERSATION_STATE_ICON =
   `<span class="conversation-state-icon">${CONVERSATION_RUNNING_DOT_HTML}</span>`;
 
-/** 项目卡片元信息（仅运行中状态；最近使用时间不再展示，保持分组简洁） */
-export function renderWorkspaceMetaInnerHtml(ws: SidebarWorkspaceView): string {
-  return ws.runningCount > 0
-    ? `<span class="workspace-live"><i class="workspace-live-dot" aria-hidden="true"></i>${ws.runningCount} 运行中</span>`
-    : '';
-}
-
 /** 渲染单个工作区卡片 */
 export function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: boolean): string {
   const key = escapeHtml(ws.key);
@@ -204,10 +191,9 @@ export function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: bo
           <span class="workspace-name-row">
             <span class="workspace-name">${escapeHtml(ws.displayName)}</span>
           </span>
-          <span class="workspace-meta">${renderWorkspaceMetaInnerHtml(ws)}</span>
         </span>
         <span class="workspace-actions">
-          <span class="workspace-count">${ws.conversations.length}</span>
+          <span class="workspace-count${ws.runningCount > 0 ? ' is-live' : ''}">${ws.runningCount > 0 ? '运行中' : ws.conversations.length}</span>
           <button type="button" class="ws-icon-btn" data-action="workspace-more" data-workspace="${key}" title="项目操作" aria-label="项目操作">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="12" cy="19" r="2"/></svg>
           </button>
@@ -326,8 +312,8 @@ export function toggleWorkspaceExpanded(key: string): void {
   }
 }
 
-/** 每个 workspace 卡片最近写入的 meta HTML；无变化时跳过 innerHTML 写入，避免每次退出管理页全量重写 */
-const lastWorkspaceMetaHtml = new Map<string, string>();
+/** 每个 workspace 卡片右端状态（会话数量 / 运行中）；无变化时跳过 textContent 写入，避免频繁重排 */
+const lastWorkspaceBadgeText = new Map<string, string>();
 
 export function updateConversationListSpinner() {
   // 会话行：运行中显示脉冲点，否则回到聊天图标。
@@ -339,28 +325,34 @@ export function updateConversationListSpinner() {
     item.classList.toggle('running', appState.runningSessions.has(id));
   });
 
-  // 项目卡片：同步「运行中」标记与最近使用时间
+  // 项目卡片：右端状态在「会话数量」与「运行中」之间切换，悬浮时让位给 ⋮ 按钮
   const cards = document.querySelectorAll<HTMLElement>('.workspace-card');
   if (cards.length === 0) return;
 
-  const viewByKey = new Map(buildSidebarWorkspaceViews().map((ws) => [ws.key, ws]));
   cards.forEach((card) => {
-    const ws = card.dataset.workspaceKey ? viewByKey.get(card.dataset.workspaceKey) : undefined;
-    const meta = card.querySelector<HTMLElement>('.workspace-meta');
-    if (!ws || !meta) return;
-    const key = ws.key;
-    const html = renderWorkspaceMetaInnerHtml(ws);
-    // 内容未变时跳过：避免归档工作区多时每次切回主页面 O(cards) 次 innerHTML 写入 + 布局失效。
-    // 空内容不覆盖 DOM：保留首渲已写入的时间/模型标签，避免瞬时空快照把 meta 刷没。
-    if (!html && lastWorkspaceMetaHtml.get(key)) return;
-    if (lastWorkspaceMetaHtml.get(key) === html) return;
-    lastWorkspaceMetaHtml.set(key, html);
-    meta.innerHTML = html;
+    const key = card.dataset.workspaceKey;
+    const badge = card.querySelector<HTMLElement>('.workspace-count');
+    if (!badge) return;
+
+    const convItems = card.querySelectorAll<HTMLElement>('.conversation-item');
+    const running = Array.from(convItems).some((el) => el.classList.contains('running'));
+    const text = running ? '运行中' : String(convItems.length);
+
+    badge.classList.toggle('is-live', running);
+    // 内容未变时跳过：避免每次运行态切换都触发 textContent 写入 + 布局失效。
+    if (key) {
+      if (lastWorkspaceBadgeText.get(key) === text) return;
+      lastWorkspaceBadgeText.set(key, text);
+    }
+    badge.textContent = text;
   });
 
   // 清理已不存在工作区的缓存键，避免会话列表增删后 Map 无限残留
-  for (const key of [...lastWorkspaceMetaHtml.keys()]) {
-    if (!viewByKey.has(key)) lastWorkspaceMetaHtml.delete(key);
+  const currentKeys = new Set(
+    Array.from(cards).map((card) => card.dataset.workspaceKey),
+  );
+  for (const key of [...lastWorkspaceBadgeText.keys()]) {
+    if (!currentKeys.has(key)) lastWorkspaceBadgeText.delete(key);
   }
 }
 

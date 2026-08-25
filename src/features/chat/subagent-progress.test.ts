@@ -51,7 +51,7 @@ describe('输入框上方「进行中的子代理」展示区', () => {
     expect(host.hidden).toBe(false);
     expect(host.querySelector('.subagent-desc')?.textContent).toContain('分析代码结构');
     expect(host.querySelector('.subagent-status-text')?.textContent).toBe('执行中');
-    expect(host.textContent).toContain('1200 tokens');
+    expect(host.textContent).toContain('1K tokens');
     expect(host.textContent).toContain('3 次工具');
     expect(host.textContent).toContain('4.5s');
   });

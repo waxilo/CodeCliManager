@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "codecli-manager"
-version = "0.2.57"
+version = "0.2.58"
 dependencies = [
  "arboard",
  "base64 0.22.1",

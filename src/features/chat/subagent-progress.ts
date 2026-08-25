@@ -1,6 +1,7 @@
 import { appState } from '../../state';
-import { escapeHtml, formatDuration } from '../../utils';
+import { escapeHtml } from '../../utils';
 import type { ActiveToolState } from '../../types';
+import { formatSubagentUsage } from './subagent-usage';
 
 /**
  * 输入框上方的「进行中的子代理」展示区。
@@ -34,12 +35,13 @@ function describeTask(task: ActiveToolState): string {
 }
 
 function buildRunningRowHtml(task: ActiveToolState): string {
-  const metaParts: string[] = [];
-  if (task.progress?.totalTokens) metaParts.push(`${task.progress.totalTokens} tokens`);
-  if (task.progress?.toolUses) metaParts.push(`${task.progress.toolUses} 次工具`);
-  if (task.progress?.durationMs) metaParts.push(formatDuration(task.progress.durationMs));
-  const meta = metaParts.length
-    ? `<span class="subagent-meta">${metaParts.join(' · ')}</span>`
+  const metaStr = formatSubagentUsage({
+    totalTokens: task.progress?.totalTokens,
+    toolUses: task.progress?.toolUses,
+    durationMs: task.progress?.durationMs,
+  });
+  const meta = metaStr
+    ? `<span class="subagent-meta">${escapeHtml(metaStr)}</span>`
     : '';
   const desc = describeTask(task);
   return `

@@ -213,4 +213,22 @@ describe('活跃 / 归档会话拆分', () => {
     expect(html).toContain('会话-sec-recent');
     expect(html).not.toContain('会话-sec-old');
   });
+
+  it('工作区卡片右端状态：无运行会话显示数量，有运行会话显示「运行中」', () => {
+    const now = Date.now();
+    appState.runningSessions.clear();
+    appState.conversations = [conv('a', now - 1 * HOUR), conv('b', now - 1 * HOUR)];
+    renderCurrentTab();
+
+    let badge = document.querySelector<HTMLElement>('.workspace-count')!;
+    expect(badge.textContent).toBe('2');
+    expect(badge.classList.contains('is-live')).toBe(false);
+
+    // 出现运行中会话：右端状态切换为「运行中」并带 is-live 徽标
+    appState.runningSessions.add('a');
+    renderCurrentTab();
+    badge = document.querySelector<HTMLElement>('.workspace-count')!;
+    expect(badge.textContent).toBe('运行中');
+    expect(badge.classList.contains('is-live')).toBe(true);
+  });
 });
