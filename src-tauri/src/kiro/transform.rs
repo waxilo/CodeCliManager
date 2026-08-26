@@ -5,7 +5,8 @@ use serde_json::{json, Map, Value};
 use uuid::Uuid;
 
 use crate::kiro::models::{
-    estimate_tokens, get_requested_effort, normalize_effort_for_kiro_model,
+    estimate_tokens, get_requested_effort, normalize_effort_for_kiro_model, resolve_model_profile,
+    EffortPlacement, ModelProfile,
 };
 use crate::protocol_guard::normalize_stop_reason;
 
@@ -728,8 +729,19 @@ fn apply_thinking_fields(extra: &mut Map<String, Value>, thinking: &Value) {
     }
 }
 
-fn build_additional_model_request_fields(body: &Value, kiro_model: &str) -> Option<Value> {
+/// 构造发送给 Kiro 的 additionalModelRequestFields。
+///
+/// 由模型能力配置（`ModelProfile`，schema 可用时以其为唯一事实源）驱动，
+/// 不再用 `is_claude`/`is_gpt` 硬编码前缀分支：模型 schema 允许什么就发什么，
+/// schema 不认识的字段一律移除，从结构上消灭「property 'X' not defined in the schema」类 502。
+fn build_additional_model_request_fields_with_profile(
+    body: &Value,
+    kiro_model: &str,
+    profile: &ModelProfile,
+) -> Option<Value> {
     let mut extra = Map::new();
+
+    // 1. 合并入站 additionalModelRequestFields（用户显式塞的）
     if let Some(fields) = body
         .get("additionalModelRequestFields")
         .or_else(|| body.get("additional_model_request_fields"))
@@ -739,43 +751,25 @@ fn build_additional_model_request_fields(body: &Value, kiro_model: &str) -> Opti
         }
     }
 
+    // 2. body.output_config → extra.output_config（仅当模型 schema 承认 output_config）
+    if profile.supports_output_config {
+        if let Some(output_config) = body.get("output_config") {
+            let existing = extra
+                .entry("output_config".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(existing_obj) = existing.as_object_mut() {
+                merge_object(existing_obj, output_config);
+            }
+        }
+    } else {
+        extra.remove("output_config");
+    }
+
     let effort = get_requested_effort(body)
         .and_then(|effort| normalize_effort_for_kiro_model(Some(&effort), kiro_model));
 
-    if let Some(output_config) = body.get("output_config") {
-        let existing = extra
-            .entry("output_config".to_string())
-            .or_insert_with(|| json!({}));
-        if let Some(existing_obj) = existing.as_object_mut() {
-            merge_object(existing_obj, output_config);
-        }
-    }
-
-    // Claude Code 几乎总会带 max_tokens（通常 ≥ 1024）。
-    // Kiro 的 GenerateAssistantResponse schema 里，max_tokens 仅对部分 Claude 模型合法；
-    // 转给 gpt-5.6 / 其它模型会直接 502：
-    // "property 'max_tokens' is not defined in the schema"。
-    let is_claude = kiro_model.starts_with("claude-");
-    let is_gpt = kiro_model.starts_with("gpt-5.6");
-
-    if !is_claude {
-        extra.remove("max_tokens");
-    }
-
-    if is_claude {
-        // 即使 effort 列表为空，也要转发 thinking（Claude adaptive thinking）
-        apply_thinking_fields(&mut extra, body.get("thinking").unwrap_or(&Value::Null));
-        // Claude Code 默认开启思考时，若请求未显式带 thinking，也启用 adaptive+summarized
-        if !extra.contains_key("thinking")
-            && body
-                .get("thinking")
-                .and_then(|v| v.get("type"))
-                .and_then(|v| v.as_str())
-                .is_none()
-        {
-            // 不强制默认开启，避免意外加费；仅在请求明确要求时启用
-        }
-
+    // 3. max_tokens：仅对 schema/族允许的模型保留（Claude 且一般 ≥1024）
+    if profile.allow_max_tokens {
         let requested_max_tokens = body
             .get("max_tokens")
             .or_else(|| body.get("max_completion_tokens"))
@@ -785,46 +779,71 @@ fn build_additional_model_request_fields(body: &Value, kiro_model: &str) -> Opti
                 extra.insert("max_tokens".to_string(), json!(max_tokens));
             }
         }
+    } else {
+        extra.remove("max_tokens");
+    }
 
-        if let Some(effort) = effort {
-            if effort != "none" {
+    // 4. thinking：仅 schema/族允许的模型保留
+    if profile.supports_thinking {
+        apply_thinking_fields(&mut extra, body.get("thinking").unwrap_or(&Value::Null));
+    } else {
+        extra.remove("thinking");
+    }
+
+    // 5. effort 落位：Claude 走 output_config.effort，GPT 走 reasoning.effort
+    match profile.effort_placement {
+        EffortPlacement::OutputConfigEffort => {
+            if let Some(effort) = effort {
+                if effort != "none" {
+                    let existing = extra
+                        .entry("output_config".to_string())
+                        .or_insert_with(|| json!({}));
+                    if let Some(existing_obj) = existing.as_object_mut() {
+                        existing_obj.insert("effort".to_string(), json!(effort));
+                    }
+                }
+            }
+        }
+        EffortPlacement::ReasoningEffort => {
+            if profile.supports_reasoning {
+                if let Some(reasoning) = body.get("reasoning") {
+                    let existing = extra
+                        .entry("reasoning".to_string())
+                        .or_insert_with(|| json!({}));
+                    if let Some(existing_obj) = existing.as_object_mut() {
+                        merge_object(existing_obj, reasoning);
+                    }
+                }
+            }
+            if let Some(effort) = effort {
                 let existing = extra
-                    .entry("output_config".to_string())
+                    .entry("reasoning".to_string())
                     .or_insert_with(|| json!({}));
                 if let Some(existing_obj) = existing.as_object_mut() {
                     existing_obj.insert("effort".to_string(), json!(effort));
                 }
             }
         }
-    } else if is_gpt {
-        // GPT 系不接受 Anthropic 的 thinking / output_config / max_tokens
-        extra.remove("thinking");
-        extra.remove("output_config");
-        if let Some(reasoning) = body.get("reasoning") {
-            let existing = extra
-                .entry("reasoning".to_string())
-                .or_insert_with(|| json!({}));
-            if let Some(existing_obj) = existing.as_object_mut() {
-                merge_object(existing_obj, reasoning);
-            }
+        EffortPlacement::Unsupported => {}
+    }
+
+    // 6. schema 白名单终检：删掉模型 schema 不认识的顶层字段，避免 502
+    if let Some(allowed) = &profile.allowed_fields {
+        let allowed_set: std::collections::HashSet<&str> =
+            allowed.iter().map(|s| s.as_str()).collect();
+        let removed: Vec<String> = extra
+            .keys()
+            .filter(|key| !allowed_set.contains(key.as_str()))
+            .cloned()
+            .collect();
+        for key in &removed {
+            extra.remove(key);
         }
-        if let Some(effort) = effort {
-            let existing = extra
-                .entry("reasoning".to_string())
-                .or_insert_with(|| json!({}));
-            if let Some(existing_obj) = existing.as_object_mut() {
-                existing_obj.insert("effort".to_string(), json!(effort));
-            }
-        }
-    } else if let Some(effort) = effort {
-        // 其它已知 effort 模型：尽量走 output_config.effort
-        if effort != "none" {
-            let existing = extra
-                .entry("output_config".to_string())
-                .or_insert_with(|| json!({}));
-            if let Some(existing_obj) = existing.as_object_mut() {
-                existing_obj.insert("effort".to_string(), json!(effort));
-            }
+        if !removed.is_empty() {
+            eprintln!(
+                "[kiro] additionalModelRequestFields[{:?}] removed fields not in schema for {kiro_model}: {removed:?}",
+                profile.family
+            );
         }
     }
 
@@ -835,11 +854,32 @@ fn build_additional_model_request_fields(body: &Value, kiro_model: &str) -> Opti
     }
 }
 
-/// 构造发送给 Kiro GenerateAssistantResponse 的请求体。
+/// 构造发送给 Kiro GenerateAssistantResponse 的请求体（无运行期 schema，回退模型族默认）。
 pub fn build_kiro_request(
     body: &Value,
     kiro_model: &str,
     profile_arn: Option<&str>,
+) -> Result<Value, String> {
+    let profile = resolve_model_profile(kiro_model, None);
+    build_kiro_request_with_profile(body, kiro_model, profile_arn, &profile)
+}
+
+/// 构造发送给 Kiro GenerateAssistantResponse 的请求体（带运行期模型 schema，以其为事实源）。
+pub fn build_kiro_request_with_schema(
+    body: &Value,
+    kiro_model: &str,
+    profile_arn: Option<&str>,
+    schema: &Value,
+) -> Result<Value, String> {
+    let profile = resolve_model_profile(kiro_model, Some(schema));
+    build_kiro_request_with_profile(body, kiro_model, profile_arn, &profile)
+}
+
+fn build_kiro_request_with_profile(
+    body: &Value,
+    kiro_model: &str,
+    profile_arn: Option<&str>,
+    profile: &ModelProfile,
 ) -> Result<Value, String> {
     let messages = body.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     let last_user_index = messages
@@ -938,7 +978,7 @@ pub fn build_kiro_request(
         "agentMode": "vibe",
     });
 
-    if let Some(additional) = build_additional_model_request_fields(body, kiro_model) {
+    if let Some(additional) = build_additional_model_request_fields_with_profile(body, kiro_model, profile) {
         body_out
             .as_object_mut()
             .unwrap()
@@ -1349,5 +1389,86 @@ mod tests {
                 .unwrap_or("")
                 .contains("empty assistant response")
         );
+    }
+
+    #[test]
+    fn schema_allowlist_strips_fields_the_model_does_not_accept() {
+        // 一个只认识 reasoning 的 schema（典型 GPT）：max_tokens / thinking / output_config 都不在 schema 里。
+        let schema = json!({
+            "properties": {
+                "reasoning": { "properties": { "effort": { "enum": ["none","low","medium","high","xhigh","max"] } } }
+            }
+        });
+        let body = json!({
+            "model": "gpt-5.6-sol",
+            "max_tokens": 32000,
+            "thinking": { "type": "enabled" },
+            "output_config": { "effort": "high" },
+            "messages": [{ "role": "user", "content": "hi" }],
+            "stream": true
+        });
+        let built = build_kiro_request_with_schema(&body, "gpt-5.6-sol", Some("arn"), &schema).unwrap();
+        let additional = &built["additionalModelRequestFields"];
+        assert!(additional.get("max_tokens").is_none(), "max_tokens not in schema → must be stripped");
+        assert!(additional.get("thinking").is_none(), "thinking not in schema → must be stripped");
+        assert!(additional.get("output_config").is_none(), "output_config not in schema → must be stripped");
+        assert_eq!(additional["reasoning"]["effort"], "high", "effort lands in reasoning.effort");
+    }
+
+    #[test]
+    fn schema_source_of_truth_keeps_fields_the_model_accepts() {
+        // 一个同时认识 max_tokens / thinking / output_config 的 schema（典型 Claude）。
+        let schema = json!({
+            "properties": {
+                "max_tokens": { "type": "integer" },
+                "thinking": { "type": "object" },
+                "output_config": { "properties": { "effort": { "enum": ["low","medium","high","xhigh","max"] } } }
+            }
+        });
+        let body = json!({
+            "model": "claude-opus-5",
+            "max_tokens": 32000,
+            "thinking": { "type": "enabled" },
+            "output_config": { "effort": "high" },
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        let built = build_kiro_request_with_schema(&body, "claude-opus-5", Some("arn"), &schema).unwrap();
+        let additional = &built["additionalModelRequestFields"];
+        assert_eq!(additional["max_tokens"], 32000);
+        assert_eq!(additional["thinking"]["type"], "adaptive");
+        assert_eq!(additional["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn schema_effort_low_lands_in_reasoning_for_reasoning_models() {
+        // GPT 类 schema：effort 应落在 reasoning.effort，而不是 output_config。
+        let schema = json!({
+            "properties": {
+                "reasoning": { "properties": { "effort": { "enum": ["none","low","medium","high","xhigh","max"] } } }
+            }
+        });
+        let body = json!({
+            "model": "gpt-5.6-terra",
+            "reasoning": { "effort": "low" },
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        let built = build_kiro_request_with_schema(&body, "gpt-5.6-terra", Some("arn"), &schema).unwrap();
+        let additional = &built["additionalModelRequestFields"];
+        assert_eq!(additional["reasoning"]["effort"], "low");
+        assert!(additional.get("output_config").is_none());
+    }
+
+    #[test]
+    fn schema_without_requested_fields_produces_no_additional() {
+        // 请求没带任何 additional 字段时，不应生成 additionalModelRequestFields。
+        let schema = json!({
+            "properties": { "reasoning": { "properties": { "effort": { "enum": ["none","low","medium","high"] } } } }
+        });
+        let body = json!({
+            "model": "gpt-5.6-luna",
+            "messages": [{ "role": "user", "content": "hi" }],
+        });
+        let built = build_kiro_request_with_schema(&body, "gpt-5.6-luna", Some("arn"), &schema).unwrap();
+        assert!(built.get("additionalModelRequestFields").is_none());
     }
 }

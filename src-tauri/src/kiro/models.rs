@@ -216,3 +216,206 @@ pub fn estimate_tokens(text: &str) -> i64 {
     }
     ((chars + 3) / 4).max(1)
 }
+
+// ============ 模型能力抽象（schema 驱动） ============
+//
+// 目标：把「按模型名硬编码 is_claude / is_gpt 分支」替换成「按模型 schema /
+// 能力配置决定哪些字段能发、怎么写」。当拿到 Kiro 的 additionalModelRequestFieldsSchema
+// 时以其为唯一事实源；拿不到（或单元测试）时回退到按模型族的内置默认，保证既有行为不变。
+
+/// 模型族。仅用于 schema 缺失时的回退默认与可读性；运行时以 schema 为准。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelFamily {
+    Claude,
+    Gpt,
+    Deepseek,
+    Other,
+}
+
+impl ModelFamily {
+    pub fn classify(model: &str) -> ModelFamily {
+        let model = model.trim();
+        if model.starts_with("claude-") {
+            ModelFamily::Claude
+        } else if model.starts_with("gpt-") {
+            ModelFamily::Gpt
+        } else if model.starts_with("deepseek-") {
+            ModelFamily::Deepseek
+        } else {
+            ModelFamily::Other
+        }
+    }
+}
+
+/// effort 该落到哪个字段：Claude 走 output_config.effort，GPT 走 reasoning.effort。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffortPlacement {
+    OutputConfigEffort,
+    ReasoningEffort,
+    Unsupported,
+}
+
+/// 一个模型在 additionalModelRequestFields 方面的「已解析能力」。
+/// schema 可用时由 schema 派生（唯一事实源）；否则回退到模型族默认。
+#[derive(Debug, Clone)]
+pub struct ModelProfile {
+    pub family: ModelFamily,
+    /// 是否接受顶层 max_tokens
+    pub allow_max_tokens: bool,
+    /// 是否接受顶层 thinking（adaptive/disabled）
+    pub supports_thinking: bool,
+    /// 是否接受顶层 output_config
+    pub supports_output_config: bool,
+    /// 是否接受顶层 reasoning
+    pub supports_reasoning: bool,
+    /// effort 的落位字段
+    pub effort_placement: EffortPlacement,
+    /// schema 顶层允许的字段白名单；None 表示 schema 未知，不做白名单过滤。
+    pub allowed_fields: Option<Vec<String>>,
+}
+
+fn schema_has_property(schema: &Value, key: &str) -> bool {
+    schema
+        .get("properties")
+        .and_then(|p| p.get(key))
+        .is_some()
+}
+
+/// 从 schema 推断 effort 应放哪个字段（优先 output_config，其次 reasoning）。
+fn schema_effort_placement(schema: &Value) -> EffortPlacement {
+    let has_effort = |top: &str| {
+        schema
+            .get("properties")
+            .and_then(|p| p.get(top))
+            .and_then(|v| v.get("properties"))
+            .and_then(|p| p.get("effort"))
+            .is_some()
+    };
+    if has_effort("output_config") {
+        EffortPlacement::OutputConfigEffort
+    } else if has_effort("reasoning") {
+        EffortPlacement::ReasoningEffort
+    } else {
+        EffortPlacement::Unsupported
+    }
+}
+
+fn schema_allowed_fields(schema: &Value) -> Option<Vec<String>> {
+    schema
+        .get("properties")
+        .and_then(|p| p.as_object())
+        .map(|map| map.keys().cloned().collect())
+}
+
+fn default_profile(family: ModelFamily) -> ModelProfile {
+    match family {
+        ModelFamily::Claude => ModelProfile {
+            family,
+            allow_max_tokens: true,
+            supports_thinking: true,
+            supports_output_config: true,
+            supports_reasoning: false,
+            effort_placement: EffortPlacement::OutputConfigEffort,
+            allowed_fields: None,
+        },
+        ModelFamily::Gpt => ModelProfile {
+            family,
+            allow_max_tokens: false,
+            supports_thinking: false,
+            supports_output_config: false,
+            supports_reasoning: true,
+            effort_placement: EffortPlacement::ReasoningEffort,
+            allowed_fields: None,
+        },
+        ModelFamily::Deepseek | ModelFamily::Other => ModelProfile {
+            family,
+            allow_max_tokens: false,
+            supports_thinking: true,
+            supports_output_config: true,
+            supports_reasoning: false,
+            effort_placement: EffortPlacement::OutputConfigEffort,
+            allowed_fields: None,
+        },
+    }
+}
+
+/// 解析模型能力：优先以 Kiro 返回的 additionalModelRequestFieldsSchema 为唯一事实源，
+/// 缺省时回退到按模型族的内置默认（保证既有行为 + 单元测试不变）。
+pub fn resolve_model_profile(kiro_model: &str, schema: Option<&Value>) -> ModelProfile {
+    let family = ModelFamily::classify(kiro_model);
+    match schema {
+        Some(schema) if schema.is_object() => ModelProfile {
+            family,
+            allow_max_tokens: schema_has_property(schema, "max_tokens"),
+            supports_thinking: schema_has_property(schema, "thinking"),
+            supports_output_config: schema_has_property(schema, "output_config"),
+            supports_reasoning: schema_has_property(schema, "reasoning"),
+            effort_placement: schema_effort_placement(schema),
+            allowed_fields: schema_allowed_fields(schema),
+        },
+        _ => default_profile(family),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn defaults_preserve_legacy_family_behavior() {
+        let claude = resolve_model_profile("claude-sonnet-5", None);
+        assert!(claude.allow_max_tokens);
+        assert!(claude.supports_thinking);
+        assert!(claude.supports_output_config);
+        assert_eq!(claude.effort_placement, EffortPlacement::OutputConfigEffort);
+        assert!(claude.allowed_fields.is_none());
+
+        let gpt = resolve_model_profile("gpt-5.6-sol", None);
+        assert!(!gpt.allow_max_tokens);
+        assert!(!gpt.supports_thinking);
+        assert!(!gpt.supports_output_config);
+        assert!(gpt.supports_reasoning);
+        assert_eq!(gpt.effort_placement, EffortPlacement::ReasoningEffort);
+
+        let deepseek = resolve_model_profile("deepseek-3.2", None);
+        assert!(!deepseek.allow_max_tokens);
+        assert!(deepseek.supports_thinking);
+        assert!(deepseek.supports_output_config);
+    }
+
+    #[test]
+    fn schema_is_source_of_truth_for_fields() {
+        // 一个「只认识 reasoning + effort」的 schema（类似 GPT）
+        let schema = json!({
+            "properties": {
+                "reasoning": { "properties": { "effort": { "enum": ["none","low","medium","high","xhigh","max"] } } }
+            }
+        });
+        let profile = resolve_model_profile("gpt-5.6-terra", Some(&schema));
+        assert!(!profile.allow_max_tokens);
+        assert!(!profile.supports_thinking);
+        assert!(!profile.supports_output_config);
+        assert!(profile.supports_reasoning);
+        assert_eq!(profile.effort_placement, EffortPlacement::ReasoningEffort);
+        let allowed = profile.allowed_fields.unwrap();
+        assert_eq!(allowed, vec!["reasoning".to_string()]);
+    }
+
+    #[test]
+    fn schema_output_config_effort_placement() {
+        let schema = json!({
+            "properties": {
+                "max_tokens": { "type": "integer" },
+                "thinking": { "type": "object" },
+                "output_config": { "properties": { "effort": { "enum": ["low","medium","high"] } } }
+            }
+        });
+        let profile = resolve_model_profile("claude-opus-5", Some(&schema));
+        assert!(profile.allow_max_tokens);
+        assert!(profile.supports_thinking);
+        assert!(profile.supports_output_config);
+        assert_eq!(profile.effort_placement, EffortPlacement::OutputConfigEffort);
+        assert_eq!(profile.allowed_fields.unwrap().len(), 3);
+    }
+}

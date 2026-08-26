@@ -33,7 +33,8 @@ use crate::kiro::models::{
     public_display_name,
 };
 use crate::kiro::transform::{
-    anthropic_message_response_with_tools, build_kiro_request, parse_tool_use_blocks_from_text,
+    anthropic_message_response_with_tools, build_kiro_request, build_kiro_request_with_schema,
+    parse_tool_use_blocks_from_text,
 };
 use crate::protocol_guard::{normalize_stop_reason, sanitize_protocol_text, ProtocolTextGuard};
 
@@ -1756,7 +1757,13 @@ fn handle_messages(
         }
     };
 
-    let built = match build_kiro_request(&body, &kiro_model, profile_arn.as_deref()) {
+    let build_result = match auth.model_schema(&kiro_model) {
+        Some(schema) => {
+            build_kiro_request_with_schema(&body, &kiro_model, profile_arn.as_deref(), &schema)
+        }
+        None => build_kiro_request(&body, &kiro_model, profile_arn.as_deref()),
+    };
+    let built = match build_result {
         Ok(built) => built,
         Err(e) => return error_response(request, 400, &e, "invalid_request_error"),
     };

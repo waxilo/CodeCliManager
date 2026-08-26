@@ -2,6 +2,7 @@
 //! 支持 IdC / Social 两种 OIDC token 刷新，并自动发现 Profile ARN。
 //! 移植自 kiro2cli/src/auth.js（MIT）。
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -25,6 +26,8 @@ const PROFILE_ARN_RE: &str = r"^arn:aws[a-z-]*:codewhisperer:[a-z0-9-]+:\d{12}:p
 struct AuthCache {
     cached_profile_arn: Option<String>,
     cached_available_models: Option<Vec<String>>,
+    /// modelId → additionalModelRequestFieldsSchema（供 build_kiro_request 做 schema 驱动的字段净化）
+    cached_model_schemas: Option<HashMap<String, Value>>,
 }
 
 /// Kiro 账户额度快照（来自 getUsageLimits）。
@@ -638,16 +641,44 @@ impl Auth {
             return Err(format!("ListAvailableModels failed: {status}"));
         }
         let mut ids: Vec<String> = Vec::new();
+        let mut schemas: HashMap<String, Value> = HashMap::new();
         if let Some(models) = data.get("models").and_then(|v| v.as_array()) {
             for model in models {
                 if let Some(id) = model.get("modelId").and_then(|v| v.as_str()) {
                     if !ids.iter().any(|existing| existing == id) {
                         ids.push(id.to_string());
                     }
+                    if let Some(schema) = model.get("additionalModelRequestFieldsSchema") {
+                        schemas.insert(id.to_string(), schema.clone());
+                    }
                 }
             }
         }
+        if !ids.is_empty() {
+            if let Ok(mut cache) = self.cache.lock() {
+                cache.cached_model_schemas = Some(schemas);
+            }
+        }
         Ok(ids)
+    }
+
+    /// 取指定模型（Kiro 内部 modelId）的 additionalModelRequestFieldsSchema。
+    /// 若尚未枚举模型，先触发一次 ListAvailableModels 缓存。用于请求侧 schema 驱动的字段净化。
+    pub fn model_schema(&self, model_id: &str) -> Option<Value> {
+        if self
+            .cache
+            .lock()
+            .ok()
+            .and_then(|c| c.cached_model_schemas.clone())
+            .is_none()
+        {
+            let _ = self.list_available_models();
+        }
+        self.cache
+            .lock()
+            .ok()
+            .and_then(|c| c.cached_model_schemas.clone())
+            .and_then(|map| map.get(model_id).cloned())
     }
 
     /// 从可用模型里挑一个稳妥默认：优先 Claude 系（最贴近 Anthropic 语义），
