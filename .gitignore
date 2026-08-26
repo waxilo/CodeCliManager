@@ -4,6 +4,5 @@ node_modules/
 .clipboard-uploads/
 src-tauri/target/
 # 图标生成的中间产物，可由 prepare_icon.py 重新生成
-src-tauri/icons-src/app-icon-1024.png.claude/worktrees/
-
+src-tauri/icons-src/app-icon-1024.png
 .claude/worktrees/
