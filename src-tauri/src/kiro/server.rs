@@ -40,6 +40,21 @@ use crate::protocol_guard::{normalize_stop_reason, sanitize_protocol_text, Proto
 
 const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 16;
+
+/// 诊断日志：追加到 App 数据目录下的 kiro-debug.log，便于定位 502 /
+/// 「property 'X' is not defined in the schema」类问题（记录发给 Kiro 的请求体 + 上游原始报错）。
+/// 写失败不影响代理；排查完可删除该文件。
+fn diag_log(line: &str) {
+    use std::io::Write;
+    let path = crate::paths::get_data_path().join("kiro-debug.log");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(
+            f,
+            "{} {line}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        );
+    }
+}
 /// 连续失败达到该阈值时，判定进入了「Claude Code 重试」状态，重试请求前先自检/恢复代理。
 /// 阈值 = 1 表示首次失败后、下一次请求（往往就是第一次重试）前就恢复，最多浪费一次尝试。
 const RETRY_HEALTH_THRESHOLD: usize = 1;
@@ -1429,6 +1444,10 @@ fn respond_sse_stream_fetch(
             Ok(response) => response,
             Err(e) => {
                 health.record_failure();
+                diag_log(&format!(
+                    "[stream] network_error={e} body={}",
+                    serde_json::to_string(&built).unwrap_or_default()
+                ));
                 if let Some(e) = &entry {
                     dedup.mark_failed(e);
                 }
@@ -1447,6 +1466,10 @@ fn respond_sse_stream_fetch(
             }
             let bytes = upstream.bytes().unwrap_or_default();
             let text = String::from_utf8_lossy(&bytes).to_string();
+            diag_log(&format!(
+                "[stream] status={status} body={} resp={text}",
+                serde_json::to_string(&built).unwrap_or_default()
+            ));
             let message = serde_json::from_str::<Value>(&text)
                 .ok()
                 .and_then(|v| {
@@ -1580,6 +1603,10 @@ fn call_kiro_generate(
     let bytes = response.bytes().map_err(|e| e.to_string())?.to_vec();
     if !status.is_success() {
         let text = String::from_utf8_lossy(&bytes).to_string();
+        diag_log(&format!(
+            "[GenerateAssistantResponse] status={status} body={} resp={text}",
+            serde_json::to_string(body).unwrap_or_default()
+        ));
         let message = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|v| {
@@ -1757,9 +1784,10 @@ fn handle_messages(
         }
     };
 
-    let build_result = match auth.model_schema(&kiro_model) {
+    let model_schema = auth.model_schema(&kiro_model);
+    let build_result = match &model_schema {
         Some(schema) => {
-            build_kiro_request_with_schema(&body, &kiro_model, profile_arn.as_deref(), &schema)
+            build_kiro_request_with_schema(&body, &kiro_model, profile_arn.as_deref(), schema)
         }
         None => build_kiro_request(&body, &kiro_model, profile_arn.as_deref()),
     };
@@ -1799,6 +1827,10 @@ fn handle_messages(
         Ok(events) => events,
         Err(e) => {
             health.record_failure();
+            diag_log(&format!(
+                "[handle_messages] generate_error={e} status=502 body={}",
+                serde_json::to_string(&built).unwrap_or_default()
+            ));
             return error_response(request, 502, &e, "api_error");
         }
     };
