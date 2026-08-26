@@ -68,6 +68,33 @@ describe('ScrollController 用户滚动与自动跟随', () => {
     expect(onUserScroll).not.toHaveBeenCalled();
   });
 
+  it('用户在已排队置底前上滑时，下一帧不会抢回到底部', () => {
+    const { el } = setup();
+    const callbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      callbacks.push(cb);
+      return callbacks.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    Object.defineProperty(el, 'scrollHeight', { value: 2000, configurable: true, writable: true });
+    Object.defineProperty(el, 'clientHeight', { value: 200, configurable: true });
+    Object.defineProperty(el, 'scrollTop', { value: 1800, configurable: true, writable: true });
+
+    const sc = new ScrollController(el, { resumePx: 20, createButton: true });
+    sc.onNewContent();
+    expect(callbacks).toHaveLength(1);
+
+    // 模拟用户实际向上滚动后的浏览器位置（wheel 事件本身在 jsdom 不会改变 scrollTop）。
+    el.scrollTop = 1600;
+    wheel(el, -80);
+    expect(sc.autoScroll).toBe(false);
+    callbacks[0](0);
+
+    expect(el.scrollTop).toBe(1600);
+    expect(el.querySelector('.scroll-to-bottom-btn')?.classList.contains('has-new-content')).toBe(true);
+    sc.destroy();
+  });
+
   it('stopWheelPropagation：可滚动且未到边界时拦截；不可滚动/到边界时链条给父容器', () => {
     const { el } = setup();
     // 可滚动 + 在中间（scrollTop=500）→ 拦截

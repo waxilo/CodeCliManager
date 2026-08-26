@@ -11,9 +11,7 @@ export function getThinkingScroller(el: HTMLElement, id: string): ScrollControll
       // 自动跟随一直保持 → 每 tick 置底把思考块拉走。用户滚动思考块时
       // 同步关闭父消息列表的自动跟随，避免「自动跳来跳去」。
       onUserScroll: () => {
-        if (appState.answerScroller) {
-          appState.answerScroller.autoScroll = false;
-        }
+        appState.answerScroller?.pauseFollow();
       },
     });
     appState.thinkingScrollers.set(id, sc);

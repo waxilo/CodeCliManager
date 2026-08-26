@@ -1,4 +1,9 @@
-export { ScrollController, type ScrollControllerOptions } from './scroll-controller';
+export {
+  ScrollController,
+  type ScrollControllerOptions,
+  type ScrollAnchor,
+  type ScrollSnapshot,
+} from './scroll-controller';
 export {
   getStoredTheme,
   getSystemTheme,

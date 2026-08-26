@@ -1,5 +1,10 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { projectRelativePath, stripFileRefsFromDisplay } from './files';
+import {
+  parseFileRefs,
+  projectRelativePath,
+  stripFileRefsFromDisplay,
+  normalizeMessageForCompare,
+} from './files';
 import {
   dedupeAdjacentDuplicateMessages,
   normalizeSessionEventPayload,
@@ -51,6 +56,25 @@ describe('file reference boundaries', () => {
 
   it('preserves unresolved at-path text', () => {
     expect(stripFileRefsFromDisplay('contact user@example.com/path')).toBe('contact user@example.com/path');
+    expect(stripFileRefsFromDisplay('check @not/a/file')).toBe('check @not/a/file');
+  });
+
+  it('renders local @File and persisted absolute @path references identically', () => {
+    const path = '/Users/example/project/.clipboard-uploads/pasted-1.png';
+    const local = `@File[${path}] 我说的是这种`;
+    const persisted = `@${path} 我说的是这种`;
+
+    expect(stripFileRefsFromDisplay(local)).toBe('我说的是这种');
+    expect(stripFileRefsFromDisplay(persisted)).toBe('我说的是这种');
+    expect(parseFileRefs(local)).toEqual([{ path, isImage: true }]);
+    expect(parseFileRefs(persisted)).toEqual([{ path, isImage: true }]);
+    expect(normalizeMessageForCompare(local)).toBe(normalizeMessageForCompare(persisted));
+  });
+
+  it('recognizes Windows absolute @path references without stripping relative text', () => {
+    const path = 'C:\\work\\project\\image.png';
+    expect(stripFileRefsFromDisplay(`@${path} 图片`)).toBe('图片');
+    expect(parseFileRefs(`@${path} 图片`)).toEqual([{ path, isImage: true }]);
     expect(stripFileRefsFromDisplay('check @not/a/file')).toBe('check @not/a/file');
   });
 });

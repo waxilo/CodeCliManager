@@ -233,39 +233,68 @@ export function unwrapFileRef(ref: string): string {
   return m ? m[1] : ref;
 }
 
-/** 解析文本中所有 @File[path] 与 @path 引用，返回 FileRef 数组 */
+interface FileReferenceToken {
+  /** 含 @ 的原始 token 范围，供正文剥离时精确删除。 */
+  start: number;
+  end: number;
+  path: string;
+  /** `@File[]` 或绝对路径是已确认的附件；相对 @path 仅保留兼容性解析。 */
+  confirmed: boolean;
+}
+
+function isAbsoluteFileReference(path: string): boolean {
+  return path.startsWith('/') || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\');
+}
+
+/**
+ * 统一扫描消息中的文件引用。历史由 Claude CLI 回写为 `@/absolute/path`，
+ * 本地乐观消息是 `@File[/absolute/path]`；两种形式必须走同一解析规则。
+ */
+function scanFileReferenceTokens(text: string): FileReferenceToken[] {
+  const tokens: FileReferenceToken[] = [];
+  const occupied: Array<[number, number]> = [];
+  const tagPattern = /@File\[([^\]]+)]/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = tagPattern.exec(text)) !== null) {
+    const path = match[1].replace(/\/$/, '');
+    if (!path) continue;
+    const start = match.index;
+    const end = start + match[0].length;
+    tokens.push({ start, end, path, confirmed: true });
+    occupied.push([start, end]);
+  }
+
+  // 保留原有对相对 @path 的兼容解析（可生成芯片），但只有绝对路径才会
+  // 从用户正文删除，避免误伤 @not/a/file、邮箱与普通 @mention。
+  const pathPattern = /@([^\s@]+[/\\][^\s@]*)/g;
+  while ((match = pathPattern.exec(text)) !== null) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (occupied.some(([from, to]) => start < to && end > from)) continue;
+    const raw = match[1];
+    if (raw.startsWith('File[')) continue;
+    const path = raw.replace(/\/$/, '');
+    if (!path) continue;
+    tokens.push({ start, end, path, confirmed: isAbsoluteFileReference(path) });
+  }
+
+  return tokens.sort((a, b) => a.start - b.start);
+}
+
+/** 解析文本中所有 @File[path] 与 @path 引用，返回 FileRef 数组。 */
 export function parseFileRefs(text: string): FileRef[] {
   const results: FileRef[] = [];
   const seen = new Set<string>();
-
-  // @File[path] 标签（导入文件 / 粘贴图片的持久化形式）
-  const tagPattern = /@File\[([^\]]+)]/g;
-  let match: RegExpExecArray | null;
-  while ((match = tagPattern.exec(text)) !== null) {
-    const path = match[1].replace(/\/$/, '');
-    if (!seen.has(path)) {
-      seen.add(path);
-      results.push({ path, isImage: isImageFile(path) });
-    }
+  for (const token of scanFileReferenceTokens(text)) {
+    if (seen.has(token.path)) continue;
+    seen.add(token.path);
+    results.push({ path: token.path, isImage: isImageFile(token.path) });
   }
-
-  // @path 形式（粘贴图片走 CLI 时以 @绝对路径 写入会话文件，如 @/abs/project/.clipboard-uploads/pasted-1.png），
-  // 路径需包含分隔符，避免把 @user、@mention 等误判为文件引用
-  const pathPattern = /@([^\s@]+[/\\][^\s@]*)/g;
-  while ((match = pathPattern.exec(text)) !== null) {
-    const raw = match[1];
-    if (raw.startsWith('File[')) continue; // @File[...] 已在上方处理
-    const path = raw.replace(/\/$/, '');
-    if (path && !seen.has(path)) {
-      seen.add(path);
-      results.push({ path, isImage: isImageFile(path) });
-    }
-  }
-
   return results;
 }
 
-/** 从显示文本中剥离 @File[path] 引用 */
+/** 从显示文本中剥离 @File[path] 标签（发送预处理保持仅处理该持久化格式）。 */
 export function stripFileRefTags(text: string): string {
   return text.replace(/@File\[[^\]]+]\s*/g, '').replace(/\s{2,}/g, ' ').trim();
 }
@@ -559,11 +588,24 @@ export function hideFileSuggestions() {
 }
 
 /**
- * 剥离用户消息中的 @文件路径引用（用于展示）。
- * 只匹配含路径分隔符（/ 或 \）的 @引用，保留普通 @提及（如 @someone）。
+ * 剥离用户消息中已确认的文件引用用于展示。
+ * `@File[...]` 一律是前端生成的附件；裸 `@path` 只剥离绝对路径，
+ * 保留未确认的相对 @path、邮箱和普通 @mention，避免误删正常正文。
  */
 export function stripFileRefsFromDisplay(text: string): string {
-  return stripFileRefTags(text).replace(/\s{2,}/g, ' ').trim();
+  const tokens = scanFileReferenceTokens(text).filter((token) => token.confirmed);
+  if (tokens.length === 0) return text.replace(/\s{2,}/g, ' ').trim();
+
+  let out = '';
+  let cursor = 0;
+  for (const token of tokens) {
+    out += text.slice(cursor, token.start);
+    cursor = token.end;
+    // 被引用 token 后的一个分隔空白也一并去掉，避免留下开头/中间双空格。
+    if (/\s/.test(text[cursor] || '')) cursor += 1;
+  }
+  out += text.slice(cursor);
+  return out.replace(/\s{2,}/g, ' ').trim();
 }
 
 /**

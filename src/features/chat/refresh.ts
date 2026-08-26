@@ -13,7 +13,7 @@ import { initAnswerScroller, captureScrollState, restoreScrollState, syncStreami
 import { canSendMessage } from './session-context';
 import { getActiveSuggestionIndex, getFileSuggestionsContainer } from '../files/index';
 import { getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
-import { scheduleUiRefresh } from '../../ui';
+import { scheduleUiRefresh, type ScrollSnapshot } from '../../ui';
 import { syncActiveProjectDir } from '../status-bar';
 import { previewFileByPath } from '../files/index';
 export function setupMessageListPostRender(container: HTMLElement): void {
@@ -42,7 +42,7 @@ export function setupMessageListPostRender(container: HTMLElement): void {
         // 展开思考块 = 用户在看思考内容：暂停父消息列表自动跟随，
         // 避免下一 tick 置底把正在看的思考块拉走
         if (appState.answerScroller) {
-          appState.answerScroller.autoScroll = false;
+          appState.answerScroller.pauseFollow();
         }
       } else {
         appState.expandedThinkingBlocks.delete(id);
@@ -390,7 +390,7 @@ export function canAppendOnly(messageList: HTMLElement, chunks: RenderedMessageC
 function asyncMountCreateSlots(
   messageList: HTMLElement,
   slots: ChatMountSlot[],
-  scrollSnap: { autoScroll: boolean; scrollTop: number } | null,
+  scrollSnap: ScrollSnapshot | null,
   gen: number,
 ): void {
   let index = 0;

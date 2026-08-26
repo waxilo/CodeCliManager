@@ -114,6 +114,90 @@ fn extract_json_object_candidates(text: &str) -> Vec<String> {
     candidates
 }
 
+/// 流式文本在尚未形成完整 JSON 时的工具调用判定。
+///
+/// Kiro 偶尔会把 SDK 的 `{id,input,name,type:"tool_use"}` 直接写进文本流，
+/// 且 `type` 常在很长的 input 后面。不能简单比较左右花括号数量：input 字符串
+/// 本身可能带 `{}`、`[]`、转义引号。该检测器逐字符维护 JSON 字符串/转义/嵌套状态，
+/// 只在顶层对象实际闭合后才尝试归一为 tool_use。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextToolUseClassification {
+    ToolUse,
+    PendingToolUse,
+    Plain,
+}
+
+const MAX_PENDING_TEXT_TOOL_JSON_BYTES: usize = 512 * 1024;
+
+#[derive(Default)]
+pub struct TextToolUseDetector {
+    text: String,
+    object_depth: usize,
+    in_string: bool,
+    escaping: bool,
+    completed_objects: usize,
+}
+
+impl TextToolUseDetector {
+    pub fn push(&mut self, chunk: &str) -> TextToolUseClassification {
+        self.text.push_str(chunk);
+        for ch in chunk.chars() {
+            if self.in_string {
+                if self.escaping {
+                    self.escaping = false;
+                } else if ch == '\\' {
+                    self.escaping = true;
+                } else if ch == '"' {
+                    self.in_string = false;
+                }
+                continue;
+            }
+            match ch {
+                '"' => self.in_string = true,
+                '{' => self.object_depth += 1,
+                '}' if self.object_depth > 0 => {
+                    self.object_depth -= 1;
+                    if self.object_depth == 0 {
+                        self.completed_objects += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.classification()
+    }
+
+    pub fn classification(&self) -> TextToolUseClassification {
+        let trimmed = self.text.trim_start();
+        if !trimmed.starts_with('{') {
+            return TextToolUseClassification::Plain;
+        }
+        if self.completed_objects > 0 {
+            return if parse_tool_use_blocks_from_text(trimmed).is_some() {
+                TextToolUseClassification::ToolUse
+            } else {
+                TextToolUseClassification::Plain
+            };
+        }
+
+        // 仅暂缓看起来像 SDK/Anthropic 工具包络的未闭合 JSON。短 JSON 前缀仍沿用
+        // 原有缓冲行为，普通 JSON 不会被长时间阻塞；超上限也交由收尾恢复而不泄漏文本。
+        let looks_like_tool_envelope = trimmed.contains("\"tool_use\"")
+            || (trimmed.contains("\"id\"")
+                && (trimmed.contains("\"input\"") || trimmed.contains("\"name\"")));
+        if looks_like_tool_envelope || trimmed.len() < 160 || trimmed.len() > MAX_PENDING_TEXT_TOOL_JSON_BYTES {
+            TextToolUseClassification::PendingToolUse
+        } else {
+            TextToolUseClassification::Plain
+        }
+    }
+}
+
+pub fn classify_text_tool_use(text: &str) -> TextToolUseClassification {
+    let mut detector = TextToolUseDetector::default();
+    detector.push(text)
+}
+
 fn generated_tool_use_id() -> String {
     let id = Uuid::new_v4().to_string().replace('-', "");
     format!("call_{}", &id[..24])
@@ -1030,6 +1114,74 @@ mod tests {
         assert_eq!(blocks[0]["name"], "Bash");
         assert_eq!(blocks[0]["id"], "call_123");
         assert_eq!(blocks[0]["input"]["command"], "ls");
+    }
+
+    #[test]
+    fn parses_concatenated_sdk_tool_objects_through_noise() {
+        // Kiro 偶发把 SDK tool_use JSON 原样写进 assistant 文本，多个对象之间还会
+        // 混入非 JSON 字符；必须按配平对象逐个恢复，而非要求整段是合法 JSON。
+        let text = concat!(
+            "{\"id\":\"call_edit_1\",\"input\":{\"file_path\":\"a.css\"},\"name\":\"Edit\",\"type\":\"tool_use\"}",
+            " 噪声片段 ",
+            "{\"id\":\"call_edit_2\",\"input\":{\"file_path\":\"b.css\"},\"name\":\"Edit\",\"type\":\"tool_use\"}"
+        );
+        let blocks = parse_tool_use_blocks_from_text(text).unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0]["id"], "call_edit_1");
+        assert_eq!(blocks[1]["id"], "call_edit_2");
+        assert_eq!(blocks[0]["name"], "Edit");
+        assert_eq!(blocks[1]["input"]["file_path"], "b.css");
+    }
+
+    #[test]
+    fn holds_long_sdk_tool_prefix_until_type_arrives() {
+        // type 在很长的 new_string 后才到达时，旧逻辑会超过 160 字节即当正文转发。
+        let prefix = format!(
+            "{{\"id\":\"call_edit_1\",\"input\":{{\"new_string\":\"{}",
+            "x".repeat(512)
+        );
+        assert_eq!(
+            classify_text_tool_use(&prefix),
+            TextToolUseClassification::PendingToolUse
+        );
+        let complete = format!(
+            "{}\"}},\"name\":\"Edit\",\"type\":\"tool_use\"}}",
+            prefix
+        );
+        assert_eq!(
+            classify_text_tool_use(&complete),
+            TextToolUseClassification::ToolUse
+        );
+    }
+
+    #[test]
+    fn incremental_detector_ignores_braces_and_escaped_quotes_inside_input_strings() {
+        let mut detector = TextToolUseDetector::default();
+        assert_eq!(
+            detector.push("{\"id\":\"call_edit\",\"input\":{\"new_string\":\"const x = { a: [1, 2] }; \\\"quoted\\\""),
+            TextToolUseClassification::PendingToolUse
+        );
+        assert_eq!(
+            detector.push("\"},\"name\":\"Edit\",\"type\":\"tool_use\"}"),
+            TextToolUseClassification::ToolUse
+        );
+    }
+
+    #[test]
+    fn incremental_detector_keeps_plain_json_plain_after_complete_object() {
+        let mut detector = TextToolUseDetector::default();
+        assert_eq!(
+            detector.push("{\"id\":\"example\",\"input\":{\"text\":\"{not a tool}\"}}"),
+            TextToolUseClassification::Plain
+        );
+    }
+
+    #[test]
+    fn keeps_complete_non_tool_json_as_plain_text() {
+        assert_eq!(
+            classify_text_tool_use("{\"id\":\"example\",\"input\":{\"value\":1}}"),
+            TextToolUseClassification::Plain
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ import {
   setRunStatusOverride,
   transferSessionRunTimer,
 } from './run-status';
-import { ScrollController, scheduleUiRefresh } from '../../ui';
+import { ScrollController, scheduleUiRefresh, type ScrollSnapshot } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
 import { mergeStreamBlocks, getToolAnchorBlockIndexes } from './render-chat';
 import { formatSubagentUsage } from './subagent-usage';
@@ -974,20 +974,14 @@ export function initAnswerScroller(): void {
   });
 }
 
-/** 捕获消息列表重建前的滚动状态，用于输出结束后恢复（不打断用户阅读上方消息） */
-export function captureScrollState(): { autoScroll: boolean; scrollTop: number } | null {
-  if (!appState.answerScroller) return null;
-  return { autoScroll: appState.answerScroller.autoScroll, scrollTop: appState.answerScroller.el.scrollTop };
+/** 捕获消息列表重建前的滚动状态；非跟随态记录可见消息锚点。 */
+export function captureScrollState(): ScrollSnapshot | null {
+  return appState.answerScroller?.snapshot() ?? null;
 }
 
-/** 重建后恢复滚动状态：用户此前在底部 → 置底；否则保持其阅读位置，不强制跳回 */
-export function restoreScrollState(snap: { autoScroll: boolean; scrollTop: number } | null): void {
-  if (!appState.answerScroller) return;
-  if (!snap || snap.autoScroll) {
-    appState.answerScroller.scrollToBottom();
-  } else {
-    appState.answerScroller.restorePosition(snap.scrollTop, false);
-  }
+/** 重建后恢复跟随状态或同一消息阅读锚点。 */
+export function restoreScrollState(snap: ScrollSnapshot | null): void {
+  appState.answerScroller?.restoreSnapshot(snap);
 }
 
 

@@ -34,7 +34,8 @@ use crate::kiro::models::{
 };
 use crate::kiro::transform::{
     anthropic_message_response_with_tools, build_kiro_request, build_kiro_request_with_schema,
-    parse_tool_use_blocks_from_text,
+    classify_text_tool_use, parse_tool_use_blocks_from_text, TextToolUseClassification,
+    TextToolUseDetector,
 };
 use crate::protocol_guard::{normalize_stop_reason, sanitize_protocol_text, ProtocolTextGuard};
 
@@ -773,6 +774,7 @@ impl Read for ChannelReader {
 }
 
 /// 尚不确定是普通文本还是 tool_use JSON/XML 时，先缓冲再决定是否真流式吐出。
+#[cfg(test)]
 fn classify_stream_content(text: &str) -> Option<bool> {
     let trimmed = text.trim_start();
     if trimmed.is_empty() {
@@ -781,16 +783,11 @@ fn classify_stream_content(text: &str) -> Option<bool> {
     if trimmed.starts_with("<invoke ") || trimmed.starts_with("<invoke>") {
         return Some(true);
     }
-    if trimmed.starts_with('{') {
-        if trimmed.contains("\"tool_use\"") || trimmed.contains("\"type\":\"tool_use\"") {
-            return Some(true);
-        }
-        // JSON 前缀可能仍是 tool_use，再多等一会儿
-        if trimmed.len() < 160 {
-            return None;
-        }
+    match classify_text_tool_use(trimmed) {
+        TextToolUseClassification::ToolUse => Some(true),
+        TextToolUseClassification::PendingToolUse => None,
+        TextToolUseClassification::Plain => Some(false),
     }
-    Some(false)
 }
 
 fn map_kiro_stop_reason(stop_reason: &str) -> String {
@@ -1072,6 +1069,7 @@ fn pipe_kiro_body_to_anthropic_sse(
     let mut native_tool_blocks: HashMap<String, (String, usize, bool)> = HashMap::new();
     let mut stop_reason = "end_turn".to_string();
     let mut protocol_guard = ProtocolTextGuard::default();
+    let mut text_tool_detector = TextToolUseDetector::default();
 
     loop {
         let n = match reader.read(&mut read_buf) {
@@ -1176,9 +1174,14 @@ fn pipe_kiro_body_to_anthropic_sse(
                         continue;
                     }
 
-                    // 未判定：只对疑似 tool JSON 前缀短缓冲，普通文本马上推
+                    // 未判定：普通文本马上推；疑似 SDK 工具 JSON 用跨 chunk 的状态机
+                    // 缓冲到完整对象闭合，避免长 input 末尾的 type 被漏掉。
                     pending_flush.push_str(&chunk);
-                    tool_mode = classify_stream_content(&full_text);
+                    tool_mode = match text_tool_detector.push(&chunk) {
+                        TextToolUseClassification::ToolUse => Some(true),
+                        TextToolUseClassification::PendingToolUse => None,
+                        TextToolUseClassification::Plain => Some(false),
+                    };
                     if tool_mode == Some(false) {
                         let flush = std::mem::take(&mut pending_flush);
                         let index =
@@ -1280,9 +1283,19 @@ fn pipe_kiro_body_to_anthropic_sse(
         pending_flush.push_str(&trailing_text);
     }
 
+    // 工具 JSON 候选在对象闭合前断流时，不得把原始协议内容泄漏为正文。
+    // 使用 max_tokens 收尾，Claude 流解析器会触发一次内部 recovery prompt 自动续跑。
+    let incomplete_text_tool = !saw_native_tool
+        && !text_started
+        && matches!(classify_text_tool_use(&full_text), TextToolUseClassification::PendingToolUse);
+    if incomplete_text_tool {
+        pending_flush.clear();
+        stop_reason = "max_tokens".to_string();
+    }
+
     if !saw_native_tool {
         // 仅在尚未向客户端吐出文本时，才把缓冲内容改判为文本 JSON tool
-        let parsed_tool_blocks = if !text_started {
+        let parsed_tool_blocks = if !text_started && !incomplete_text_tool {
             parse_tool_use_blocks_from_text(&full_text)
         } else {
             None
@@ -1304,7 +1317,7 @@ fn pipe_kiro_body_to_anthropic_sse(
                     stop_reason = "tool_use".to_string();
                 }
             }
-        } else if !pending_flush.is_empty() {
+        } else if !incomplete_text_tool && !pending_flush.is_empty() {
             close_thinking_block_sse(
                 &mut thinking_started,
                 thinking_block_index,
@@ -1314,7 +1327,7 @@ fn pipe_kiro_body_to_anthropic_sse(
             let flush = std::mem::take(&mut pending_flush);
             let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
             send_text_paced(&mut text_started, index, &flush, &mut send);
-        } else if !text_started && !full_text.is_empty() {
+        } else if !incomplete_text_tool && !text_started && !full_text.is_empty() {
             close_thinking_block_sse(
                 &mut thinking_started,
                 thinking_block_index,
@@ -1988,6 +2001,20 @@ mod tests {
             classify_stream_content("{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{}}"),
             Some(true)
         );
+    }
+
+    #[test]
+    fn keeps_long_sdk_tool_prefix_buffered_until_complete() {
+        let prefix = format!(
+            "{{\"id\":\"call_edit\",\"input\":{{\"new_string\":\"{}",
+            "x".repeat(512)
+        );
+        assert_eq!(classify_stream_content(&prefix), None);
+        let complete = format!(
+            "{}\"}},\"name\":\"Edit\",\"type\":\"tool_use\"}}",
+            prefix
+        );
+        assert_eq!(classify_stream_content(&complete), Some(true));
     }
 
     #[test]

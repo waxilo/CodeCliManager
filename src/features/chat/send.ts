@@ -16,7 +16,7 @@ import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshModelInfo } from './model-picker';
 import { hideSendingState } from './session-context';
 import { markSessionRunStart, setTransientStatus } from './run-status';
-import { isImageFile, stripFileRefTags, unwrapFileRef } from '../files/index';
+import { isImageFile, unwrapFileRef } from '../files/index';
 import { dismissMcpViewState } from '../mcp/mount';
 import { normalizeModelKey } from '../permissions/permission-mode';
 import { dismissSettingsViewState } from '../settings/mount';
@@ -231,30 +231,27 @@ export async function sendMessage() {
 
     const content = snapshot.text.trim();
     const pasteRefs = snapshot.pasteAttachments.map((attachment) => ({ ...attachment }));
-    const capturedImportedRefs = snapshot.importedFileRefs.map((entry) => entry.ref);
-    let promptWithPaste = content;
-
-    if (pasteRefs.length > 0) {
-      const pasteRefStr = pasteRefs.map((attachment) => `@${attachment.path}`).join(' ');
-      promptWithPaste = pasteRefStr + (content ? ' ' + content : '');
-    }
-    if (capturedImportedRefs.length > 0) {
-      const importedRefStr = capturedImportedRefs.join(' ');
-      promptWithPaste = importedRefStr + (promptWithPaste ? ' ' + promptWithPaste : '');
-    }
+    // `@File[...]` 仅是编辑器内部的引用卡格式。写入 Claude CLI / 本地乐观消息时
+    // 统一降为裸 @path，确保它与 Claude JSONL 回写的用户消息完全同形。
+    const importedPaths = snapshot.importedFileRefs
+      .map((entry) => unwrapFileRef(entry.ref))
+      .filter(Boolean);
+    const attachmentRefStr = [
+      ...pasteRefs.map((attachment) => `@${attachment.path}`),
+      ...importedPaths.map((path) => `@${path}`),
+    ].join(' ');
+    const promptWithAttachments = [attachmentRefStr, content].filter(Boolean).join(' ');
 
     const allRefs: FileRef[] = [
       ...pasteRefs.map((attachment) => ({ path: attachment.path, isImage: true })),
-      ...capturedImportedRefs.map((ref) => {
-        const path = unwrapFileRef(ref).replace(/\/$/, '');
-        return { path, isImage: isImageFile(path) };
-      }),
+      ...importedPaths.map((path) => ({ path, isImage: isImageFile(path) })),
     ];
 
-    const fileRefTagStr = capturedImportedRefs.length > 0 ? capturedImportedRefs.join(' ') + ' ' : '';
-    let promptForResolve = stripFileRefTags(promptWithPaste);
-    for (const attachment of pasteRefs) {
-      const escaped = attachment.path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // 已在 attachmentRefStr 中固定的附件不再交给 resolveFileReferences 重复处理；
+    // 用户手输的 @路径仍走解析/嵌入流程。
+    let promptForResolve = promptWithAttachments;
+    for (const path of [...pasteRefs.map((attachment) => attachment.path), ...importedPaths]) {
+      const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       promptForResolve = promptForResolve.replace(new RegExp(`@${escaped}\\s*`, 'g'), '');
     }
     promptForResolve = promptForResolve.trim();
@@ -265,15 +262,11 @@ export async function sendMessage() {
       if (!allRefs.some((existing) => existing.path === ref.path)) allRefs.push(ref);
     }
 
-    const pasteRefStr = pasteRefs.map((attachment) => `@${attachment.path}`).join(' ');
-    const resolvedContent = [pasteRefStr, fileRefTagStr, resolvedFromAtPaths].filter(Boolean).join(' ');
+    const resolvedContent = [attachmentRefStr, resolvedFromAtPaths].filter(Boolean).join(' ');
     const displayContent = displayPrompt.trim();
-    const pasteRefTagStr = pasteRefs.map((attachment) => `@File[${attachment.path}]`).join(' ');
-    const messageContent = (
-      (pasteRefTagStr ? pasteRefTagStr + ' ' : '') +
-      fileRefTagStr +
-      (displayContent || '')
-    ).trim();
+    // 乐观消息使用与 CLI 相同的裸 @path 附件 token；正文仍使用 resolver 的干净展示文本，
+    // 避免已嵌入的文本文件内容在用户气泡中展开。
+    const messageContent = [attachmentRefStr, displayContent].filter(Boolean).join(' ');
 
     const prepared: PreparedCommand = {
       prompt: resolvedContent,

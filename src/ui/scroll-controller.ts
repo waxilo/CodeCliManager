@@ -11,13 +11,29 @@ export interface ScrollControllerOptions {
   onUserScroll?: () => void;
 }
 
+export interface ScrollAnchor {
+  id: string;
+  offsetTop: number;
+}
+
+export interface ScrollSnapshot {
+  autoScroll: boolean;
+  scrollTop: number;
+  anchor: ScrollAnchor | null;
+}
+
 export class ScrollController {
   readonly el: HTMLElement;
   autoScroll = true;
   private opts: ScrollControllerOptions & { resumePx: number };
   private rafId: number | null = null;
+  private anchorRafId: number | null = null;
   private buttonEl: HTMLElement | null = null;
   private buttonClickHandler: (() => void) | null = null;
+  private resizeObserver: ResizeObserver | null = null;
+  private mutationObserver: MutationObserver | null = null;
+  private anchor: ScrollAnchor | null = null;
+  private pendingNewContent = false;
 
   constructor(el: HTMLElement, opts: ScrollControllerOptions) {
     this.el = el;
@@ -34,40 +50,99 @@ export class ScrollController {
     // scroll 事件：回到底部 → 恢复自动滚动（scroll 不冒泡，无需处理）
     el.addEventListener('scroll', this._onScroll, { passive: true });
 
+    // 流式 Markdown、图片缩略图、工具卡展开都会异步改变高度。用户阅读上方时，
+    // 以可见消息锚点补偿高度变化，避免视口看起来“跳动”。
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => this._scheduleAnchorRestore());
+      this.resizeObserver.observe(el);
+    }
+    if (typeof MutationObserver !== 'undefined') {
+      this.mutationObserver = new MutationObserver(() => this._scheduleAnchorRestore());
+      this.mutationObserver.observe(el, { childList: true, subtree: true, characterData: true });
+    }
+
     if (this.opts.createButton) {
       this._createButton();
     }
   }
 
-  /** 新内容到达时调用：若 autoScroll 则置底（RAF 节流） */
+  /** 新内容到达时调用；RAF 执行前再次检查，用户刚上滑就不会被旧队列拉回底部。 */
   onNewContent(): void {
-    if (!this.autoScroll) return;
-    if (this.rafId !== null) return; // 已有待处理的 RAF
+    if (!this.autoScroll) {
+      this.pendingNewContent = true;
+      this._updateButton();
+      return;
+    }
+    if (this.rafId !== null) return;
     this.rafId = requestAnimationFrame(() => {
       this.rafId = null;
+      if (!this.autoScroll) {
+        this.pendingNewContent = true;
+        this._updateButton();
+        return;
+      }
       this._scrollToBottom();
     });
+  }
+
+  pauseFollow(): void {
+    this.autoScroll = false;
+    // 用户可在上方继续滚动；每次都刷新锚点，后续高度变化才会保持其当前阅读位置。
+    this.anchor = this.captureAnchor();
+    this._updateButton();
   }
 
   /** 立即置底并开启自动滚动 */
   scrollToBottom(): void {
     this.autoScroll = true;
+    this.anchor = null;
+    this.pendingNewContent = false;
     this._scrollToBottom();
     this._updateButton();
   }
 
-  /** 消息列表重建后恢复用户滚动位置：autoScroll=false 表示用户在阅读上方内容，不强制置底 */
-  restorePosition(scrollTop: number, autoScroll: boolean): void {
-    this.autoScroll = autoScroll;
-    // 与 _scrollToBottom 一致：临时关闭 smooth，避免 scrollTop 赋值触发动画滚动
-    // （流式重建逐帧错位震荡）；scroll-behavior 已在 CSS 层保持 auto，此处双保险。
-    const prev = this.el.style.scrollBehavior;
-    this.el.style.scrollBehavior = 'auto';
-    this.el.scrollTop = scrollTop;
-    this.el.style.scrollBehavior = prev;
-    // 同步方向检测基准：程序化赋值后的事件不应被误判为「用户上移」而关闭跟随
-    this.lastScrollTop = this.el.scrollTop;
+  isNearBottom(): boolean {
+    return this._isNearBottom();
+  }
+
+  captureAnchor(): ScrollAnchor | null {
+    const containerTop = this.el.getBoundingClientRect().top;
+    const nodes = this.el.querySelectorAll<HTMLElement>('.message[data-message-id], .message[data-stream-id]');
+    for (const node of nodes) {
+      const rect = node.getBoundingClientRect();
+      if (rect.bottom > containerTop) {
+        const id = node.dataset.messageId || node.dataset.streamId;
+        if (id) return { id, offsetTop: rect.top - containerTop };
+      }
+    }
+    return null;
+  }
+
+  snapshot(): ScrollSnapshot {
+    return {
+      autoScroll: this.autoScroll,
+      scrollTop: this.el.scrollTop,
+      anchor: this.autoScroll ? null : this.captureAnchor(),
+    };
+  }
+
+  /** 重建后恢复用户阅读锚点；找不到锚点时才退化到数值 scrollTop。 */
+  restoreSnapshot(snapshot: ScrollSnapshot | null): void {
+    if (!snapshot || snapshot.autoScroll) {
+      this.scrollToBottom();
+      return;
+    }
+    this.autoScroll = false;
+    this.anchor = snapshot.anchor;
+    if (!this.restoreAnchor(snapshot.anchor)) {
+      this._setScrollTop(snapshot.scrollTop);
+    }
     this._updateButton();
+  }
+
+  /** 兼容旧调用方；后续统一改用 snapshot/restoreSnapshot。 */
+  restorePosition(scrollTop: number, autoScroll: boolean): void {
+    this.restoreSnapshot({ autoScroll, scrollTop, anchor: autoScroll ? null : this.captureAnchor() });
   }
 
   /** 销毁：移除监听器和按钮 */
@@ -78,6 +153,14 @@ export class ScrollController {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
+    if (this.anchorRafId !== null) {
+      cancelAnimationFrame(this.anchorRafId);
+      this.anchorRafId = null;
+    }
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    this.mutationObserver?.disconnect();
+    this.mutationObserver = null;
     if (this.buttonClickHandler) {
       this.buttonEl?.removeEventListener('click', this.buttonClickHandler);
       this.buttonClickHandler = null;
@@ -87,6 +170,32 @@ export class ScrollController {
   }
 
   // ── 内部方法 ──────────────────────────────────────────
+
+  private _scheduleAnchorRestore(): void {
+    if (this.autoScroll || !this.anchor || this.anchorRafId !== null) return;
+    this.anchorRafId = requestAnimationFrame(() => {
+      this.anchorRafId = null;
+      if (!this.autoScroll) this.restoreAnchor(this.anchor);
+    });
+  }
+
+  private restoreAnchor(anchor: ScrollAnchor | null): boolean {
+    if (!anchor) return false;
+    const node = [...this.el.querySelectorAll<HTMLElement>('.message[data-message-id], .message[data-stream-id]')]
+      .find((el) => (el.dataset.messageId || el.dataset.streamId) === anchor.id);
+    if (!node) return false;
+    const delta = node.getBoundingClientRect().top - this.el.getBoundingClientRect().top - anchor.offsetTop;
+    if (Math.abs(delta) > 0.5) this._setScrollTop(this.el.scrollTop + delta);
+    return true;
+  }
+
+  private _setScrollTop(top: number): void {
+    const prev = this.el.style.scrollBehavior;
+    this.el.style.scrollBehavior = 'auto';
+    this.el.scrollTop = top;
+    this.el.style.scrollBehavior = prev;
+    this.lastScrollTop = this.el.scrollTop;
+  }
 
   private _isNearBottom(): boolean {
     return this.el.scrollHeight - this.el.scrollTop - this.el.clientHeight < this.opts.resumePx;
@@ -121,14 +230,19 @@ export class ScrollController {
     }
     if (e.deltaY < 0) {
       // 用户向上滚动 → 停止自动跟随
-      this.autoScroll = false;
+      this.pauseFollow();
       this.opts.onUserScroll?.();
     } else if (this._isNearBottom()) {
-      // 用户向下滚动到底部 → 恢复自动跟随
+      // 用户向下滚动到底部 → 恢复自动跟随；当前位置已由浏览器滚动到位，
+      // 不再重复写 scrollTop，避免与惯性/测试环境的只读滚动 mock 互相干扰。
       this.autoScroll = true;
+      this.anchor = null;
+      this.pendingNewContent = false;
+      this._updateButton();
     } else {
       // 用户向下滚动但不在底部：仍在查看上方内容，
       // 同样通知外部（嵌套容器需关闭父容器自动跟随，避免被置底拉走）
+      this.pauseFollow();
       this.opts.onUserScroll?.();
     }
   };
@@ -141,11 +255,13 @@ export class ScrollController {
     const st = this.el.scrollTop;
     if (st < this.lastScrollTop) {
       // 用户向上移动 → 立即停止自动跟随（任何幅度）
-      this.autoScroll = false;
+      this.pauseFollow();
       this.opts.onUserScroll?.();
     } else if (this._isNearBottom()) {
       // 回到底部 → 恢复自动跟随
       this.autoScroll = true;
+      this.anchor = null;
+      this.pendingNewContent = false;
     }
     this.lastScrollTop = st;
     this._updateButton();
@@ -160,6 +276,8 @@ export class ScrollController {
     // 按钮点击：显式平滑滚动（日常 scrollTop 赋值保持 auto 即时，仅此处平滑）
     btn.addEventListener('click', this.buttonClickHandler = () => {
       this.autoScroll = true;
+      this.anchor = null;
+      this.pendingNewContent = false;
       if (typeof this.el.scrollTo === 'function') {
         this.el.scrollTo({ top: this.el.scrollHeight, behavior: 'smooth' });
       } else {
@@ -176,10 +294,9 @@ export class ScrollController {
 
   private _updateButton(): void {
     if (!this.buttonEl) return;
-    if (this._isNearBottom()) {
-      this.buttonEl.classList.remove('visible');
-    } else {
-      this.buttonEl.classList.add('visible');
-    }
+    const hidden = this._isNearBottom();
+    this.buttonEl.classList.toggle('visible', !hidden);
+    this.buttonEl.classList.toggle('has-new-content', !hidden && this.pendingNewContent);
+    this.buttonEl.title = this.pendingNewContent ? '有新内容，回到底部' : '滚动到底部';
   }
 }
