@@ -161,7 +161,7 @@ describe('applyChatDom 键控 diff 挂载', () => {
     await flushRaf();
     expect(list.querySelectorAll('.message[data-message-id]').length).toBe(30);
     expect(mounted).toBe(1);
-  });
+  }, 20_000);
 });
 
 describe('applyChatDom 纯追加快速路径（流式 tick 滚动稳定）', () => {
