@@ -55,6 +55,17 @@ fn diag_log(line: &str) {
         );
     }
 }
+
+/// 诊断日志里截断超长串（主要是请求体），避免 kiro-debug.log 被 1MB+ 的 body 撑爆。
+/// 保留开头，便于定位是哪个字段/哪条消息过大。
+fn truncate_for_log(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max).collect();
+    format!("{head}\u{2026}[truncated {count} chars]\u{2026}")
+}
 /// 连续失败达到该阈值时，判定进入了「Claude Code 重试」状态，重试请求前先自检/恢复代理。
 /// 阈值 = 1 表示首次失败后、下一次请求（往往就是第一次重试）前就恢复，最多浪费一次尝试。
 const RETRY_HEALTH_THRESHOLD: usize = 1;
@@ -1446,7 +1457,7 @@ fn respond_sse_stream_fetch(
                 health.record_failure();
                 diag_log(&format!(
                     "[stream] network_error={e} body={}",
-                    serde_json::to_string(&built).unwrap_or_default()
+                    truncate_for_log(&serde_json::to_string(&built).unwrap_or_default(), 2048)
                 ));
                 if let Some(e) = &entry {
                     dedup.mark_failed(e);
@@ -1468,7 +1479,7 @@ fn respond_sse_stream_fetch(
             let text = String::from_utf8_lossy(&bytes).to_string();
             diag_log(&format!(
                 "[stream] status={status} body={} resp={text}",
-                serde_json::to_string(&built).unwrap_or_default()
+                truncate_for_log(&serde_json::to_string(&built).unwrap_or_default(), 2048)
             ));
             let message = serde_json::from_str::<Value>(&text)
                 .ok()
@@ -1605,7 +1616,7 @@ fn call_kiro_generate(
         let text = String::from_utf8_lossy(&bytes).to_string();
         diag_log(&format!(
             "[GenerateAssistantResponse] status={status} body={} resp={text}",
-            serde_json::to_string(body).unwrap_or_default()
+            truncate_for_log(&serde_json::to_string(body).unwrap_or_default(), 2048)
         ));
         let message = serde_json::from_str::<Value>(&text)
             .ok()
@@ -1829,7 +1840,7 @@ fn handle_messages(
             health.record_failure();
             diag_log(&format!(
                 "[handle_messages] generate_error={e} status=502 body={}",
-                serde_json::to_string(&built).unwrap_or_default()
+                truncate_for_log(&serde_json::to_string(&built).unwrap_or_default(), 2048)
             ));
             return error_response(request, 502, &e, "api_error");
         }

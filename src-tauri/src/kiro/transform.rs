@@ -399,13 +399,40 @@ fn parse_data_url(url: &str) -> Option<(String, String)> {
     Some((meta.to_string(), data.to_string()))
 }
 
-/// 把 tool_result 的 content 摊平成文本（与 kiro2cli 一致）：字符串直接用，否则 JSON.stringify。
-fn tool_result_to_text(content: &Value) -> String {
-    match content {
-        Value::String(text) => text.clone(),
-        Value::Null => String::new(),
-        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+/// 单条工具结果摊平文本的最大长度。避免大输出（如读大文件 / 命令长输出 / 大 JSON）撑爆模型上下文
+/// 触发 Kiro `CONTENT_LENGTH_EXCEEDS_THRESHOLD`。保留开头，超限部分截断并加标记。
+const MAX_TOOL_RESULT_TEXT_CHARS: usize = 6000;
+
+fn truncate_to_limit(text: &str, max: usize) -> String {
+    let count = text.chars().count();
+    if count <= max {
+        return text.to_string();
     }
+    let head: String = text.chars().take(max).collect();
+    format!("{head}\n\u{2026}[tool result truncated: {count} chars]\u{2026}")
+}
+
+/// 把 tool_result 的 content 摊平成文本（与 kiro2cli 一致），并按 `MAX_TOOL_RESULT_TEXT_CHARS` 截断。
+fn tool_result_to_text(content: &Value) -> String {
+    let text = match content {
+        Value::String(text) => text.clone(),
+        Value::Array(parts) => parts
+            .iter()
+            .map(|part| {
+                if let Some(t) = part.get("text").and_then(|v| v.as_str()) {
+                    t.to_string()
+                } else if let Some(j) = part.get("json") {
+                    j.to_string()
+                } else {
+                    part.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    };
+    truncate_to_limit(&text, MAX_TOOL_RESULT_TEXT_CHARS)
 }
 
 fn anthropic_content_to_kiro(content: &Value) -> Result<KiroContent, String> {
@@ -1187,6 +1214,47 @@ mod tests {
         assert_eq!(
             current["userInputMessageContext"]["tools"][0]["toolSpecification"]["name"],
             "Bash"
+        );
+    }
+
+    #[test]
+    fn large_tool_results_are_truncated_into_current_text() {
+        // 大工具结果（如读大文件）会摊平进文本，但按 MAX_TOOL_RESULT_TEXT_CHARS 截断，避免撑爆模型上下文。
+        let big = "x".repeat(200_000);
+        let body = json!({
+            "messages": [
+                { "role": "user", "content": "show me the file" },
+                {
+                    "role": "assistant",
+                    "content": [{
+                        "type": "tool_use",
+                        "id": "call_1",
+                        "name": "Read",
+                        "input": { "file_path": "/tmp/big.txt" }
+                    }]
+                },
+                {
+                    "role": "user",
+                    "content": [{
+                        "type": "tool_result",
+                        "tool_use_id": "call_1",
+                        "content": [{ "type": "text", "text": big }]
+                    }]
+                }
+            ],
+            "tools": [{ "name": "Read", "input_schema": { "type": "object" } }]
+        });
+        let built = build_kiro_request(&body, "gpt-5.6-sol", Some("arn")).unwrap();
+        let current = &built["conversationState"]["currentMessage"]["userInputMessage"];
+        let content = current["content"].as_str().unwrap();
+        assert!(content.starts_with("[tool_result:call_1]"));
+        // 截断后远小于原始 200_000，且带截断标记
+        assert!(content.len() < 10_000, "content should be truncated: len={}", content.len());
+        assert!(content.contains("truncated"));
+        assert!(content.contains("tool result"));
+        assert!(
+            current["userInputMessageContext"].get("toolResults").is_none(),
+            "toolResults must NOT be sent"
         );
     }
 
