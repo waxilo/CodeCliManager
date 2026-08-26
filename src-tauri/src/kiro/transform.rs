@@ -11,10 +11,12 @@ use crate::kiro::models::{
 use crate::protocol_guard::normalize_stop_reason;
 
 /// Anthropic content 块 → Kiro 的 {text, images}。
+///
+/// 工具结果不结构化：Kiro 的 GenerateAssistantResponse 不接受 `toolResults`/`toolUses`，
+/// 因此 tool_result 直接摊平成文本（`[tool_result:<id>]\n<内容>`）进 text，与 kiro2cli 一致。
 pub struct KiroContent {
     pub text: String,
     pub images: Vec<Value>,
-    pub tool_results: Vec<Value>,
 }
 
 // ============ 工具调用解析（JSON + XML） ============
@@ -397,48 +399,13 @@ fn parse_data_url(url: &str) -> Option<(String, String)> {
     Some((meta.to_string(), data.to_string()))
 }
 
-/// Kiro 侧要求 toolUseId 使用 `tooluse_` 前缀；Claude Code 常见 `call_` / `toolu_`。
-fn normalize_tool_use_id(id: &str) -> String {
-    let id = id.trim();
-    if id.is_empty() {
-        return format!("tooluse_{}", Uuid::new_v4().simple());
-    }
-    if id.starts_with("tooluse_") {
-        return id.to_string();
-    }
-    let stripped = id
-        .strip_prefix("toolu_")
-        .or_else(|| id.strip_prefix("call_"))
-        .or_else(|| id.strip_prefix("tool_"))
-        .unwrap_or(id);
-    format!("tooluse_{stripped}")
-}
-
-fn try_parse_json_or_wrap(raw: &str) -> Value {
-    serde_json::from_str(raw).unwrap_or_else(|_| json!({ "result": raw }))
-}
-
-fn tool_result_content_to_kiro(content: &Value) -> Vec<Value> {
-    let raw = match content {
+/// 把 tool_result 的 content 摊平成文本（与 kiro2cli 一致）：字符串直接用，否则 JSON.stringify。
+fn tool_result_to_text(content: &Value) -> String {
+    match content {
         Value::String(text) => text.clone(),
-        Value::Array(parts) => parts
-            .iter()
-            .map(|part| {
-                if let Some(text) = part.get("text").and_then(|v| v.as_str()) {
-                    text.to_string()
-                } else if let Some(value) = part.get("json") {
-                    value.to_string()
-                } else {
-                    part.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n"),
         Value::Null => String::new(),
-        other => other.to_string(),
-    };
-    // 与 kiro-proxy-anthropic 一致：toolResults.content 使用 [{ json: ... }]
-    vec![json!({ "json": try_parse_json_or_wrap(&raw) })]
+        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+    }
 }
 
 fn anthropic_content_to_kiro(content: &Value) -> Result<KiroContent, String> {
@@ -446,20 +413,17 @@ fn anthropic_content_to_kiro(content: &Value) -> Result<KiroContent, String> {
         return Ok(KiroContent {
             text: s.to_string(),
             images: Vec::new(),
-            tool_results: Vec::new(),
         });
     }
     let Some(blocks) = content.as_array() else {
         return Ok(KiroContent {
             text: content.as_str().unwrap_or("").to_string(),
             images: Vec::new(),
-            tool_results: Vec::new(),
         });
     };
 
     let mut text_parts = Vec::new();
     let mut images = Vec::new();
-    let mut tool_results = Vec::new();
 
     for block in blocks {
         if block.is_null() {
@@ -496,33 +460,23 @@ fn anthropic_content_to_kiro(content: &Value) -> Result<KiroContent, String> {
                         _ => {}
                     }
                 }
+                // 工具结果摊平为文本（Kiro 不接受结构化 toolResults）：
+                // `[tool_result:<id>]\n<content>`。与 kiro2cli 一致。
                 "tool_result" => {
                     let tool_use_id = block
                         .get("tool_use_id")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .trim();
-                    if tool_use_id.is_empty() {
-                        continue;
-                    }
-                    let normalized_id = normalize_tool_use_id(tool_use_id);
-                    if tool_results
-                        .iter()
-                        .any(|result: &Value| result["toolUseId"] == normalized_id)
-                    {
-                        continue;
-                    }
-                    tool_results.push(json!({
-                        "toolUseId": normalized_id,
-                        "content": tool_result_content_to_kiro(
-                            block.get("content").unwrap_or(&Value::Null)
-                        ),
-                        "status": if block.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false) {
-                            "error"
-                        } else {
-                            "success"
-                        },
-                    }));
+                    let id = if tool_use_id.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        tool_use_id.to_string()
+                    };
+                    let content_text = tool_result_to_text(
+                        block.get("content").unwrap_or(&Value::Null),
+                    );
+                    text_parts.push(format!("[tool_result:{id}]\n{content_text}"));
                 }
                 _ => {}
             }
@@ -532,7 +486,6 @@ fn anthropic_content_to_kiro(content: &Value) -> Result<KiroContent, String> {
     Ok(KiroContent {
         text: text_parts.join("\n"),
         images,
-        tool_results,
     })
 }
 
@@ -544,8 +497,9 @@ fn anthropic_assistant_to_kiro(content: &Value) -> Value {
         return json!({ "content": content.as_str().unwrap_or("") });
     };
 
+    // 工具调用摊平为文本（Kiro 不接受结构化 toolUses）：
+    // assistant 的 tool_use 直接以 JSON 字符串形式进 content，与 kiro2cli 一致。
     let mut text_parts = Vec::new();
-    let mut tool_uses = Vec::new();
     for block in blocks {
         match block.get("type").and_then(|v| v.as_str()) {
             Some("text") => {
@@ -554,78 +508,20 @@ fn anthropic_assistant_to_kiro(content: &Value) -> Value {
                 }
             }
             Some("tool_use") => {
-                let id = block.get("id").and_then(|v| v.as_str()).unwrap_or("").trim();
-                let name = block
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .trim();
-                if !id.is_empty() && !name.is_empty() {
-                    tool_uses.push(json!({
-                        "toolUseId": normalize_tool_use_id(id),
-                        "name": name,
-                        "input": block.get("input").cloned().unwrap_or_else(|| json!({})),
-                    }));
-                }
+                text_parts.push(serde_json::to_string(block).unwrap_or_default());
             }
             _ => {}
         }
     }
 
-    let mut message = json!({ "content": text_parts.join("\n") });
-    if !tool_uses.is_empty() {
-        let object = message.as_object_mut().unwrap();
-        object.insert(
-            "messageId".to_string(),
-            Value::String(Uuid::new_v4().to_string()),
-        );
-        object.insert("toolUses".to_string(), Value::Array(tool_uses));
-    } else if message
-        .get("content")
-        .and_then(|v| v.as_str())
-        .map(|s| s.is_empty())
-        .unwrap_or(true)
-    {
-        // Kiro 不允许空 assistant 消息
-        message
-            .as_object_mut()
-            .unwrap()
-            .insert("content".to_string(), Value::String(".".to_string()));
-    }
-    message
-}
-
-fn last_assistant_tool_ids(history: &[Value]) -> std::collections::HashSet<String> {
-    for item in history.iter().rev() {
-        if let Some(assistant) = item.get("assistantResponseMessage") {
-            let mut ids = std::collections::HashSet::new();
-            if let Some(tool_uses) = assistant.get("toolUses").and_then(|v| v.as_array()) {
-                for tool_use in tool_uses {
-                    if let Some(id) = tool_use.get("toolUseId").and_then(|v| v.as_str()) {
-                        ids.insert(id.to_string());
-                    }
-                }
-            }
-            return ids;
-        }
-    }
-    std::collections::HashSet::new()
-}
-
-fn filter_orphan_tool_results(results: &[Value], valid_ids: &std::collections::HashSet<String>) -> Vec<Value> {
-    if valid_ids.is_empty() {
-        return results.to_vec();
-    }
-    results
-        .iter()
-        .filter(|result| {
-            result
-                .get("toolUseId")
-                .and_then(|v| v.as_str())
-                .is_some_and(|id| valid_ids.contains(id))
-        })
-        .cloned()
-        .collect()
+    let content = text_parts.join("\n");
+    // Kiro 不允许空 assistant 消息
+    let content = if content.trim().is_empty() {
+        ".".to_string()
+    } else {
+        content
+    };
+    json!({ "content": content })
 }
 
 fn anthropic_tools_to_kiro(tools: &Value) -> Vec<Value> {
@@ -897,21 +793,14 @@ fn build_kiro_request_with_profile(
         let role = message.get("role").and_then(|v| v.as_str()).unwrap_or("");
         if role == "user" {
             let parsed = anthropic_content_to_kiro(message.get("content").unwrap_or(&Value::Null))?;
-            let mut content = parsed.text;
-            if !system_applied && !system_text.is_empty() {
-                content = apply_system_prompt(&content, &system_text);
+            let content = if !system_applied && !system_text.is_empty() {
+                let wrapped = apply_system_prompt(&parsed.text, &system_text);
                 system_applied = true;
-            }
-            let kept_results =
-                filter_orphan_tool_results(&parsed.tool_results, &last_assistant_tool_ids(&history));
-            // 历史里空 content 会被 Kiro 拒；工具结果轮次用 continue
-            if content.trim().is_empty() {
-                content = if kept_results.is_empty() {
-                    String::new()
-                } else {
-                    "continue".to_string()
-                };
-            }
+                wrapped
+            } else {
+                parsed.text
+            };
+            // 历史里的工具结果已摊平进文本，不再附加 userInputMessageContext
             let mut msg = json!({
                 "content": content,
                 "origin": "KIRO_CLI",
@@ -920,7 +809,6 @@ fn build_kiro_request_with_profile(
             if !parsed.images.is_empty() {
                 msg.as_object_mut().unwrap().insert("images".to_string(), Value::Array(parsed.images));
             }
-            attach_user_context(&mut msg, &[], &kept_results);
             history.push(json!({ "userInputMessage": msg }));
         } else if role == "assistant" {
             history.push(json!({
@@ -932,22 +820,17 @@ fn build_kiro_request_with_profile(
     }
 
     let current_parsed = anthropic_content_to_kiro(messages[last_user_index].get("content").unwrap_or(&Value::Null))?;
-    let mut current_content = if !system_applied {
+    let current_content = if !system_applied {
         apply_system_prompt(&current_parsed.text, &system_text)
     } else {
         current_parsed.text
     };
-    let kept_current_results = filter_orphan_tool_results(
-        &current_parsed.tool_results,
-        &last_assistant_tool_ids(&history),
-    );
-    if current_content.trim().is_empty() {
-        current_content = if kept_current_results.is_empty() {
-            ".".to_string()
-        } else {
-            "continue".to_string()
-        };
-    }
+    // 空消息兜底：Kiro 不接受空 userInputMessage.content
+    let current_content = if current_content.trim().is_empty() {
+        ".".to_string()
+    } else {
+        current_content
+    };
     let mut current_message = json!({
         "content": current_content,
         "modelId": kiro_model,
@@ -959,11 +842,8 @@ fn build_kiro_request_with_profile(
             .unwrap()
             .insert("images".to_string(), Value::Array(current_parsed.images));
     }
-    attach_user_context(
-        &mut current_message,
-        &kiro_tools,
-        &kept_current_results,
-    );
+    // 只附加结构化工具定义（Kiro 接受），工具结果/调用已摊平进 content（Kiro 不接受 toolResults/toolUses）
+    attach_user_context(&mut current_message, &kiro_tools, &[]);
 
     let mut body_out = json!({
         "conversationState": {
@@ -1202,21 +1082,24 @@ mod tests {
         let built = build_kiro_request(&body, "gpt-5.6-sol", Some("arn")).unwrap();
         let history = built["conversationState"]["history"].as_array().unwrap();
         let assistant = &history[1]["assistantResponseMessage"];
-        assert_eq!(assistant["content"], "");
-        assert_eq!(assistant["toolUses"][0]["toolUseId"], "tooluse_abc");
-        assert_eq!(assistant["toolUses"][0]["name"], "Bash");
-        assert_eq!(assistant["toolUses"][0]["input"]["command"], "ls");
+        // 工具调用摊平为文本（Kiro 不接受结构化 toolUses）
+        let assistant_text = assistant["content"].as_str().unwrap();
+        assert!(assistant_text.contains("\"type\":\"tool_use\""));
+        assert!(assistant_text.contains("\"id\":\"call_abc\""));
+        assert!(assistant_text.contains("\"name\":\"Bash\""));
+        assert!(assistant.get("toolUses").is_none(), "toolUses must NOT be sent");
 
         let current = &built["conversationState"]["currentMessage"]["userInputMessage"];
-        assert_eq!(current["content"], "continue");
+        // 工具结果摊平为文本，而不是 userInputMessageContext.toolResults
+        assert_eq!(current["content"], "[tool_result:call_abc]\na.txt\nb.txt");
         assert_eq!(current["origin"], "KIRO_CLI");
-        let result = &current["userInputMessageContext"]["toolResults"][0];
-        assert_eq!(result["toolUseId"], "tooluse_abc");
-        assert_eq!(result["content"][0]["json"]["result"], "a.txt\nb.txt");
-        assert_eq!(result["status"], "success");
         assert_eq!(
             current["userInputMessageContext"]["tools"][0]["toolSpecification"]["name"],
             "Bash"
+        );
+        assert!(
+            current["userInputMessageContext"].get("toolResults").is_none(),
+            "toolResults must NOT be sent"
         );
     }
 
@@ -1249,10 +1132,14 @@ mod tests {
         });
         let built = build_kiro_request(&body, "deepseek-3.2", Some("arn")).unwrap();
         let history = built["conversationState"]["history"].as_array().unwrap();
-        let result = &history[2]["userInputMessage"]["userInputMessageContext"]["toolResults"][0];
-        assert_eq!(result["toolUseId"], "tooluse_bad");
-        assert_eq!(result["content"][0]["json"]["result"], "exit 1");
-        assert_eq!(result["status"], "error");
+        // 历史里的工具结果摊平进 user content，不再有 userInputMessageContext.toolResults
+        let content = history[2]["userInputMessage"]["content"].as_str().unwrap();
+        assert!(content.starts_with("[tool_result:call_bad]"));
+        assert!(content.contains("exit 1"));
+        assert!(
+            history[2]["userInputMessage"].get("userInputMessageContext").is_none(),
+            "tool results flattened; no userInputMessageContext"
+        );
     }
 
     #[test]
@@ -1288,12 +1175,19 @@ mod tests {
             "tools": [{ "name": "Bash", "input_schema": { "type": "object" } }]
         });
         let built = build_kiro_request(&body, "gpt-5.6-sol", Some("arn")).unwrap();
-        let results = built["conversationState"]["currentMessage"]["userInputMessage"]
-            ["userInputMessageContext"]["toolResults"]
-            .as_array()
-            .unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0]["toolUseId"], "tooluse_keep");
+        // 工具结果全部摊平进 currentMessage 文本（不再做孤儿过滤/Kiro 不接受 toolResults）
+        let current = &built["conversationState"]["currentMessage"]["userInputMessage"];
+        let content = current["content"].as_str().unwrap();
+        assert!(content.starts_with("[tool_result:call_keep]\nok"));
+        assert!(content.contains("[tool_result:call_orphan]\nnope"));
+        assert!(
+            current["userInputMessageContext"].get("toolResults").is_none(),
+            "toolResults must NOT be sent"
+        );
+        assert_eq!(
+            current["userInputMessageContext"]["tools"][0]["toolSpecification"]["name"],
+            "Bash"
+        );
     }
 
     #[test]
