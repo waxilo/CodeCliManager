@@ -265,16 +265,34 @@ export interface MergedStreamBlock extends StreamBlock {
   rawEnd: number;
 }
 
-/** 合并相邻同类型流式块（thinking-thinking / text-text），语义与旧 refreshStreamingUI 一致 */
-export function mergeStreamBlocks(blocks: StreamBlock[]): MergedStreamBlock[] {
+/** 提取工具开始时所在的原始流式块索引；这些位置是不可跨越的内容顺序边界。 */
+export function getToolAnchorBlockIndexes(tools: ActiveToolState[]): Set<number> {
+  const indexes = new Set<number>();
+  for (const tool of tools) {
+    const index = tool.blockIndexAtStart;
+    if (index != null && index >= 0) indexes.add(index);
+  }
+  return indexes;
+}
+
+/**
+ * 合并相邻同类型流式块（thinking-thinking / text-text）。
+ * 工具锚定在原始块之后时不得跨过该边界合并，否则后续块会被折叠到工具卡上方。
+ */
+export function mergeStreamBlocks(
+  blocks: StreamBlock[],
+  noMergeAfterRaw: ReadonlySet<number> = new Set<number>(),
+): MergedStreamBlock[] {
   const merged: MergedStreamBlock[] = [];
   let rawCursor = 0;
   for (const block of blocks) {
     const last = merged[merged.length - 1];
     // 相邻同类型块合并；已完成块不与未完成块合并（拆开）——
-    // 否则已渲染 markdown 的 text / 已结束的 thinking 会被新块的未完成态污染回退
+    // 否则已渲染 markdown 的 text / 已结束的 thinking 会被新块的未完成态污染回退。
+    // 工具开始于前一个原始块之后时也必须拆开，保持「块 → 工具 → 块」的真实顺序。
     const sameType = last && last.type === block.type && (block.type === 'thinking' || block.type === 'text');
-    const merges = Boolean(sameType && !(last!.finalized && !block.finalized));
+    const crossesToolAnchor = rawCursor > 0 && noMergeAfterRaw.has(rawCursor - 1);
+    const merges = Boolean(sameType && !crossesToolAnchor && !(last!.finalized && !block.finalized));
     if (merges) {
       if (block.type === 'thinking') {
         last!.content = last!.content + '\n' + block.content;
@@ -305,8 +323,11 @@ export function mergeStreamBlocks(blocks: StreamBlock[]): MergedStreamBlock[] {
  * 内容变化（renderKey 变）只重建该块，避免整列表重建导致的闪烁。
  * 根节点带 data-stream-id：与历史消息的 data-message-id 一并被 applyChatDom 索引。
  */
-export function renderStreamingBlocksChunks(blocks: StreamBlock[]): RenderedMessageChunk[] {
-  const merged = mergeStreamBlocks(blocks);
+export function renderStreamingBlocksChunks(
+  blocks: StreamBlock[],
+  noMergeAfterRaw: ReadonlySet<number> = new Set<number>(),
+): RenderedMessageChunk[] {
+  const merged = mergeStreamBlocks(blocks, noMergeAfterRaw);
   return merged.map((block, i) => {
     const id = `streaming-block-${i}`;
     // 思考块展开状态按块独立记录（expandedThinkingBlocks 键 = streaming-block-N），

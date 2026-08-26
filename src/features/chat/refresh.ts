@@ -2,7 +2,7 @@ import { appState, LOAD_EARLIER_STEP } from '../../state';
 import type { Conversation } from '../../types';
 import { initCodeCopyButtons, scheduleHighlighting, copyToClipboard } from '../../markdown';
 import { bindInteractiveAskCards, syncPendingAskToInteractionHost } from '../permissions';
-import { renderConversationMessageChunks, buildDisplayMessages, renderStreamingBlocksChunks, renderLiveToolChunks, mergeStreamBlocks, ensureMessageWindowForActiveConversation, getActiveMessageWindowSize, incrementActiveMessageWindow, renderChatHeaderHtml } from './render-chat';
+import { renderConversationMessageChunks, buildDisplayMessages, renderStreamingBlocksChunks, renderLiveToolChunks, mergeStreamBlocks, getToolAnchorBlockIndexes, ensureMessageWindowForActiveConversation, getActiveMessageWindowSize, incrementActiveMessageWindow, renderChatHeaderHtml } from './render-chat';
 import type { RenderedMessageChunk } from './render-messages';
 import { bindSessionIdCopyEvents } from './input-composer';
 import { updateSendButtonState, isSendButtonLoading } from './session-context';
@@ -571,7 +571,14 @@ function interleaveStreamAndToolChunks(
 
   const sid = appState.activeConversationId || 'pending';
   const state = appState.streamingBySession.get(sid);
-  const merged = state ? mergeStreamBlocks(state.blocks) : [];
+  const noMergeAfterRaw = new Set(
+    toolChunks.flatMap((chunk) =>
+      chunk.anchorBlockIndex != null && chunk.anchorBlockIndex >= 0
+        ? [chunk.anchorBlockIndex]
+        : [],
+    ),
+  );
+  const merged = state ? mergeStreamBlocks(state.blocks, noMergeAfterRaw) : [];
   const rawToMerged = (raw: number): number => {
     for (let i = 0; i < merged.length; i++) {
       if (raw >= merged[i].rawStart && raw <= merged[i].rawEnd) return i;
@@ -700,11 +707,13 @@ export function refreshChatContent(): boolean {
 
   const sid = appState.activeConversationId || 'pending';
   const streamState = appState.streamingBySession.get(sid);
-  const streamChunks = streamState
-    ? renderStreamingBlocksChunks(streamState.blocks)
-    : [];
   const tools = appState.activeToolsBySession.get(sid);
-  const toolChunks = tools && tools.size > 0 ? renderLiveToolChunks([...tools.values()]) : [];
+  const toolStates = tools ? [...tools.values()] : [];
+  const noMergeAfterRaw = getToolAnchorBlockIndexes(toolStates);
+  const streamChunks = streamState
+    ? renderStreamingBlocksChunks(streamState.blocks, noMergeAfterRaw)
+    : [];
+  const toolChunks = toolStates.length > 0 ? renderLiveToolChunks(toolStates) : [];
 
   // 流式块 + 实时工具卡统一为一个序列：工具卡插到「工具开始时的流式块」之后，
   // 与历史消息同一 diff 挂载（思考-工具-思考按真实顺序穿插，参考 DSH/Codex）。

@@ -28,7 +28,7 @@ import {
 } from './run-status';
 import { ScrollController, scheduleUiRefresh } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
-import { mergeStreamBlocks } from './render-chat';
+import { mergeStreamBlocks, getToolAnchorBlockIndexes } from './render-chat';
 import { formatSubagentUsage } from './subagent-usage';
 
 const TOOL_CHUNK_KINDS = new Set([
@@ -873,8 +873,11 @@ export function syncStreamingBlocksInPlace(sessionId: string): void {
   // 只读状态：不创建空条目（纯工具会话 / 已清理会话不应残留空状态）
   const state = appState.streamingBySession.get(sessionId);
   if (!state) return;
-  // 与 renderStreamingBlocksChunks 内部 mergeStreamBlocks 语义一致
-  const merged = mergeStreamBlocks(state.blocks);
+  // 与 renderStreamingBlocksChunks 内部 mergeStreamBlocks 语义一致（同一组工具锚点，
+  // 否则就地路径与 diff 路径计算出的块边界不一致，工具卡会在最终化后被折叠到错误位置）
+  const anchorTools = appState.activeToolsBySession.get(sessionId);
+  const noMergeAfterRaw = getToolAnchorBlockIndexes(anchorTools ? [...anchorTools.values()] : []);
+  const merged = mergeStreamBlocks(state.blocks, noMergeAfterRaw);
   merged.forEach((block, idx) => {
     const blockId = `streaming-block-${idx}`;
     const existingEl = messageList.querySelector<HTMLElement>(

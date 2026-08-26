@@ -89,4 +89,52 @@ describe('真实事件路径的流式顺序', () => {
     expect(seq[1]).toBe('tool:t1');
     expect(seq[2]).toBe('block:streaming-block-1');
   });
+
+  it('text → tool → text：后一个文本块最终化后工具卡仍保持居中', () => {
+    appState.runningSessions.add(SID);
+    chunk('text_start', '');
+    chunk('text_delta', '工具前说明');
+    chunk('text_end', '');
+    chunk('tool_use_start', JSON.stringify({ id: 't1', name: 'Read', index: 0 }));
+    chunk('tool_use_end', JSON.stringify({ id: 't1', name: 'Read', input: { file_path: '/a.rs' }, index: 0 }));
+    chunk('text_start', '');
+    chunk('text_delta', '工具后说明');
+
+    expect(domSequence()).toEqual([
+      'block:streaming-block-0',
+      'tool:t1',
+      'block:streaming-block-1',
+    ]);
+
+    chunk('text_end', '');
+    expect(domSequence()).toEqual([
+      'block:streaming-block-0',
+      'tool:t1',
+      'block:streaming-block-1',
+    ]);
+  });
+
+  it('thinking → tool → thinking：后一个思考块最终化后工具卡仍保持居中', () => {
+    appState.runningSessions.add(SID);
+    chunk('thinking_start', '');
+    chunk('thinking_delta', '工具前思考');
+    chunk('thinking_end', JSON.stringify({ duration_ms: 100 }));
+    chunk('tool_use_start', JSON.stringify({ id: 't1', name: 'Read', index: 0 }));
+    chunk('tool_use_end', JSON.stringify({ id: 't1', name: 'Read', input: { file_path: '/a.rs' }, index: 0 }));
+    chunk('thinking_start', '');
+    chunk('thinking_delta', '工具后思考');
+
+    expect(domSequence()).toEqual([
+      'block:streaming-block-0',
+      'tool:t1',
+      'block:streaming-block-1',
+    ]);
+
+    chunk('thinking_end', JSON.stringify({ duration_ms: 200 }));
+    expect(domSequence()).toEqual([
+      'block:streaming-block-0',
+      'tool:t1',
+      'block:streaming-block-1',
+    ]);
+  });
 });
