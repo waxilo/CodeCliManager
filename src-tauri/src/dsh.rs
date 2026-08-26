@@ -445,7 +445,29 @@ pub fn dsh_start(state: State<DshState>) -> Result<DshStatusData, String> {
 }
 
 /// 按端口查找并结束占用进程（覆盖 CCM 被强杀后残留的孤儿 dsh 进程）。
-/// Windows 用 netstat+taskkill，macOS/Linux 用 lsof+kill。
+/// 从一行 netstat -ano 输出中解析「监听指定端口的本地地址」的 PID。
+/// 行格式：`协议 本地地址 外部地址 状态 PID`（如 `TCP 127.0.0.1:3080 0.0.0.0:0 LISTENING 7788`）。
+/// 本地地址在第 2 列（index 1），第 1 列是协议名 TCP/UDP；
+/// 只匹配状态为 LISTENING 且本地地址含目标端口的行（避免误杀 Foreign Address 为 :port 的连接行）。
+fn netstat_listening_pid(line: &str, port: u16) -> Option<u32> {
+    let needle = format!(":{port}");
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    let local_addr_ok = parts
+        .get(1)
+        .map(|a| a.contains(&needle) || a.contains(&format!("]:{port}")))
+        .unwrap_or(false);
+    let state_ok = parts.iter().any(|p| p.eq_ignore_ascii_case("LISTENING"));
+    if !(local_addr_ok && state_ok) {
+        return None;
+    }
+    let pid = parts.last()?;
+    if pid.chars().all(|c| c.is_ascii_digit()) {
+        pid.parse::<u32>().ok()
+    } else {
+        None
+    }
+}
+
 /// 按端口查找并结束占用进程。返回是否杀到了至少一个进程。
 /// Windows 用 netstat+taskkill，macOS/Linux 用 lsof+kill（均套扩展 PATH）。
 fn kill_port_owner(port: u16) -> bool {
@@ -460,28 +482,13 @@ fn kill_port_owner(port: u16) -> bool {
         let netstat = netstat_cmd.output();
         if let Ok(out) = netstat {
             let text = String::from_utf8_lossy(&out.stdout);
-            let needle = format!(":{port}");
             for line in text.lines() {
-                // 精确匹配：Local Address 段含 :port 且状态为 LISTENING，
-                // 避免误杀 Foreign Address 为 :port 的连接行（CCM 自身的探测连接）
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                let local_addr_ok = parts
-                    .first()
-                    .map(|a| a.contains(&needle) || a.contains(&format!("]:{port}")))
-                    .unwrap_or(false);
-                let state_ok = parts
-                    .iter()
-                    .any(|p| p.eq_ignore_ascii_case("LISTENING"));
-                if local_addr_ok && state_ok {
-                    if let Some(pid) = parts.last() {
-                        if pid.chars().all(|c| c.is_ascii_digit()) {
-                            eprintln!("[dsh] Windows 清理端口 {port} 占用进程 PID {pid}");
-                            let mut kill_cmd = Command::new("taskkill");
-                            apply_cli_runtime_env(&mut kill_cmd);
-                            let _ = kill_cmd.args(["/F", "/T", "/PID", pid]).output();
-                            killed = true;
-                        }
-                    }
+                if let Some(pid) = netstat_listening_pid(line, port) {
+                    eprintln!("[dsh] Windows 清理端口 {port} 占用进程 PID {pid}");
+                    let mut kill_cmd = Command::new("taskkill");
+                    apply_cli_runtime_env(&mut kill_cmd);
+                    let _ = kill_cmd.args(["/F", "/T", "/PID", &pid.to_string()]).output();
+                    killed = true;
                 }
             }
         }
@@ -517,8 +524,23 @@ fn kill_port_owner(port: u16) -> bool {
 pub fn dsh_stop(state: State<DshState>) -> Result<DshStatusData, String> {
     if let Some(mut child) = state.0.lock().unwrap().take() {
         eprintln!("[dsh] 停止：kill 本进程启动的子进程");
-        let _ = child.kill();
-        let _ = child.wait();
+        #[cfg(target_os = "windows")]
+        {
+            // Windows：dsh 是 .cmd 批处理 → node 的进程树，child.kill() 只杀 cmd.exe，
+            // node 子进程仍占用端口。必须 taskkill /T 递归杀整棵进程树。
+            let pid = child.id();
+            let mut kill_cmd = Command::new("taskkill");
+            apply_cli_runtime_env(&mut kill_cmd);
+            let _ = kill_cmd
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .output();
+            let _ = child.wait();
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
     }
     // 多轮检测：等待进程自然退出；仍占用则按端口清理（最多约 3 秒）
     for round in 0..6 {
@@ -558,6 +580,27 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         assert!(is_port_open(port));
         assert!(!is_port_open(1)); // 保留端口，必然不可连
+    }
+
+    #[test]
+    fn netstat_listening_pid_matches_local_address_column() {
+        // netstat -ano 行：第 1 列是协议名（TCP/UDP），本地地址在第 2 列。
+        // 曾误用 parts.first()（协议名）匹配端口导致永远匹配不到 → taskkill 不执行 → 停止服务无效。
+        let listening = "  TCP    127.0.0.1:3080         0.0.0.0:0              LISTENING       7788";
+        assert_eq!(netstat_listening_pid(listening, 3080), Some(7788));
+        // 端口不匹配 → None
+        assert_eq!(netstat_listening_pid(listening, 3081), None);
+        // 本地地址含端口但状态不是 LISTENING（CCM 自身建立的连接行）→ None
+        let established = "  TCP    127.0.0.1:3080         127.0.0.1:51887        ESTABLISHED     7788";
+        assert_eq!(netstat_listening_pid(established, 3080), None);
+        // Foreign Address 含 :port 的连接行（本地地址不是目标端口）→ None，避免误杀
+        let foreign = "  TCP    127.0.0.1:51887        127.0.0.1:3080         ESTABLISHED     9999";
+        assert_eq!(netstat_listening_pid(foreign, 3080), None);
+        // IPv6 本地地址（含 ]:port 形式）
+        let ipv6 = "  TCP    [::1]:3080             [::]:0                LISTENING       12345";
+        assert_eq!(netstat_listening_pid(ipv6, 3080), Some(12345));
+        // 协议名开头（旧代码用 parts.first() 匹配端口的场景）→ 现在正确返回 None
+        assert_eq!(netstat_listening_pid("  UDP    0.0.0.0:5353  *:*  123", 5353), None);
     }
 
     #[test]
