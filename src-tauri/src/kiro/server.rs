@@ -983,6 +983,24 @@ fn emit_tool_use_start_sse(index: usize, tool_id: &str, name: &str, mut send: im
     ));
 }
 
+/// 决定是否把原生 toolUseEvent 当作 tool_use 块转发，并返回其 block index。
+/// name="" 是残缺事件：返回 None（不转发），避免 Claude Code 收到空名 tool_use 内容块
+/// 而把它判为「空 assistant 回合」（报 ede_diagnostic、并让 stop_reason 误认为 tool_use）。
+fn emit_native_tool_start(
+    tool_id: &str,
+    name: &str,
+    block_counter: &mut usize,
+    send: impl FnMut(String),
+) -> Option<usize> {
+    if name.is_empty() {
+        return None;
+    }
+    let index = *block_counter;
+    *block_counter += 1;
+    emit_tool_use_start_sse(index, tool_id, name, send);
+    Some(index)
+}
+
 fn emit_tool_use_input_delta_sse(index: usize, partial_json: &str, mut send: impl FnMut(String)) {
     if partial_json.is_empty() {
         return;
@@ -1204,9 +1222,15 @@ fn pipe_kiro_body_to_anthropic_sse(
                             text_block_index = None;
                             text_started = false;
                         }
-                        let index = block_counter;
-                        block_counter += 1;
-                        emit_tool_use_start_sse(index, &tool_id, &name, &mut send);
+                        // 原生 toolUseEvent 必须带上非空 name 才能当作 tool_use 块转发；
+                        // name="" 是残缺事件，跳过并交由文本/收尾兜底（name 到得晚时，后续
+                        // 同名事件仍会走 else-if 分支补上），避免 Claude Code 收到空名
+                        // tool_use 内容块而判为「空 assistant 回合」（报 ede_diagnostic）。
+                        let Some(index) =
+                            emit_native_tool_start(&tool_id, &name, &mut block_counter, &mut send)
+                        else {
+                            continue;
+                        };
                         native_tool_blocks.insert(tool_id.clone(), (name.clone(), index, true));
                         saw_native_tool = true;
                         emitted_tool_use = true;
@@ -1964,6 +1988,31 @@ mod tests {
             classify_stream_content("{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{}}"),
             Some(true)
         );
+    }
+
+    #[test]
+    fn nameless_tool_use_event_is_not_emitted_as_block() {
+        // 空 name 的 toolUseEvent：残缺事件，不能当作 tool_use 块转发。
+        // 否则 Claude Code 会收到 name="" 的 tool_use 块而判为「空 assistant 回合」。
+        let mut out: Vec<String> = Vec::new();
+        let mut counter = 0usize;
+        let index = emit_native_tool_start("call_1", "", &mut counter, &mut |s| out.push(s));
+        assert_eq!(index, None);
+        assert_eq!(counter, 0);
+        assert!(out.is_empty(), "空名工具事件不应产出任何 SSE 内容块");
+    }
+
+    #[test]
+    fn named_tool_use_event_emits_named_block_and_bumps_counter() {
+        let mut out: Vec<String> = Vec::new();
+        let mut counter = 0usize;
+        let index = emit_native_tool_start("call_1", "Bash", &mut counter, &mut |s| out.push(s));
+        assert_eq!(index, Some(0));
+        assert_eq!(counter, 1);
+        let joined = out.join("");
+        assert!(joined.contains("content_block_start"));
+        assert!(joined.contains("\"name\":\"Bash\""));
+        assert!(!joined.contains("\"name\":\"\""));
     }
 
     #[test]

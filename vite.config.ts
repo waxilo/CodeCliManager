@@ -17,8 +17,12 @@ export default defineConfig({
         manualChunks(id) {
           const modulePath = id.replace(/\\/g, "/");
 
-          if (/\/node_modules\/(marked|highlight\.js|dompurify)\//.test(modulePath)) {
+          if (/\/node_modules\/(marked|dompurify)\//.test(modulePath)) {
             return "vendor-markdown";
+          }
+
+          if (modulePath.includes("/node_modules/highlight.js/")) {
+            return "vendor-highlight";
           }
 
           if (modulePath.includes("/node_modules/@tauri-apps/")) {

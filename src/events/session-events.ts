@@ -5,14 +5,13 @@ import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPay
 import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent, refreshStreamingUI, reconcileActiveToolsWithHistory, purgeTerminalTools, clearSessionTools } from '../features/chat/streaming';
 import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages, findConversationById, assistantTextCovers } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
-import { setAbortingUi, setSendButtonLoading, isSendButtonLoading } from '../features/chat/session-context';
+import { setAbortingUi, setSendButtonLoading } from '../features/chat/session-context';
 import { hideSendingState } from '../features/chat/session-context';
 import { updateConversationListSpinner, refreshActiveTabContent } from '../features/sidebar';
 import { updateContextIndicator } from '../features/chat/context-indicator';
 import { updateCostIndicator } from '../features/chat/cost-indicator';
 import { syncRunningSubagentsUI } from '../features/chat/subagent-progress';
 import { syncTodoPanelUI, extractLatestTodos } from '../features/chat/todo-panel';
-import { abortSession } from '../features/chat/send';
 import { getStreamingAssistantText } from '../features/chat/streaming';
 import { refreshConversationFromBackend } from '../features/conversations/load';
 import { refreshChatContent, afterChatMounted } from '../features/chat/refresh';
@@ -445,32 +444,5 @@ export async function setupEventListeners() {
     });
   });
 
-  // ESC 键取消正在运行的任务（参考 claudecodeui）
-  document.addEventListener('keydown', (e: KeyboardEvent) => {
-    if (e.key === 'Escape' && !e.repeat) {
-      // 全屏管理页 / Kiro 覆盖层打开时，ESC 交给各页面自己的 handler 负责关闭；
-      // 全局停止任务只在主聊天页生效，否则「进设置再 ESC 退出」会误中止后台会话。
-      if (
-        appState.isApiConfigViewActive ||
-        appState.isSettingsViewActive ||
-        appState.isMcpViewActive ||
-        appState.isKiroViewActive
-      ) {
-        return;
-      }
-      // 权限面板 / 问答选择卡自行处理 ESC，避免同时 abort
-      if (
-        document.querySelector('.interaction-panel') ||
-        document.querySelector('.ask-card.is-interactive')
-      ) {
-        return;
-      }
-      if (appState.isAbortingActiveSession) return;
-      if (isSendButtonLoading()) {
-        e.preventDefault();
-        void abortSession();
-      }
-    }
-  });
 }
 

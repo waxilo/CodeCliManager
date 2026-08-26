@@ -180,13 +180,13 @@
 
 .message.user .message-content .markdown-body pre,
 .message.user .message-content .code-block-wrapper {
-  background: rgba(0, 0, 0, 0.06) !important;
-  border-color: var(--color-bubble-user-border);
+  background: var(--color-code-bg) !important;
+  border-color: var(--color-code-border);
 }
 
 .message.user .message-content .code-block-wrapper pre code,
 .message.user .message-content .code-block-wrapper .hljs {
-  color: var(--color-bubble-user-code-text) !important;
+  color: var(--color-code-text) !important;
   background: transparent !important;
 }
 
@@ -412,8 +412,8 @@
 /* ---- 旧版 pre 兼容（非 highlight.js 生成） ---- */
 .markdown-body > pre,
 .message-content > pre {
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--color-bg-surface-hover);
+  background: var(--color-code-bg);
+  border: 1px solid var(--color-code-border);
   border-radius: var(--radius-lg);
   padding: 12px;
   overflow-x: auto;
@@ -421,6 +421,7 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 13px;
   line-height: 1.5;
+  color: var(--color-code-text);
 }
 
 .markdown-body > pre > code,
@@ -429,7 +430,7 @@
   background: transparent;
   padding: 0;
   border-radius: 0;
-  color: var(--color-text);
+  color: var(--color-code-text);
 }
 
 /* highlight.js 语法高亮强制覆盖：确保代码在暗色背景下始终可见 */

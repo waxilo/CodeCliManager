@@ -10,7 +10,12 @@ import type {
   ActiveToolState,
   TodoItem,
 } from '../../types';
-import { renderMarkdownCached as renderMarkdown, initCodeCopyButtons, scheduleHighlighting } from '../../markdown';
+import {
+  renderMarkdown,
+  renderMarkdownCached,
+  initCodeCopyButtons,
+  scheduleHighlighting,
+} from '../../markdown';
 import { getThinkingScroller } from './thinking-scroller';
 import { updateSendButtonState, setSendButtonLoading } from './session-context';
 import { updateOrAddConversation, findConversationById, assistantTextCovers } from '../conversations';
@@ -830,34 +835,23 @@ export function removeStreamingElements(sessionId?: string) {
 }
 
 function updateStreamingTextBody(mdBody: HTMLElement, block: StreamBlock): boolean {
-  if (block.finalized) {
-    if (
-      mdBody.dataset.renderMode !== 'markdown' ||
-      mdBody.dataset.renderedContent !== block.content
-    ) {
-      mdBody.classList.remove('streaming-plain-text');
-      mdBody.innerHTML = renderMarkdown(block.content);
-      mdBody.dataset.renderMode = 'markdown';
-      mdBody.dataset.renderedContent = block.content;
-      mdBody.dataset.renderedLength = String(block.content.length);
-      return true;
-    }
+  const renderedContent = mdBody.dataset.renderedContent || '';
+  const renderMode = block.finalized ? 'markdown' : 'streaming-markdown';
+  if (mdBody.dataset.renderMode === renderMode && renderedContent === block.content) {
     return false;
   }
 
-  let renderedLength = Number(mdBody.dataset.renderedLength || 0);
-  if (mdBody.dataset.renderMode !== 'plain' || renderedLength > block.content.length) {
-    mdBody.textContent = '';
-    mdBody.classList.add('streaming-plain-text');
-    mdBody.dataset.renderMode = 'plain';
-    mdBody.dataset.renderedContent = '';
-    renderedLength = 0;
-  }
-  if (renderedLength < block.content.length) {
-    mdBody.appendChild(document.createTextNode(block.content.slice(renderedLength)));
-    mdBody.dataset.renderedLength = String(block.content.length);
-  }
-  return false;
+  // 已完成消息可复用 Markdown LRU 缓存；流式前缀只渲染一次，不进入缓存，
+  // 避免长回复的每个增量版本挤占缓存。marked 能容错未闭合围栏/列表，
+  // 后续 delta 到达后的下一次 100ms 刷新会立即反映最新结构。
+  mdBody.classList.remove('streaming-plain-text');
+  mdBody.innerHTML = block.finalized
+    ? renderMarkdownCached(block.content)
+    : renderMarkdown(block.content);
+  mdBody.dataset.renderMode = renderMode;
+  mdBody.dataset.renderedContent = block.content;
+  mdBody.dataset.renderedLength = String(block.content.length);
+  return true;
 }
 
 /**

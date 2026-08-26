@@ -1,10 +1,6 @@
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
-import hljs from 'highlight.js';
 import { escapeHtml } from './utils/escape-html';
-
-// 使用 GitHub Dark 风格主题
-import 'highlight.js/styles/github-dark.css';
 
 // 配置 marked，集成 highlight.js 语法高亮
 marked.setOptions({
@@ -210,8 +206,12 @@ export function renderMarkdownCached(src: string): string {
 // 代码块以纯文本占位渲染（renderer.code / tryFormatJson 输出 data-hl-lang 标记），
 // DOM 插入后由本队列分片空闲补高亮，避免在渲染关键路径同步跑 hljs。
 // 已知语言 → hljs.highlight；未知语言小块 → hljs.highlightAuto；大块 → 跳过（留纯文本）。
+type HighlightJs = typeof import('highlight.js').default;
+
 const _pendingCodeBlocks = new Set<HTMLElement>();
 let _hlScheduled = false;
+let _highlightJs: HighlightJs | null = null;
+let _highlightJsPromise: Promise<HighlightJs | null> | null = null;
 const _hlResultCache = new Map<string, string>();
 const _HL_CACHE_MAX = 500;
 /** 未知语言大块阈值：超过则跳过 highlightAuto（其是 277ms/op 级开销） */
@@ -233,7 +233,32 @@ function scheduleIdle(cb: () => void): void {
   }
 }
 
-function highlightBlock(code: HTMLElement): void {
+function loadHighlightJs(): Promise<HighlightJs | null> {
+  if (_highlightJs) return Promise.resolve(_highlightJs);
+  if (_highlightJsPromise) return _highlightJsPromise;
+
+  _highlightJsPromise = Promise.all([
+    import('highlight.js'),
+    import('highlight.js/styles/github-dark.css'),
+  ])
+    .then(([module]) => {
+      _highlightJs = module.default;
+      return _highlightJs;
+    })
+    .catch((error) => {
+      console.error('[markdown] 加载代码高亮模块失败:', error);
+      return null;
+    });
+  return _highlightJsPromise;
+}
+
+function markHighlightDone(code: HTMLElement): void {
+  code.classList.add('hljs');
+  delete code.dataset.hlLang;
+  code.dataset.hlDone = '1';
+}
+
+function highlightBlock(code: HTMLElement, hljs: HighlightJs): void {
   const lang = code.dataset.hlLang || '';
   const raw = code.textContent ?? '';
   const cacheKey = `${lang}\u0000${raw}`;
@@ -265,13 +290,12 @@ function highlightBlock(code: HTMLElement): void {
   if (highlighted) {
     code.innerHTML = highlighted;
   }
-  code.classList.add('hljs');
-  delete code.dataset.hlLang;
-  code.dataset.hlDone = '1';
+  markHighlightDone(code);
 }
 
-function processHighlightQueue(): void {
+async function processHighlightQueue(): Promise<void> {
   _hlScheduled = false;
+  const hljs = await loadHighlightJs();
   const start = performance.now();
   for (const code of [..._pendingCodeBlocks]) {
     _pendingCodeBlocks.delete(code);
@@ -280,10 +304,15 @@ function processHighlightQueue(): void {
       _pendingCodeBlocks.add(code); // 放回队列，下一片再处理
       break;
     }
-    highlightBlock(code);
+    if (hljs) {
+      highlightBlock(code, hljs);
+    } else {
+      // 高亮模块加载失败时保留安全的转义纯文本，避免任务无限重试。
+      markHighlightDone(code);
+    }
   }
   if (_pendingCodeBlocks.size > 0) {
-    scheduleIdle(processHighlightQueue);
+    scheduleIdle(() => void processHighlightQueue());
   }
 }
 
@@ -299,15 +328,21 @@ export function scheduleHighlighting(container: HTMLElement): void {
   });
   if (!_hlScheduled) {
     _hlScheduled = true;
-    scheduleIdle(processHighlightQueue);
+    scheduleIdle(() => void processHighlightQueue());
   }
 }
 
-/** 仅测试用：同步清空待高亮队列（jsdom 无 requestIdleCallback） */
-export function flushHighlighting(): void {
+/** 仅测试用：同步清空待高亮队列（仍会等待动态模块加载） */
+export async function flushHighlighting(): Promise<void> {
+  const hljs = await loadHighlightJs();
   for (const code of [..._pendingCodeBlocks]) {
     _pendingCodeBlocks.delete(code);
-    if (code.isConnected) highlightBlock(code);
+    if (!code.isConnected) continue;
+    if (hljs) {
+      highlightBlock(code, hljs);
+    } else {
+      markHighlightDone(code);
+    }
   }
   _hlScheduled = false;
 }

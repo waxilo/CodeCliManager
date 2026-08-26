@@ -210,28 +210,48 @@ export async function init(): Promise<void> {
   initSidebarCollapsed();
   // 首屏就按窗口宽度决定侧边栏是否折叠，避免渲染后再跳一次
   syncSidebarResponsiveState();
-  await syncPermissionModeToBackend();
-  await loadData();
-  await loadChatModelOptions();
-  // 首屏前探测本地是否有 Kiro，决定是否显示「Kiro 代理」入口
-  try {
-    appState.kiroStatus = await api.kiroStatus();
-  } catch {
-    appState.kiroStatus = null;
-  }
+  // 先完成 Shell 绘制和交互绑定；本地历史扫描、模型请求和 Kiro 探测放到首帧之后，
+  // 避免它们阻塞窗口首次可见与输入区可操作。
   render();
-  if (!appState.activeConversationId) {
-    void refreshModelInfo();
-  }
-  startMainBalanceBarAutoRefresh();
   setupEventListeners();
   setupClaudeUpdateProgressListener();
   setupExternalLinkInterceptor();
   bindSidebarResponsive();
-  // 先让首屏完成绘制，再启动两个独立的后台版本检查。
+
   setTimeout(() => {
-    void checkClaudeCodeUpdate(false);
-    void initAppUpdate();
+    void initializeBackgroundData();
   }, 0);
+}
+
+async function initializeBackgroundData(): Promise<void> {
+  try {
+    await syncPermissionModeToBackend();
+  } catch (error) {
+    console.error('[startup] 同步权限模式失败:', error);
+  }
+
+  await loadData();
+  // 会话摘要加载完成后，刷新 Shell 以回填侧栏与活动会话；render 内部使用消息壳与
+  // 缓存挂载，避免将完整聊天记录序列化进本次重绘。
+  render();
+
+  await Promise.all([
+    loadChatModelOptions(),
+    (async () => {
+      try {
+        appState.kiroStatus = await api.kiroStatus();
+      } catch {
+        appState.kiroStatus = null;
+      }
+      syncTitlebarActions();
+    })(),
+  ]);
+
+  if (!appState.activeConversationId) {
+    void refreshModelInfo();
+  }
+  startMainBalanceBarAutoRefresh();
   void setupKiroAutostartListener();
+  void checkClaudeCodeUpdate(false);
+  void initAppUpdate();
 }

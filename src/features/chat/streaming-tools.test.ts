@@ -181,7 +181,7 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     refreshChatContent();
     const list = document.querySelector<HTMLElement>('#message-list')!;
     const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
-    expect(block.querySelector('.markdown-body')!.textContent).toBe('hello');
+    expect(block.querySelector('.markdown-body')!.textContent.trim()).toBe('hello');
 
     // 内容追加 → 同一节点，文本就地追加
     const state = appState.streamingBySession.get(SID)!;
@@ -189,7 +189,7 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     refreshChatContent();
     const blockAfter = list.querySelector('[data-stream-id="streaming-block-0"]')!;
     expect(blockAfter).toBe(block);
-    expect(blockAfter.querySelector('.markdown-body')!.textContent).toBe('hello world');
+    expect(blockAfter.querySelector('.markdown-body')!.textContent.trim()).toBe('hello world');
   });
 
   it('思考块结束：finalize 就地更新，节点复用不重建，内容与时长保留', () => {
@@ -216,18 +216,21 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     expect(blockAfter.querySelector('.thinking-block')!.hasAttribute('open')).toBe(false);
   });
 
-  it('text 块 finalize：节点复用不重建，markdown 就地渲染', () => {
+  it('text 块流式阶段实时渲染 Markdown，finalize 时节点复用', () => {
     appState.streamingBySession.set(SID, {
-      blocks: [{ type: 'text', content: '**重点**内容', finalized: false }],
+      blocks: [{ type: 'text', content: '**重点**内容\n\n- 第一项', finalized: false }],
       thinkingDone: true,
       currentBlockIdx: 0,
     });
     refreshChatContent();
     const list = document.querySelector<HTMLElement>('#message-list')!;
     const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    const body = block.querySelector<HTMLElement>('.markdown-body')!;
     expect(block.classList.contains('streaming')).toBe(true);
+    expect(body.innerHTML).toContain('<strong>重点</strong>');
+    expect(body.querySelector('li')?.textContent).toBe('第一项');
 
-    // finalize：renderKey 恒定 → 节点复用；markdown 就地渲染 + streaming 类移除
+    // finalize：renderKey 恒定 → 节点复用；仅移除 streaming 类。
     const state = appState.streamingBySession.get(SID)!;
     state.blocks[0].finalized = true;
     refreshChatContent();
@@ -235,6 +238,30 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     expect(blockAfter).toBe(block);
     expect(blockAfter.classList.contains('streaming')).toBe(false);
     expect(blockAfter.querySelector('.markdown-body')!.innerHTML).toContain('<strong>重点</strong>');
+  });
+
+  it('未闭合代码围栏也安全实时渲染，闭合后保持同一代码块', () => {
+    appState.streamingBySession.set(SID, {
+      blocks: [{ type: 'text', content: '```ts\nconst answer = 42;', finalized: false }],
+      thinkingDone: true,
+      currentBlockIdx: 0,
+    });
+    refreshChatContent();
+    const list = document.querySelector<HTMLElement>('#message-list')!;
+    const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    const body = block.querySelector<HTMLElement>('.markdown-body')!;
+    const initialCode = body.querySelector<HTMLElement>('.code-block-wrapper pre > code');
+    expect(initialCode?.textContent).toContain('const answer = 42;');
+    expect(block.querySelector('.code-copy-btn')).not.toBeNull();
+
+    const state = appState.streamingBySession.get(SID)!;
+    state.blocks[0].content += '\n```';
+    refreshChatContent();
+    const blockAfter = list.querySelector('[data-stream-id="streaming-block-0"]')!;
+    expect(blockAfter).toBe(block);
+    const code = blockAfter.querySelector<HTMLElement>('.code-block-wrapper pre > code');
+    expect(code?.textContent).toContain('const answer = 42;');
+    expect(blockAfter.querySelector('.code-copy-btn')).not.toBeNull();
   });
 
   it('syncStreamingBlocksInPlace 幂等：text 块重复同步不重复追加', () => {
@@ -248,7 +275,7 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     syncStreamingBlocksInPlace(SID);
     syncStreamingBlocksInPlace(SID);
     const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
-    expect(block.querySelector('.markdown-body')!.textContent).toBe('data');
+    expect(block.querySelector('.markdown-body')!.textContent.trim()).toBe('data');
   });
 
   it('子代理「启动成功」元数据结果不置完成：保持运行中，真结果到达才完成', () => {

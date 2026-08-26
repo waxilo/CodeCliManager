@@ -70,16 +70,16 @@
   --color-send-icon: #e6edf3;
 
   /* ── 代码块面板 ─────────────────────────────────────────── */
-  --color-code-bg: #0d1117;
+  --color-code-bg: #010409;
   --color-code-header-bg: #161b22;
   --color-code-border: #30363d;
   --color-code-btn-bg: #21262d;
   --color-code-btn-hover-bg: #30363d;
-  --color-code-text: #e6edf3;
-  --color-code-muted: #8b949e;
-  --color-code-json-bg: #0d1117;
-  --color-code-json-border: #21262d;
-  --color-code-json-badge: #4493f8;
+  --color-code-text: #f0f6fc;
+  --color-code-muted: #c9d1d9;
+  --color-code-json-bg: #010409;
+  --color-code-json-border: #30363d;
+  --color-code-json-badge: #79c0ff;
 
   /* ── 状态徽章 / 运行指示 ─────────────────────────────────── */
   --color-status-running: #58a6ff;

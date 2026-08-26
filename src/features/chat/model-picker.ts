@@ -353,7 +353,10 @@ export async function applyChatModelSelection(model: string): Promise<void> {
   }
 }
 
+let modelLoadGeneration = 0;
+
 export async function loadChatModelOptions(): Promise<void> {
+  const generation = ++modelLoadGeneration;
   const previousSelected =
     appState.currentDefaultModel.trim() ||
     (document.querySelector('#chat-model-picker-trigger') as HTMLButtonElement | null)?.dataset.value?.trim() ||
@@ -361,7 +364,7 @@ export async function loadChatModelOptions(): Promise<void> {
 
   try {
     const config = await api.getClaudeApiConfig();
-    appState.currentDefaultModel = (config.defaultModel || '').trim();
+    const defaultModel = (config.defaultModel || '').trim();
     const customModels = config.customModels || [];
     let apiModels: string[] = [];
 
@@ -380,31 +383,39 @@ export async function loadChatModelOptions(): Promise<void> {
       }
     }
 
-    const merged = [...apiModels];
+    const models = [...apiModels];
     for (const modelId of customModels) {
-      if (!merged.includes(modelId)) {
-        merged.push(modelId);
+      if (!models.includes(modelId)) {
+        models.push(modelId);
       }
     }
     // 官方订阅模式（未配置第三方 API 且无模型列表）下，提供官方模型选项
-    if (merged.length === 0 && !config.baseUrl.trim()) {
-      appState.chatModelOptions = ['default', 'opus', 'sonnet', 'haiku'];
-    } else {
-      appState.chatModelOptions = merged;
-    }
+    const nextOptions =
+      models.length === 0 && !config.baseUrl.trim()
+        ? ['default', 'opus', 'sonnet', 'haiku']
+        : models;
+    let nextDefaultModel = defaultModel;
 
     // 同步后配置未带回默认模型时，若原先选中的模型仍在新列表中则继续沿用
-    if (!appState.currentDefaultModel && previousSelected && appState.chatModelOptions.includes(previousSelected)) {
-      appState.currentDefaultModel = previousSelected;
+    if (!nextDefaultModel && previousSelected && nextOptions.includes(previousSelected)) {
+      nextDefaultModel = previousSelected;
     }
 
     // 若配置文件里的当前默认模型不在候选列表，附加到首位以便展示与切换
-    if (appState.currentDefaultModel && !appState.chatModelOptions.includes(appState.currentDefaultModel)) {
-      appState.chatModelOptions = [appState.currentDefaultModel, ...appState.chatModelOptions];
+    if (nextDefaultModel && !nextOptions.includes(nextDefaultModel)) {
+      nextOptions.unshift(nextDefaultModel);
     }
+
+    // API 配置切换或启动时的旧请求不能覆盖更新请求的结果。
+    if (generation !== modelLoadGeneration) return;
+    appState.chatModelOptions = nextOptions;
+    appState.currentDefaultModel = nextDefaultModel;
   } catch {
+    if (generation !== modelLoadGeneration) return;
     appState.chatModelOptions = [];
     appState.currentDefaultModel = previousSelected || '';
   }
-  updateChatModelPicker();
+  if (generation === modelLoadGeneration) {
+    updateChatModelPicker();
+  }
 }
