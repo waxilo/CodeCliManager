@@ -544,6 +544,23 @@ pub(crate) fn effective_message_uuids(lines: &[serde_json::Value]) -> Option<Has
     Some(active)
 }
 
+/// 一行可能包含多个顶层 JSON 值。Claude/Kiro 会话里偶发「拼接记录」：
+/// 两个合法 JSON 对象被写在同一物理行且未换行（如 `}{` 相邻）。严格逐行
+/// `serde_json::from_str` 会把这种行判为 `Extra data` 而丢弃整行，导致其中
+/// 消息（常是后续 parentUuid 引用的桥接节点）从索引消失，父链断裂、更早历史
+/// 被误判为废弃分支过滤。这里逐个提取顶层值，尽量保留已成功解析的部分。
+fn parse_jsonl_line_values(line: &str) -> Vec<serde_json::Value> {
+    let mut values = Vec::new();
+    for item in serde_json::Deserializer::from_str(line).into_iter::<serde_json::Value>() {
+        match item {
+            Ok(value) => values.push(value),
+            // 遇到真正损坏的尾巴：保留前面已解析的对象，避免静默丢数据
+            Err(_) => break,
+        }
+    }
+    values
+}
+
 pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
@@ -552,7 +569,7 @@ pub(crate) fn parse_claude_session(path: &PathBuf) -> Option<Conversation> {
     let lines: Vec<serde_json::Value> = content
         .lines()
         .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| serde_json::from_str(line).ok())
+        .flat_map(parse_jsonl_line_values)
         .collect();
     let active_uuids = effective_message_uuids(&lines);
 
@@ -1626,6 +1643,40 @@ mod tests {
         assert_eq!(content, vec!["first question", "first answer", "continued answer"]);
         assert_eq!(conversation.messages[0].id, "msg_root_0");
         assert_eq!(conversation.messages[2].id, "msg_a2_0");
+        fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn concatenated_jsonl_line_keeps_chain_and_pre_history() {
+        // Claude 偶发把两个 JSON 对象写进同一物理行且未换行（`}{` 相邻）。严格逐行
+        // 解析会判 Extra data 并丢弃整行；若该行含后续 parentUuid 引用的桥接消息，
+        // 父链会在原地断裂、更早历史被误判为废弃分支过滤。容错解析须保留桥接节点，
+        // 使父链一路回溯到首条用户消息。
+        let contents = concat!(
+            r#"{"sessionId":"concat","uuid":"root","parentUuid":null,"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"role":"user","content":"first question"}}"#,
+            "\n",
+            r#"{"sessionId":"concat","uuid":"a1","parentUuid":"root","type":"assistant","timestamp":"2026-01-01T00:00:01Z","message":{"role":"assistant","content":"first answer"}}"#,
+            "\n",
+            // 同一物理行拼接两个对象（无换行）：桥接 assistant + last-prompt
+            r#"{"sessionId":"concat","uuid":"bridge","parentUuid":"a1","type":"assistant","timestamp":"2026-01-01T00:00:02Z","message":{"role":"assistant","content":"bridge answer"}}"#,
+            r#"{"sessionId":"concat","type":"last-prompt","lastPrompt":"x","leafUuid":"bridge"}"#,
+            "\n",
+            r#"{"sessionId":"concat","uuid":"q2","parentUuid":"bridge","type":"user","timestamp":"2026-01-01T00:00:03Z","message":{"role":"user","content":"second question"}}"#,
+        );
+        let path = temp_jsonl("concat.jsonl", contents);
+        let conversation = parse_claude_session(&path).unwrap();
+        let content: Vec<&str> = conversation
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect();
+        assert_eq!(
+            content,
+            vec!["first question", "first answer", "bridge answer", "second question"]
+        );
+        assert_eq!(conversation.messages[0].id, "msg_root_0");
+        assert_eq!(conversation.messages[2].id, "msg_bridge_0");
+        assert_eq!(conversation.messages[3].id, "msg_q2_0");
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 
