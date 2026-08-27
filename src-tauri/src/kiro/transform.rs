@@ -114,34 +114,82 @@ fn extract_json_object_candidates(text: &str) -> Vec<String> {
     candidates
 }
 
-/// 流式文本在尚未形成完整 JSON 时的工具调用判定。
-///
-/// Kiro 偶尔会把 SDK 的 `{id,input,name,type:"tool_use"}` 直接写进文本流，
-/// 且 `type` 常在很长的 input 后面。不能简单比较左右花括号数量：input 字符串
-/// 本身可能带 `{}`、`[]`、转义引号。该检测器逐字符维护 JSON 字符串/转义/嵌套状态，
-/// 只在顶层对象实际闭合后才尝试归一为 tool_use。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TextToolUseClassification {
-    ToolUse,
-    PendingToolUse,
-    Plain,
-}
-
+/// 文本工具候选的最大缓冲。超过上限后若已呈现工具包络，则安全截断并触发恢复，
+/// 而不是继续占用内存或把协议残片泄漏到用户正文。
 const MAX_PENDING_TEXT_TOOL_JSON_BYTES: usize = 512 * 1024;
 
 #[derive(Default)]
-pub struct TextToolUseDetector {
-    text: String,
+pub struct MixedTextToolFinish {
+    pub visible_text: String,
+    pub tool_blocks: Vec<Value>,
+    pub incomplete_tool: bool,
+}
+
+/// 持续扫描「普通正文 + 行首 SDK tool_use JSON」混合流。
+///
+/// 普通正文即时返回；行首 JSON 暂缓到顶层对象闭合。普通 JSON 随即原样释放，
+/// 合法 tool_use 则进入协议尾缓冲，连同后续噪声/多个工具对象在 finish 时统一恢复。
+pub struct MixedTextToolGuard {
+    enabled: bool,
+    at_line_start: bool,
+    candidate: String,
+    protocol_tail: String,
     object_depth: usize,
     in_string: bool,
     escaping: bool,
-    completed_objects: usize,
+    overflowed_tool: bool,
 }
 
-impl TextToolUseDetector {
-    pub fn push(&mut self, chunk: &str) -> TextToolUseClassification {
-        self.text.push_str(chunk);
+impl MixedTextToolGuard {
+    pub fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            at_line_start: true,
+            candidate: String::new(),
+            protocol_tail: String::new(),
+            object_depth: 0,
+            in_string: false,
+            escaping: false,
+            overflowed_tool: false,
+        }
+    }
+
+    pub fn push(&mut self, chunk: &str) -> String {
+        if !self.enabled || chunk.is_empty() {
+            return chunk.to_string();
+        }
+        if !self.protocol_tail.is_empty() || self.overflowed_tool {
+            self.protocol_tail.push_str(chunk);
+            return String::new();
+        }
+
+        let mut visible = String::new();
         for ch in chunk.chars() {
+            // 首个合法工具对象后，当前 chunk 的剩余字符（hash/乱码/后续工具）
+            // 全部属于协议尾，不能重新落回用户可见正文。
+            if !self.protocol_tail.is_empty() || self.overflowed_tool {
+                self.protocol_tail.push(ch);
+                continue;
+            }
+            if self.object_depth == 0 {
+                if self.at_line_start && ch == '{' {
+                    self.candidate.push(ch);
+                    self.object_depth = 1;
+                    self.at_line_start = false;
+                    continue;
+                }
+                visible.push(ch);
+                self.at_line_start = if ch == '\n' || ch == '\r' {
+                    true
+                } else if self.at_line_start {
+                    ch.is_whitespace()
+                } else {
+                    false
+                };
+                continue;
+            }
+
+            self.candidate.push(ch);
             if self.in_string {
                 if self.escaping {
                     self.escaping = false;
@@ -150,52 +198,71 @@ impl TextToolUseDetector {
                 } else if ch == '"' {
                     self.in_string = false;
                 }
-                continue;
-            }
-            match ch {
-                '"' => self.in_string = true,
-                '{' => self.object_depth += 1,
-                '}' if self.object_depth > 0 => {
-                    self.object_depth -= 1;
-                    if self.object_depth == 0 {
-                        self.completed_objects += 1;
-                    }
+            } else {
+                match ch {
+                    '"' => self.in_string = true,
+                    '{' => self.object_depth += 1,
+                    '}' => self.object_depth = self.object_depth.saturating_sub(1),
+                    _ => {}
                 }
-                _ => {}
+            }
+
+            if self.object_depth == 0 {
+                if parse_tool_use_blocks_from_text(&self.candidate).is_some() {
+                    self.protocol_tail = std::mem::take(&mut self.candidate);
+                } else {
+                    visible.push_str(&std::mem::take(&mut self.candidate));
+                    self.at_line_start = false;
+                }
+                self.in_string = false;
+                self.escaping = false;
+            } else if self.candidate.len() > MAX_PENDING_TEXT_TOOL_JSON_BYTES {
+                if looks_like_tool_envelope(&self.candidate) {
+                    self.overflowed_tool = true;
+                    self.protocol_tail = std::mem::take(&mut self.candidate);
+                } else {
+                    visible.push_str(&std::mem::take(&mut self.candidate));
+                    self.object_depth = 0;
+                    self.in_string = false;
+                    self.escaping = false;
+                    self.at_line_start = false;
+                }
             }
         }
-        self.classification()
+        visible
     }
 
-    pub fn classification(&self) -> TextToolUseClassification {
-        let trimmed = self.text.trim_start();
-        if !trimmed.starts_with('{') {
-            return TextToolUseClassification::Plain;
-        }
-        if self.completed_objects > 0 {
-            return if parse_tool_use_blocks_from_text(trimmed).is_some() {
-                TextToolUseClassification::ToolUse
-            } else {
-                TextToolUseClassification::Plain
+    pub fn finish(&mut self) -> MixedTextToolFinish {
+        if !self.protocol_tail.is_empty() {
+            let tail = std::mem::take(&mut self.protocol_tail);
+            return MixedTextToolFinish {
+                tool_blocks: parse_tool_use_blocks_from_text(&tail).unwrap_or_default(),
+                incomplete_tool: self.overflowed_tool,
+                ..MixedTextToolFinish::default()
             };
         }
 
-        // 仅暂缓看起来像 SDK/Anthropic 工具包络的未闭合 JSON。短 JSON 前缀仍沿用
-        // 原有缓冲行为，普通 JSON 不会被长时间阻塞；超上限也交由收尾恢复而不泄漏文本。
-        let looks_like_tool_envelope = trimmed.contains("\"tool_use\"")
-            || (trimmed.contains("\"id\"")
-                && (trimmed.contains("\"input\"") || trimmed.contains("\"name\"")));
-        if looks_like_tool_envelope || trimmed.len() < 160 || trimmed.len() > MAX_PENDING_TEXT_TOOL_JSON_BYTES {
-            TextToolUseClassification::PendingToolUse
-        } else {
-            TextToolUseClassification::Plain
+        if !self.candidate.is_empty() {
+            let candidate = std::mem::take(&mut self.candidate);
+            if looks_like_tool_envelope(&candidate) {
+                return MixedTextToolFinish {
+                    incomplete_tool: true,
+                    ..MixedTextToolFinish::default()
+                };
+            }
+            return MixedTextToolFinish {
+                visible_text: candidate,
+                ..MixedTextToolFinish::default()
+            };
         }
+        MixedTextToolFinish::default()
     }
 }
 
-pub fn classify_text_tool_use(text: &str) -> TextToolUseClassification {
-    let mut detector = TextToolUseDetector::default();
-    detector.push(text)
+fn looks_like_tool_envelope(text: &str) -> bool {
+    text.contains("\"tool_use\"")
+        || (text.contains("\"id\"")
+            && (text.contains("\"input\"") || text.contains("\"name\"")))
 }
 
 fn generated_tool_use_id() -> String {
@@ -1134,54 +1201,66 @@ mod tests {
     }
 
     #[test]
-    fn holds_long_sdk_tool_prefix_until_type_arrives() {
-        // type 在很长的 new_string 后才到达时，旧逻辑会超过 160 字节即当正文转发。
-        let prefix = format!(
-            "{{\"id\":\"call_edit_1\",\"input\":{{\"new_string\":\"{}",
-            "x".repeat(512)
-        );
-        assert_eq!(
-            classify_text_tool_use(&prefix),
-            TextToolUseClassification::PendingToolUse
-        );
-        let complete = format!(
-            "{}\"}},\"name\":\"Edit\",\"type\":\"tool_use\"}}",
-            prefix
-        );
-        assert_eq!(
-            classify_text_tool_use(&complete),
-            TextToolUseClassification::ToolUse
-        );
+    fn mixed_guard_keeps_prose_and_recovers_following_tools() {
+        // 真实泄漏形态：先输出说明文字，随后才出现 Bash JSON、hash 噪声和 Read JSON。
+        let mut guard = MixedTextToolGuard::new(true);
+        let visible = guard.push(concat!(
+            "已定位到模型选择器。接下来读取布局。\n",
+            "{\"id\":\"call_bash\",\"input\":{\"command\":\"grep model-picker\"},",
+            "\"name\":\"Bash\",\"type\":\"tool_use\"}",
+            " e3b0c44298fc1c149afbf4c8996fb924\n",
+            "{\"id\":\"call_read\",\"input\":{\"file_path\":\"model-picker.ts\"},",
+            "\"name\":\"Read\",\"type\":\"tool_use\"}通 ... error"
+        ));
+        assert_eq!(visible, "已定位到模型选择器。接下来读取布局。\n");
+
+        let finish = guard.finish();
+        assert!(finish.visible_text.is_empty());
+        assert!(!finish.incomplete_tool);
+        assert_eq!(finish.tool_blocks.len(), 2);
+        assert_eq!(finish.tool_blocks[0]["name"], "Bash");
+        assert_eq!(finish.tool_blocks[1]["name"], "Read");
+        assert_eq!(finish.tool_blocks[1]["input"]["file_path"], "model-picker.ts");
     }
 
     #[test]
-    fn incremental_detector_ignores_braces_and_escaped_quotes_inside_input_strings() {
-        let mut detector = TextToolUseDetector::default();
-        assert_eq!(
-            detector.push("{\"id\":\"call_edit\",\"input\":{\"new_string\":\"const x = { a: [1, 2] }; \\\"quoted\\\""),
-            TextToolUseClassification::PendingToolUse
-        );
-        assert_eq!(
-            detector.push("\"},\"name\":\"Edit\",\"type\":\"tool_use\"}"),
-            TextToolUseClassification::ToolUse
-        );
+    fn mixed_guard_recovers_tool_split_across_chunks_after_prose() {
+        let mut guard = MixedTextToolGuard::new(true);
+        assert_eq!(guard.push("正文先显示。\n{\"id\":\"call_edit\",\"input\":{\"new_string\":\"a { b }"), "正文先显示。\n");
+        assert_eq!(guard.push("\"},\"name\":\"Edit\",\"type\":\"tool_use\"}"), "");
+        let finish = guard.finish();
+        assert_eq!(finish.tool_blocks.len(), 1);
+        assert_eq!(finish.tool_blocks[0]["name"], "Edit");
     }
 
     #[test]
-    fn incremental_detector_keeps_plain_json_plain_after_complete_object() {
-        let mut detector = TextToolUseDetector::default();
-        assert_eq!(
-            detector.push("{\"id\":\"example\",\"input\":{\"text\":\"{not a tool}\"}}"),
-            TextToolUseClassification::Plain
-        );
+    fn mixed_guard_releases_plain_json_after_prose() {
+        let mut guard = MixedTextToolGuard::new(true);
+        let input = "说明：\n{\"example\":{\"value\":1}}\n完成。";
+        let mut visible = guard.push(input);
+        visible.push_str(&guard.finish().visible_text);
+        assert_eq!(visible, input);
     }
 
     #[test]
-    fn keeps_complete_non_tool_json_as_plain_text() {
+    fn mixed_guard_marks_truncated_tool_without_leaking_candidate() {
+        let mut guard = MixedTextToolGuard::new(true);
         assert_eq!(
-            classify_text_tool_use("{\"id\":\"example\",\"input\":{\"value\":1}}"),
-            TextToolUseClassification::Plain
+            guard.push("正文\n{\"id\":\"call_edit\",\"input\":{\"new_string\":\"unfinished"),
+            "正文\n"
         );
+        let finish = guard.finish();
+        assert!(finish.visible_text.is_empty());
+        assert!(finish.tool_blocks.is_empty());
+        assert!(finish.incomplete_tool);
+    }
+
+    #[test]
+    fn mixed_guard_is_disabled_without_declared_tools() {
+        let raw = "正文\n{\"id\":\"call_fake\",\"input\":{},\"name\":\"Bash\",\"type\":\"tool_use\"}";
+        let mut guard = MixedTextToolGuard::new(false);
+        assert_eq!(guard.push(raw), raw);
+        assert!(guard.finish().tool_blocks.is_empty());
     }
 
     #[test]

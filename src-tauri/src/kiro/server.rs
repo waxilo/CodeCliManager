@@ -34,8 +34,7 @@ use crate::kiro::models::{
 };
 use crate::kiro::transform::{
     anthropic_message_response_with_tools, build_kiro_request, build_kiro_request_with_schema,
-    classify_text_tool_use, parse_tool_use_blocks_from_text, TextToolUseClassification,
-    TextToolUseDetector,
+    MixedTextToolGuard,
 };
 use crate::protocol_guard::{normalize_stop_reason, sanitize_protocol_text, ProtocolTextGuard};
 
@@ -773,23 +772,6 @@ impl Read for ChannelReader {
     }
 }
 
-/// 尚不确定是普通文本还是 tool_use JSON/XML 时，先缓冲再决定是否真流式吐出。
-#[cfg(test)]
-fn classify_stream_content(text: &str) -> Option<bool> {
-    let trimmed = text.trim_start();
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.starts_with("<invoke ") || trimmed.starts_with("<invoke>") {
-        return Some(true);
-    }
-    match classify_text_tool_use(trimmed) {
-        TextToolUseClassification::ToolUse => Some(true),
-        TextToolUseClassification::PendingToolUse => None,
-        TextToolUseClassification::Plain => Some(false),
-    }
-}
-
 fn map_kiro_stop_reason(stop_reason: &str) -> String {
     match stop_reason {
         "TOOL_USE" => "tool_use".to_string(),
@@ -823,35 +805,10 @@ fn emit_text_block_sse(started: &mut bool, index: usize, text: &str, out: &mut S
     ));
 }
 
-/// Kiro 上游常在生成结束后才返回 HTTP 响应；把突发文本按字符节奏拆开发送，改善前端“持续输出”观感。
-fn pace_text_chunks(text: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut buf = String::new();
-    for ch in text.chars() {
-        buf.push(ch);
-        let boundary = buf.chars().count() >= 12
-            || ch == '\n'
-            || "。！？；，、".contains(ch);
-        if boundary {
-            chunks.push(std::mem::take(&mut buf));
-        }
-    }
-    if !buf.is_empty() {
-        chunks.push(buf);
-    }
-    if chunks.is_empty() && !text.is_empty() {
-        chunks.push(text.to_string());
-    }
-    chunks
-}
-
-fn pace_delay_ms(chunk: &str) -> u64 {
-    let n = chunk.chars().count() as u64;
-    (8 + n.saturating_mul(10)).clamp(12, 48)
-}
-
-fn emit_tool_blocks_sse(blocks: &[Value], out: &mut String) {
-    for (index, block) in blocks.iter().enumerate() {
+fn emit_tool_blocks_sse(blocks: &[Value], block_counter: &mut usize, out: &mut String) {
+    for block in blocks {
+        let index = *block_counter;
+        *block_counter += 1;
         let name = block.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let tool_id = block.get("id").and_then(|v| v.as_str()).unwrap_or("");
         let input = block.get("input").cloned().unwrap_or_else(|| json!({}));
@@ -884,23 +841,6 @@ fn send_text_immediate(started: &mut bool, index: usize, text: &str, mut send: i
     emit_text_block_sse(started, index, text, &mut out);
     if !out.is_empty() {
         send(out);
-    }
-}
-
-/// 仅当上游整包突发时，拆开节奏改善观感；实时增量路径不要用这个。
-fn send_text_paced(started: &mut bool, index: usize, text: &str, mut send: impl FnMut(String)) {
-    // 短增量直接转发
-    if text.chars().count() <= 24 {
-        send_text_immediate(started, index, text, send);
-        return;
-    }
-    for piece in pace_text_chunks(text) {
-        let mut out = String::new();
-        emit_text_block_sse(started, index, &piece, &mut out);
-        if !out.is_empty() {
-            send(out);
-            thread::sleep(Duration::from_millis(pace_delay_ms(&piece)));
-        }
     }
 }
 
@@ -1048,15 +988,13 @@ fn emit_fallback_text_block_sse(
 /// 仅当内容像「文本里嵌 tool JSON」时短暂暂缓；真正的 tool 调用走增量 toolUseEvent。
 fn pipe_kiro_body_to_anthropic_sse(
     response: ReqwestResponse,
-    _has_tools: bool,
+    has_tools: bool,
     mut send: impl FnMut(String),
 ) -> bool {
     let mut parser = IncrementalEventStream::new();
     let mut reader = response;
     let mut read_buf = [0u8; 8192];
     let mut full_text = String::new();
-    let mut pending_flush = String::new();
-    let mut tool_mode: Option<bool> = None;
     let mut text_started = false;
     let mut text_block_index: Option<usize> = None;
     let mut thinking_started = false;
@@ -1069,7 +1007,8 @@ fn pipe_kiro_body_to_anthropic_sse(
     let mut native_tool_blocks: HashMap<String, (String, usize, bool)> = HashMap::new();
     let mut stop_reason = "end_turn".to_string();
     let mut protocol_guard = ProtocolTextGuard::default();
-    let mut text_tool_detector = TextToolUseDetector::default();
+    // 请求声明了 tools 时才恢复文本中泄漏的 SDK tool_use，避免普通对话里的 JSON 示例被执行。
+    let mut mixed_tool_guard = MixedTextToolGuard::new(has_tools);
 
     loop {
         let n = match reader.read(&mut read_buf) {
@@ -1152,42 +1091,21 @@ fn pipe_kiro_body_to_anthropic_sse(
                     }
                     full_text.push_str(&chunk);
 
-                    // 已判定为文本 JSON 工具：继续缓冲到结束再一次性转换
-                    if tool_mode == Some(true) {
-                        pending_flush.push_str(&chunk);
+                    // 整个响应期间持续扫描，而不是在首段普通正文后永久锁定文本模式。
+                    // 普通文字立即可见；任意后续行首的 SDK tool_use JSON 暂缓并在收尾恢复。
+                    let visible = mixed_tool_guard.push(&chunk);
+                    if visible.is_empty() {
                         continue;
                     }
 
-                    // 文本开始前先收尾 thinking 块
                     close_thinking_block_sse(
                         &mut thinking_started,
                         thinking_block_index,
                         &thinking_signature,
                         &mut send,
                     );
-
-                    // 已锁定文本模式：立刻转发，不等待聚合
-                    if tool_mode == Some(false) {
-                        let index =
-                            ensure_text_block_index(&mut text_block_index, &mut block_counter);
-                        send_text_immediate(&mut text_started, index, &chunk, &mut send);
-                        continue;
-                    }
-
-                    // 未判定：普通文本马上推；疑似 SDK 工具 JSON 用跨 chunk 的状态机
-                    // 缓冲到完整对象闭合，避免长 input 末尾的 type 被漏掉。
-                    pending_flush.push_str(&chunk);
-                    tool_mode = match text_tool_detector.push(&chunk) {
-                        TextToolUseClassification::ToolUse => Some(true),
-                        TextToolUseClassification::PendingToolUse => None,
-                        TextToolUseClassification::Plain => Some(false),
-                    };
-                    if tool_mode == Some(false) {
-                        let flush = std::mem::take(&mut pending_flush);
-                        let index =
-                            ensure_text_block_index(&mut text_block_index, &mut block_counter);
-                        send_text_paced(&mut text_started, index, &flush, &mut send);
-                    }
+                    let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
+                    send_text_immediate(&mut text_started, index, &visible, &mut send);
                 }
                 "toolUseEvent" => {
                     let tool_id = event
@@ -1208,8 +1126,9 @@ fn pipe_kiro_body_to_anthropic_sse(
                         .to_string();
 
                     if !native_tool_blocks.contains_key(&tool_id) {
-                        // 原生 tool 到达：丢掉未发出的疑似 JSON 缓冲；先收尾 thinking/text
-                        pending_flush.clear();
+                        // 原生 toolUseEvent 始终优先：丢掉文本路径中尚未确认的工具候选，
+                        // 再收尾 thinking/text，避免同一调用被文本恢复与原生事件重复发射。
+                        mixed_tool_guard = MixedTextToolGuard::new(has_tools);
                         close_thinking_block_sse(
                             &mut thinking_started,
                             thinking_block_index,
@@ -1237,7 +1156,6 @@ fn pipe_kiro_body_to_anthropic_sse(
                         native_tool_blocks.insert(tool_id.clone(), (name.clone(), index, true));
                         saw_native_tool = true;
                         emitted_tool_use = true;
-                        tool_mode = Some(true);
                         stop_reason = "tool_use".to_string();
                     } else if let Some(entry) = native_tool_blocks.get_mut(&tool_id) {
                         if entry.0.is_empty() && !name.is_empty() {
@@ -1280,63 +1198,45 @@ fn pipe_kiro_body_to_anthropic_sse(
     let trailing_text = protocol_guard.finish();
     if !trailing_text.is_empty() {
         full_text.push_str(&trailing_text);
-        pending_flush.push_str(&trailing_text);
-    }
-
-    // 工具 JSON 候选在对象闭合前断流时，不得把原始协议内容泄漏为正文。
-    // 使用 max_tokens 收尾，Claude 流解析器会触发一次内部 recovery prompt 自动续跑。
-    let incomplete_text_tool = !saw_native_tool
-        && !text_started
-        && matches!(classify_text_tool_use(&full_text), TextToolUseClassification::PendingToolUse);
-    if incomplete_text_tool {
-        pending_flush.clear();
-        stop_reason = "max_tokens".to_string();
-    }
-
-    if !saw_native_tool {
-        // 仅在尚未向客户端吐出文本时，才把缓冲内容改判为文本 JSON tool
-        let parsed_tool_blocks = if !text_started && !incomplete_text_tool {
-            parse_tool_use_blocks_from_text(&full_text)
-        } else {
-            None
-        };
-
-        if !text_started && parsed_tool_blocks.is_some() {
-            close_thinking_block_sse(
-                &mut thinking_started,
-                thinking_block_index,
-                &thinking_signature,
-                &mut send,
-            );
-            if let Some(blocks) = parsed_tool_blocks {
-                let mut out = String::new();
-                emit_tool_blocks_sse(&blocks, &mut out);
-                if !out.is_empty() {
-                    send(out);
-                    emitted_tool_use = true;
-                    stop_reason = "tool_use".to_string();
-                }
+        if !saw_native_tool {
+            let visible = mixed_tool_guard.push(&trailing_text);
+            if !visible.is_empty() {
+                close_thinking_block_sse(
+                    &mut thinking_started,
+                    thinking_block_index,
+                    &thinking_signature,
+                    &mut send,
+                );
+                let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
+                send_text_immediate(&mut text_started, index, &visible, &mut send);
             }
-        } else if !incomplete_text_tool && !pending_flush.is_empty() {
-            close_thinking_block_sse(
-                &mut thinking_started,
-                thinking_block_index,
-                &thinking_signature,
-                &mut send,
-            );
-            let flush = std::mem::take(&mut pending_flush);
-            let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
-            send_text_paced(&mut text_started, index, &flush, &mut send);
-        } else if !incomplete_text_tool && !text_started && !full_text.is_empty() {
-            close_thinking_block_sse(
-                &mut thinking_started,
-                thinking_block_index,
-                &thinking_signature,
-                &mut send,
-            );
-            let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
-            send_text_paced(&mut text_started, index, &full_text, &mut send);
         }
+    }
+
+    let mixed_finish = if saw_native_tool {
+        Default::default()
+    } else {
+        mixed_tool_guard.finish()
+    };
+    if !mixed_finish.visible_text.is_empty() {
+        close_thinking_block_sse(
+            &mut thinking_started,
+            thinking_block_index,
+            &thinking_signature,
+            &mut send,
+        );
+        let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
+        send_text_immediate(
+            &mut text_started,
+            index,
+            &mixed_finish.visible_text,
+            &mut send,
+        );
+    }
+    if mixed_finish.incomplete_tool {
+        // 候选在 JSON 顶层对象闭合前断流：不泄漏协议残片，以 max_tokens 触发
+        // Claude 流解析器已有的一次 INTERNAL_RECOVERY_PROMPT 自动续跑。
+        stop_reason = "max_tokens".to_string();
     }
 
     close_thinking_block_sse(
@@ -1346,12 +1246,23 @@ fn pipe_kiro_body_to_anthropic_sse(
         &mut send,
     );
 
+    // 前置正文可以先占用一个 text block；恢复出的工具块必须在关闭正文后，
+    // 从当前 block_counter 继续编号，不能重新使用 index 0。
     if text_started {
         let index = text_block_index.unwrap_or(0);
         send(sse_event(
             "content_block_stop",
             &json!({ "type": "content_block_stop", "index": index }),
         ));
+    }
+    if !mixed_finish.tool_blocks.is_empty() {
+        let mut out = String::new();
+        emit_tool_blocks_sse(&mixed_finish.tool_blocks, &mut block_counter, &mut out);
+        if !out.is_empty() {
+            send(out);
+            emitted_tool_use = true;
+            stop_reason = "tool_use".to_string();
+        }
     }
 
     // 上游可能省略 toolUseEvent.stop；收尾时补 content_block_stop
@@ -1933,24 +1844,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_plain_text_immediately() {
-        assert_eq!(classify_stream_content("你好，世界"), Some(false));
-    }
-
-    #[test]
-    fn classifies_tool_invoke_as_tool() {
-        assert_eq!(
-            classify_stream_content("<invoke name=\"Bash\"><parameter name=\"command\">ls</parameter></invoke>"),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn waits_on_short_json_prefix() {
-        assert_eq!(classify_stream_content("{\"type\":"), None);
-    }
-
-    #[test]
     fn dedup_replays_completed_buffer_within_ttl() {
         let store = DedupStore::new();
         let entry = store.register(42);
@@ -1996,28 +1889,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_tool_use_json() {
-        assert_eq!(
-            classify_stream_content("{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"Bash\",\"input\":{}}"),
-            Some(true)
-        );
-    }
-
-    #[test]
-    fn keeps_long_sdk_tool_prefix_buffered_until_complete() {
-        let prefix = format!(
-            "{{\"id\":\"call_edit\",\"input\":{{\"new_string\":\"{}",
-            "x".repeat(512)
-        );
-        assert_eq!(classify_stream_content(&prefix), None);
-        let complete = format!(
-            "{}\"}},\"name\":\"Edit\",\"type\":\"tool_use\"}}",
-            prefix
-        );
-        assert_eq!(classify_stream_content(&complete), Some(true));
-    }
-
-    #[test]
     fn nameless_tool_use_event_is_not_emitted_as_block() {
         // 空 name 的 toolUseEvent：残缺事件，不能当作 tool_use 块转发。
         // 否则 Claude Code 会收到 name="" 的 tool_use 块而判为「空 assistant 回合」。
@@ -2040,6 +1911,25 @@ mod tests {
         assert!(joined.contains("content_block_start"));
         assert!(joined.contains("\"name\":\"Bash\""));
         assert!(!joined.contains("\"name\":\"\""));
+    }
+
+    #[test]
+    fn recovered_tools_continue_indexes_after_visible_text_block() {
+        let blocks = vec![
+            json!({"type":"tool_use","id":"call_bash","name":"Bash","input":{"command":"ls"}}),
+            json!({"type":"tool_use","id":"call_read","name":"Read","input":{"file_path":"a.ts"}}),
+        ];
+        // index 0 已由前置正常正文占用。
+        let mut counter = 1usize;
+        let mut out = String::new();
+        emit_tool_blocks_sse(&blocks, &mut counter, &mut out);
+
+        assert_eq!(counter, 3);
+        assert!(out.contains("\"index\":1"));
+        assert!(out.contains("\"index\":2"));
+        assert!(!out.contains("\"index\":0"));
+        assert!(out.contains("\"name\":\"Bash\""));
+        assert!(out.contains("\"name\":\"Read\""));
     }
 
     #[test]
@@ -2123,13 +2013,6 @@ mod tests {
             dedup.lookup(key),
             DedupLookup::Miss
         ));
-    }
-
-    #[test]
-    fn pace_text_chunks_splits_on_punctuation() {
-        let chunks = pace_text_chunks("你好，世界。下一句");
-        assert!(chunks.len() >= 2);
-        assert_eq!(chunks.concat(), "你好，世界。下一句");
     }
 
     /// 临时手工验证（非 CI）：使用真实 Kiro SSO 凭据走一遍完整代理链路。

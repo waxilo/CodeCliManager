@@ -460,8 +460,9 @@
 
 .chat-model-picker {
   position: relative;
-  flex-shrink: 0;
-  width: 110px;
+  flex: 0 1 220px;
+  width: clamp(150px, 24vw, 220px);
+  min-width: 120px;
 }
 
 .chat-model-picker-trigger {
@@ -522,10 +523,12 @@
 .chat-model-picker-panel {
   position: absolute;
   left: 0;
-  right: 0;
+  right: auto;
   bottom: calc(100% + 6px);
   z-index: 200;
   box-sizing: border-box;
+  width: min(320px, calc(100vw - 32px));
+  min-width: 100%;
   max-height: 320px;
   display: flex;
   flex-direction: column;
