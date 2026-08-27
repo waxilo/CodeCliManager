@@ -9,12 +9,20 @@ import { updateSendButtonState, isSendButtonLoading } from './session-context';
 import { sendMessage } from './send';
 import { handleRetryClick, handleUndoClick } from './retry';
 import { refreshRunStatusStrip } from './run-status';
-import { initAnswerScroller, captureScrollState, restoreScrollState, syncStreamingBlocksInPlace } from './streaming';
+import { syncStreamingBlocksInPlace } from './streaming';
+import { reconcileChatContent, stageAndReconcileChatContent } from './chat-reconciler';
 import { canSendMessage } from './session-context';
 import { getActiveSuggestionIndex, getFileSuggestionsContainer } from '../files/index';
 import { getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
-import { scheduleUiRefresh, type ScrollSnapshot } from '../../ui';
+import { scheduleUiRefresh } from '../../ui';
 import { syncActiveProjectDir } from '../status-bar';
+import {
+  activeChatScrollSessionKey,
+  beginMainChatContentCommit,
+  detachMainChatScroll,
+  endMainChatContentCommit,
+  ensureMainChatScroll,
+} from './chat-scroll';
 import { previewFileByPath } from '../files/index';
 export function setupMessageListPostRender(container: HTMLElement): void {
   // 对话流内 AskUserQuestion 可点选卡片
@@ -39,11 +47,9 @@ export function setupMessageListPostRender(container: HTMLElement): void {
       if (!id) return;
       if ((details as HTMLDetailsElement).open) {
         appState.expandedThinkingBlocks.add(id);
-        // 展开思考块 = 用户在看思考内容：暂停父消息列表自动跟随，
-        // 避免下一 tick 置底把正在看的思考块拉走
-        if (appState.answerScroller) {
-          appState.answerScroller.pauseFollow();
-        }
+        // 展开思考块 = 用户明确阅读内容：父消息列表进入 DETACHED，
+        // 后续流式布局只能做锚点补偿，不能抢回到底部。
+        detachMainChatScroll();
       } else {
         appState.expandedThinkingBlocks.delete(id);
       }
@@ -63,8 +69,8 @@ export function setupMessageListPostRender(container: HTMLElement): void {
     });
   }
 
-  // 初始化 Answer 区域滚动控制器
-  initAnswerScroller();
+  // 主消息 viewport 只由 ChatScrollCoordinator 管理；静态按钮由模板提供。
+  ensureMainChatScroll();
 
   // 「加载更早」按钮：扩大当前会话的消息窗口（按会话独立累计）
   container.querySelectorAll<HTMLElement>('.load-earlier-btn').forEach((btn) => {
@@ -145,8 +151,7 @@ let lastCommittedChatRenderKey = '';
 export function resetChatRenderKey(): void {
   lastChatRenderKey = '';
   lastCommittedChatRenderKey = '';
-  // 会话实例/顶栏指纹一并重置：管理页 stash 恢复、测试隔离时避免误判「未切会话」
-  lastDiffSessionKey = '';
+  // 顶栏指纹一并重置：管理页 stash 恢复、测试隔离时避免误判旧 HTML。
   lastTopbarHtml = '';
 }
 
@@ -278,33 +283,17 @@ export function renderCacheKey(conversation: Conversation | undefined): string {
   return `${chatRenderKey(conversation)}|t:${thinkingSignature}`;
 }
 
-// ── 键控 DOM diff 挂载：消息节点级复用，根治整列表 innerHTML 重建 ──
-// applyChatDom 把「新渲染的 chunks」与「#message-list 现有节点」做键控 diff：
-//  - id + renderKey 未变 → 复用既有节点（保留事件监听、思考块展开态、工具卡折叠态、滚动位置），
-//    仅做 DOM 移动，零解析零重建；
-//  - 内容/状态变化 → 只重建该条消息（单条 template 解析）；
-//  - 已移除的消息 → 删除节点。
-// 这样管理页切回 / 消息落盘时，绝大多数节点原样保留，不再 MB 级 innerHTML 写入。
-// 仅当「首次渲染 / 切换会话（无现成节点）」或「新建节点过多」时回退到分块挂载，
-// 批间 requestAnimationFrame 让出主线程。
+// ── 稳定内容层 + cursor keyed reconcile ────────────────────────────────
+// 所有解析先发生在 detached fragment；live content layer 只在最终同步 commit 中变化。
+// 未变节点不 detach，中间插入只移动必要节点，sentinel 永远保持最后一个子节点。
 const CHUNK_ASYNC_CHUNK_THRESHOLD = 80;
-/** 消息 HTML 总长超过该字节数即分块（≈ MB 级解析临界） */
 const CHUNK_ASYNC_BYTES_THRESHOLD = 300_000;
 const CHUNK_BATCH = 20;
-/** 挂载代数：异步分块期间若发生新的重建（切会话/重渲染），旧挂载的剩余批立即放弃 */
 let mountGeneration = 0;
 
-/** 挂载完成后的回调队列（bootstrap / render / session-events 注册流式块恢复等） */
 let mountedCallbacks: Array<() => void> = [];
-/** true = 无进行中的挂载；此时 afterChatMounted 立即执行 */
 let mountedCallbacksIdle = true;
 
-/**
- * 在消息列表挂载完成后执行回调。
- * 同步挂载立即执行；异步分块挂载在最后一批插入完成后执行。
- * 用于替代调用方在 refreshChatContent() 返回后直接 refreshStreamingUI——
- * 长列表分块期间 DOM 未就绪，流式块恢复必须等挂载完成。
- */
 export function afterChatMounted(cb: () => void): void {
   if (mountedCallbacksIdle) {
     cb();
@@ -326,106 +315,26 @@ function fireMountedCallbacks(): void {
   }
 }
 
-/** 单条 chunk HTML → 元素（复用 stream 挂载的 template 解析） */
-function createElementFromHtml(html: string): HTMLElement | null {
-  const tmp = document.createElement('template');
-  tmp.innerHTML = html;
-  return tmp.content.firstElementChild as HTMLElement | null;
+function getStableChatLayer(messageList: HTMLElement): {
+  contentLayer: HTMLElement;
+  sentinel: HTMLElement;
+} | null {
+  const contentLayer = messageList.querySelector<HTMLElement>(':scope > [data-chat-content]');
+  const sentinel = contentLayer?.querySelector<HTMLElement>(':scope > [data-chat-bottom]') ?? null;
+  return contentLayer && sentinel ? { contentLayer, sentinel } : null;
 }
 
-interface ChatMountSlot {
-  kind: 'reuse' | 'create';
-  node: HTMLElement | null; // reuse 时有效
-  chunk?: RenderedMessageChunk; // create 时有效
-}
-
-/** 同步执行槽位：按序 append，复用节点零解析，新建节点单条解析 */
-function syncMountSlots(messageList: HTMLElement, slots: ChatMountSlot[]): void {
-  for (const slot of slots) {
-    if (slot.kind === 'reuse' && slot.node) {
-      messageList.appendChild(slot.node);
-    } else if (slot.kind === 'create' && slot.chunk) {
-      const el = createElementFromHtml(slot.chunk.html);
-      if (el) {
-        el.dataset.renderKey = slot.chunk.renderKey;
-        messageList.appendChild(el);
-      }
-    }
-  }
-}
-
-/**
- * 流式 tick 的典型形态是「已挂载节点前缀完全一致 + 末尾新增」。
- * 此时走纯追加挂载：不摘除/重插任何现有节点，scrollTop 由浏览器自然保持，
- * 无需 capture/restore 硬拉回（remove-all 再重插会 clamp 滚动位置，是跳动残余来源）。
- * 条件：无「加载更早」头部、列表里除消息节点外无残留、现有节点按序与新序列前缀匹配、
- * 且新增数量不多（同步 append 不阻塞主线程）。
- */
-export function canAppendOnly(messageList: HTMLElement, chunks: RenderedMessageChunk[], loadEarlier: string): boolean {
-  if (loadEarlier !== '') return false;
-  // 列表里除消息节点外只允许「回到底部」按钮（answerScroller 挂在 messageList 内），
-  // 其余残留（问卡等）会使追加位置不干净
-  for (const child of messageList.children) {
-    const cls = (child as HTMLElement).classList;
-    if (cls?.contains('message') || cls?.contains('scroll-to-bottom-btn')) continue;
-    return false;
-  }
-  const existing = messageList.querySelectorAll<HTMLElement>(
-    '.message[data-stream-id], .message[data-message-id]',
+function countChangedChunks(contentLayer: HTMLElement, chunks: readonly RenderedMessageChunk[]): number {
+  const existing = new Map<string, string>();
+  contentLayer.querySelectorAll<HTMLElement>(':scope > .message[data-stream-id], :scope > .message[data-message-id]')
+    .forEach((node) => {
+      const id = node.dataset.streamId || node.dataset.messageId;
+      if (id) existing.set(id, node.dataset.renderKey ?? '');
+    });
+  return chunks.reduce(
+    (count, chunk) => count + (existing.get(chunk.id) === chunk.renderKey ? 0 : 1),
+    0,
   );
-  if (existing.length > chunks.length) return false; // 有删除 → 不能纯追加
-  if (chunks.length - existing.length > CHUNK_BATCH) return false; // 新增太多 → 走分块
-  let i = 0;
-  for (const el of existing) {
-    const chunk = chunks[i];
-    if (!chunk) return false;
-    const id = el.dataset.streamId || el.dataset.messageId;
-    if (id !== chunk.id || el.dataset.renderKey !== chunk.renderKey) return false;
-    i += 1;
-  }
-  return true;
-}
-
-/** 异步分块挂载（仅新建节点）：批间让出主线程，完成后统一后处理 + 滚动恢复 */
-function asyncMountCreateSlots(
-  messageList: HTMLElement,
-  slots: ChatMountSlot[],
-  scrollSnap: ScrollSnapshot | null,
-  gen: number,
-): void {
-  let index = 0;
-  const mountNextBatch = () => {
-    // 已被新重建取代，或管理页摘走了 message-list（脱离文档）：放弃剩余批
-    if (gen !== mountGeneration) return;
-    if (!messageList.isConnected) {
-      fireMountedCallbacks();
-      return;
-    }
-    const frag = document.createDocumentFragment();
-    const end = Math.min(index + CHUNK_BATCH, slots.length);
-    for (; index < end; index++) {
-      const slot = slots[index];
-      if (slot.kind === 'reuse' && slot.node) {
-        frag.append(slot.node);
-      } else if (slot.kind === 'create' && slot.chunk) {
-        const el = createElementFromHtml(slot.chunk.html);
-        if (el) {
-          el.dataset.renderKey = slot.chunk.renderKey;
-          frag.append(el);
-        }
-      }
-    }
-    messageList.appendChild(frag);
-    if (index < slots.length) {
-      requestAnimationFrame(mountNextBatch);
-      return;
-    }
-    // 全部插入完成：后处理 + 滚动恢复 + 完成回调（流式块恢复等）
-    setupMessageListPostRender(messageList);
-    restoreScrollState(scrollSnap);
-    fireMountedCallbacks();
-  };
-  requestAnimationFrame(mountNextBatch);
 }
 
 /** 最近写入的 topbar HTML：流式 tick 中顶栏未变则跳过重写（避免重置下拉等交互状态） */
@@ -437,6 +346,7 @@ function applyChatDom(
   loadEarlier: string,
   chunks: RenderedMessageChunk[],
   empty: string | null,
+  afterReconcile?: () => void,
 ): void {
   const messageList = document.querySelector<HTMLDivElement>('#message-list');
   const topbarMain = document.querySelector<HTMLDivElement>('.main-topbar-main');
@@ -457,103 +367,105 @@ function applyChatDom(
     return;
   }
 
-  // 重建前记录滚动状态：输出结束时若用户在阅读上方消息，重建后不应强制跳回底部
-  const scrollSnap = captureScrollState();
+  const stableLayer = getStableChatLayer(messageList);
+  if (!stableLayer) {
+    console.error('[chat-mount] 缺少稳定 content layer 或 bottom sentinel');
+    fireMountedCallbacks();
+    return;
+  }
+
   const gen = ++mountGeneration;
-  // 注意：异步分块挂载进行中再触发新一轮重建会清空并丢弃旧队列回调——
-  // 当前所有注册方（流式块恢复等）每次重建都会重新注册，丢旧队列无实际影响；
-  // 未来若有「仅某次挂载后执行一次」的注册方需改为继承旧队列。
+  const commitSessionKey = activeChatScrollSessionKey();
   mountedCallbacks = [];
   mountedCallbacksIdle = false;
 
-  // 空状态：无消息时。保留「回到底部」按钮（answerScroller 常驻 messageList，
-  // 直接 innerHTML 覆盖会销毁它且 initAnswerScroller 的元素守卫不会再重建）。
-  if (chunks.length === 0) {
-    const bottomBtn = messageList.querySelector('.scroll-to-bottom-btn');
-    messageList.innerHTML = loadEarlier + (empty ?? '');
-    if (bottomBtn) messageList.appendChild(bottomBtn);
-    setupMessageListPostRender(messageList);
-    restoreScrollState(scrollSnap);
-    fireMountedCallbacks();
-    return;
-  }
+  const request = {
+    contentLayer: stableLayer.contentLayer,
+    sentinel: stableLayer.sentinel,
+    chunks,
+    loadEarlier,
+    empty,
+  };
+  const changedCount = countChangedChunks(stableLayer.contentLayer, chunks);
+  const totalBytes = loadEarlier.length + (empty?.length ?? 0) +
+    chunks.reduce((sum, chunk) => sum + chunk.html.length, 0);
 
-  // ── 键控 diff：索引现有消息节点（历史消息 data-message-id / 流式块与工具卡 data-stream-id） ──
-  const existingById = new Map<string, HTMLElement>();
-  messageList.querySelectorAll<HTMLElement>('.message[data-stream-id], .message[data-message-id]').forEach((el) => {
-    const id = el.dataset.streamId || el.dataset.messageId;
-    if (id && !existingById.has(id)) existingById.set(id, el);
-  });
-
-  // 规划槽位：复用（id+renderKey 相同）/ 新建
-  const slots: ChatMountSlot[] = [];
-  let createCount = 0;
-  let totalBytes = loadEarlier.length;
-  for (const chunk of chunks) {
-    totalBytes += chunk.html.length;
-    const existing = existingById.get(chunk.id);
-    if (existing && existing.dataset.renderKey === chunk.renderKey) {
-      slots.push({ kind: 'reuse', node: existing });
-    } else {
-      slots.push({ kind: 'create', node: null, chunk });
-      createCount += 1;
+  let scrollCommit: ReturnType<typeof beginMainChatContentCommit> = null;
+  const finishCommit = () => {
+    if (gen !== mountGeneration) {
+      endMainChatContentCommit(scrollCommit);
+      scrollCommit = null;
+      return;
     }
-  }
-
-  // ── 快速路径：纯追加挂载（现有节点前缀匹配时）——滚动位置自然保持 ──
-  // 必须在 remove-all 之前判断：慢路径会摘除全部节点（scrollTop 被 clamp）。
-  if (canAppendOnly(messageList, chunks, loadEarlier)) {
-    const existingCount = messageList.querySelectorAll<HTMLElement>(
-      '.message[data-stream-id], .message[data-message-id]',
-    ).length;
-    for (let i = existingCount; i < chunks.length; i++) {
-      const el = createElementFromHtml(chunks[i].html);
-      if (el) {
-        el.dataset.renderKey = chunks[i].renderKey;
-        messageList.appendChild(el);
-      }
+    if (!messageList.isConnected) {
+      // 管理页可能在 detached staging 期间摘下主视图。强制返回后重提最终计划，
+      // 否则已提交的 render key 会让刷新早退，留下未填充的流式占位块。
+      lastChatRenderKey = '';
+      mountedCallbacks = [];
+      mountedCallbacksIdle = true;
+      endMainChatContentCommit(scrollCommit);
+      scrollCommit = null;
+      return;
     }
-    // 追加后恢复滚动意图：用户在底部（autoScroll）→ 跟随新内容置底；
-    // 用户已上滑 → restorePosition 设为旧值（追加未触碰 scrollTop，等同无操作）。
-    // 与慢路径一致，保证「底部跟随」在流式输出时不间断。
-    restoreScrollState(scrollSnap);
-    setupMessageListPostRender(messageList);
-    fireMountedCallbacks();
+    try {
+      afterReconcile?.();
+      setupMessageListPostRender(messageList);
+      fireMountedCallbacks();
+    } finally {
+      endMainChatContentCommit(scrollCommit);
+      scrollCommit = null;
+    }
+  };
+
+  if (
+    changedCount > CHUNK_ASYNC_CHUNK_THRESHOLD ||
+    totalBytes > CHUNK_ASYNC_BYTES_THRESHOLD
+  ) {
+    void stageAndReconcileChatContent(request, {
+      batchSize: CHUNK_BATCH,
+      shouldCommit: () =>
+        gen === mountGeneration &&
+        messageList.isConnected &&
+        stableLayer.contentLayer.isConnected &&
+        activeChatScrollSessionKey() === commitSessionKey,
+      beforeCommit: () => {
+        scrollCommit = beginMainChatContentCommit();
+      },
+    })
+      .then((result) => {
+        if (result.status === 'committed') {
+          finishCommit();
+          return;
+        }
+        if (gen !== mountGeneration) return;
+        lastChatRenderKey = '';
+        mountedCallbacks = [];
+        mountedCallbacksIdle = true;
+      })
+      .catch((error) => {
+        endMainChatContentCommit(scrollCommit);
+        scrollCommit = null;
+        if (gen !== mountGeneration) return;
+        console.error('[chat-mount] 离屏 staging 失败:', error);
+        lastChatRenderKey = '';
+        mountedCallbacks = [];
+        mountedCallbacksIdle = true;
+      });
     return;
   }
 
-  // 旧节点不再需要：先摘除（复用节点在挂载时被重新 append，顺序由 slots 决定）
-  existingById.forEach((el) => {
-    if (el.parentElement === messageList) el.remove();
-  });
-  // 移除旧的「加载更早」按钮与空状态（头部/空态由本次渲染重写）
-  messageList.querySelector('.load-earlier-btn')?.remove();
-  messageList.querySelector('.conversation-empty-state')?.remove();
-  // 流式块 / 实时工具卡已纳入统一 diff（data-stream-id 索引）：不在新序列中的自然被摘除，
-  // 不再单独清理，避免「清掉 → 重建」的闪烁。
-  // 其余非消息节点（问卡残留等）一并清掉，保证列表结构纯净；
-  // 「回到底部」按钮（answerScroller 常驻 messageList）保留。
-  Array.from(messageList.children).forEach((child) => {
-    const cls = (child as HTMLElement).classList;
-    if (cls?.contains('message') || cls?.contains('scroll-to-bottom-btn')) return;
-    child.remove();
-  });
-
-  if (loadEarlier) {
-    messageList.insertAdjacentHTML('afterbegin', loadEarlier);
+  scrollCommit = beginMainChatContentCommit();
+  try {
+    reconcileChatContent(request);
+    finishCommit();
+  } catch (error) {
+    endMainChatContentCommit(scrollCommit);
+    scrollCommit = null;
+    lastChatRenderKey = '';
+    mountedCallbacks = [];
+    mountedCallbacksIdle = true;
+    throw error;
   }
-
-  // 新建节点少 → 同步 diff 挂载（复用节点零解析，仅新建单条解析）
-  if (createCount === 0 || (createCount <= CHUNK_ASYNC_CHUNK_THRESHOLD && totalBytes <= CHUNK_ASYNC_BYTES_THRESHOLD)) {
-    syncMountSlots(messageList, slots);
-    setupMessageListPostRender(messageList);
-    restoreScrollState(scrollSnap);
-    fireMountedCallbacks();
-    return;
-  }
-
-  // 新建节点多（首次渲染长会话 / 大规模变化）→ 分块挂载让出主线程
-  asyncMountCreateSlots(messageList, slots, scrollSnap, gen);
 }
 
 /**
@@ -616,8 +528,24 @@ function interleaveStreamAndToolChunks(
   return [...chunks, ...head, ...out, ...tail];
 }
 
-/** 最近一次 diff 挂载的会话实例 key：切会话时旧会话的滚动位置/跟随状态不应带到新会话 */
-let lastDiffSessionKey = '';
+function combineWithCurrentStreaming(
+  historyChunks: RenderedMessageChunk[],
+): { chunks: RenderedMessageChunk[]; sid: string; hasStreaming: boolean } {
+  const sid = appState.activeConversationId || 'pending';
+  const streamState = appState.streamingBySession.get(sid);
+  const tools = appState.activeToolsBySession.get(sid);
+  const toolStates = tools ? [...tools.values()] : [];
+  const noMergeAfterRaw = getToolAnchorBlockIndexes(toolStates);
+  const streamChunks = streamState
+    ? renderStreamingBlocksChunks(streamState.blocks, noMergeAfterRaw)
+    : [];
+  const toolChunks = toolStates.length > 0 ? renderLiveToolChunks(toolStates) : [];
+  return {
+    chunks: interleaveStreamAndToolChunks(historyChunks, streamChunks, toolChunks),
+    sid,
+    hasStreaming: Boolean(streamState || toolStates.length > 0),
+  };
+}
 
 /**
  * 重建聊天区内容。返回是否真正重建了 DOM（false = 指纹未变被跳过），
@@ -630,18 +558,6 @@ export function refreshChatContent(): boolean {
 
   // 切会话后先重置消息窗口，再算指纹，避免「上一会话的扩展窗口」导致多一次冗余重建
   ensureMessageWindowForActiveConversation();
-
-  // 切会话：先置底（capture 到 autoScroll=true → restore 走 scrollToBottom），
-  // 避免把旧会话的阅读位置/关闭跟随状态恢复到新会话列表
-  const sessionKey = conversationInstanceKey(
-    appState.activeConversationId || 'pending',
-    appState.activeConversationSourcePath,
-  );
-  const sessionChanged = sessionKey !== lastDiffSessionKey;
-  lastDiffSessionKey = sessionKey;
-  if (sessionChanged) {
-    appState.answerScroller?.scrollToBottom();
-  }
 
   // 内容指纹未变（连点同一会话 / 重复消息事件）：跳过昂贵的内联 HTML 重建，
   // 流式块也得以保留；只轻量同步发送按钮状态。
@@ -675,7 +591,14 @@ export function refreshChatContent(): boolean {
   if (cached && cached.renderKey === renderKey) {
     renderCache.delete(cacheKey);
     renderCache.set(cacheKey, cached);
-    applyChatDom(cached.topbarHtml, cached.loadEarlier, cached.chunks, cached.empty);
+    const combined = combineWithCurrentStreaming(cached.chunks);
+    applyChatDom(
+      cached.topbarHtml,
+      cached.loadEarlier,
+      combined.chunks,
+      cached.empty,
+      combined.hasStreaming ? () => syncStreamingBlocksInPlace(combined.sid) : undefined,
+    );
     return true;
   }
 
@@ -705,28 +628,16 @@ export function refreshChatContent(): boolean {
     }
   }
 
-  const sid = appState.activeConversationId || 'pending';
-  const streamState = appState.streamingBySession.get(sid);
-  const tools = appState.activeToolsBySession.get(sid);
-  const toolStates = tools ? [...tools.values()] : [];
-  const noMergeAfterRaw = getToolAnchorBlockIndexes(toolStates);
-  const streamChunks = streamState
-    ? renderStreamingBlocksChunks(streamState.blocks, noMergeAfterRaw)
-    : [];
-  const toolChunks = toolStates.length > 0 ? renderLiveToolChunks(toolStates) : [];
+  const combined = combineWithCurrentStreaming(chunks);
 
-  // 流式块 + 实时工具卡统一为一个序列：工具卡插到「工具开始时的流式块」之后，
-  // 与历史消息同一 diff 挂载（思考-工具-思考按真实顺序穿插，参考 DSH/Codex）。
-  const allChunks = interleaveStreamAndToolChunks(chunks, streamChunks, toolChunks);
-  applyChatDom(topbarHtml, loadEarlier, allChunks, empty);
-
-  // diff 挂载完成后补一次流式块内容同步：
-  // 新建/重建的 text 占位块在此填充内容、thinking scroller 挂载。
-  // 同步挂载 → afterChatMounted 立即执行；分块异步挂载 → 最后一批完成后执行。
-  // 幂等（text 按 dataset 增量追加），覆盖「diff 之后无后续流式事件」的终态重建。
-  if (streamState || (tools && tools.size > 0)) {
-    afterChatMounted(() => syncStreamingBlocksInPlace(sid));
-  }
+  // 历史、流式段与实时工具卡先组合成唯一最终序列；流式内容填充也在同一滚动事务内完成。
+  applyChatDom(
+    topbarHtml,
+    loadEarlier,
+    combined.chunks,
+    empty,
+    combined.hasStreaming ? () => syncStreamingBlocksInPlace(combined.sid) : undefined,
+  );
 
   // 底栏工作目录：切会话 / 新会话 / 发送（pending）都会走到这里，幂等同步
   syncActiveProjectDir();

@@ -30,7 +30,6 @@ import {
 import { renderChatAreaHtml } from '../../features/chat/render-chat';
 import { renderBalanceStatusBarHtml, bindSessionIdCopyEvents, bindQueuedPromptEvents } from '../../features/chat/input-composer';
 import { setSendButtonLoading, isActiveConversationRunning, updateSendButtonState } from '../../features/chat/session-context';
-import { refreshStreamingUI } from '../../features/chat/streaming';
 import { syncRunningSubagentsUI } from '../../features/chat/subagent-progress';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { bindPermissionModeBarEvents } from '../../features/settings/mount';
@@ -52,7 +51,7 @@ import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { loadData } from '../../features/conversations';
 import { newChat } from '../../features/chat/send';
 import { handleSendButtonClick } from '../../features/chat/retry';
-import { handleKeydown, refreshChatContent, resetChatRenderKey, afterChatMounted } from '../../features/chat/refresh';
+import { handleKeydown, refreshChatContent, resetChatRenderKey } from '../../features/chat/refresh';
 import { bindChatModelPickerEvents } from '../../features/chat/model-picker';
 import {
   handlePaste,
@@ -149,14 +148,8 @@ function performRender() {
     resetChatRenderKey();
     refreshChatContent();
     setSendButtonLoading(isActiveConversationRunning());
-    // 全量重绘不包含进行中的流式块（buildDisplayMessages 只取已提交消息）。
-    // 从设置/API 配置等页面返回时，立即按 appState 恢复流式 DOM，
-    // 避免模型在思考/子代理静默期聊天区看起来「空白卡死」。
-    // 长列表分块挂载期间 DOM 未就绪：流式块恢复挂到 afterChatMounted。
-    const sid = appState.activeConversationId;
-    if (sid && appState.streamingBySession.has(sid)) {
-      afterChatMounted(() => refreshStreamingUI(sid));
-    }
+    // 流式段与实时工具已经包含在 refreshChatContent 的唯一最终序列中，
+    // 不再挂载后重复调用 refreshStreamingUI 造成第二轮布局与滚动。
     // 同步左侧「子代理」tab 内容 / 角标 / 自动切换（全量 HTML 已嵌入时也要补）
     syncRunningSubagentsUI();
   }

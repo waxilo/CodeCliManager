@@ -244,16 +244,26 @@ export function renderConversationMessageChunks(messages: Message[]): {
   };
 }
 
-export function renderChatContent(): string {
-  const conversation = getActiveConversation();
-
-  const messages = buildDisplayMessages(conversation);
-
+export function renderMessageListShellHtml(messagesHtml = ''): string {
   return `
-    <div class="message-list" id="message-list">
-      ${renderConversationMessagesInnerHtml(messages)}
+    <div class="message-list-shell">
+      <div class="message-list" id="message-list" tabindex="0">
+        <div class="message-content-layer" data-chat-content>
+          ${messagesHtml}
+          <div class="chat-bottom-sentinel" data-chat-bottom aria-hidden="true"></div>
+        </div>
+      </div>
+      <button type="button" class="scroll-to-bottom-btn" title="滚动到底部" aria-label="滚动到底部">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+      </button>
     </div>
   `;
+}
+
+export function renderChatContent(): string {
+  const conversation = getActiveConversation();
+  const messages = buildDisplayMessages(conversation);
+  return renderMessageListShellHtml(renderConversationMessagesInnerHtml(messages));
 }
 
 // ── 统一渲染管线：流式块 / 实时工具卡 → chunk（与历史消息同构，供同一 diff 挂载） ──
@@ -304,6 +314,7 @@ export function mergeStreamBlocks(
       last!.rawEnd = rawCursor;
     } else {
       merged.push({
+        segmentId: block.segmentId ?? `streaming-block-${rawCursor}`,
         type: block.type,
         content: block.content,
         finalized: block.finalized,
@@ -328,8 +339,8 @@ export function renderStreamingBlocksChunks(
   noMergeAfterRaw: ReadonlySet<number> = new Set<number>(),
 ): RenderedMessageChunk[] {
   const merged = mergeStreamBlocks(blocks, noMergeAfterRaw);
-  return merged.map((block, i) => {
-    const id = `streaming-block-${i}`;
+  return merged.map((block) => {
+    const id = block.segmentId ?? `streaming-block-${block.rawStart}`;
     // 思考块展开状态按块独立记录（expandedThinkingBlocks 键 = streaming-block-N），
     // 修复旧实现「多个思考块共享 sessionId 展开态」的问题
     const thinkingExpanded = appState.expandedThinkingBlocks.has(id);
@@ -477,7 +488,7 @@ export function renderChatAreaHtml(opts: { shellOnly?: boolean } = {}): string {
     </div>
     ` : ''}
     ${hasActive
-      ? `<div class="message-list" id="message-list">${messagesHtml}</div>`
+      ? renderMessageListShellHtml(messagesHtml)
       : renderEmptyState()}
     ${renderInputComposerHtml()}
   `;

@@ -14,7 +14,7 @@ import { syncRunningSubagentsUI } from '../features/chat/subagent-progress';
 import { syncTodoPanelUI, extractLatestTodos } from '../features/chat/todo-panel';
 import { getStreamingAssistantText } from '../features/chat/streaming';
 import { refreshConversationFromBackend } from '../features/conversations/load';
-import { refreshChatContent, afterChatMounted } from '../features/chat/refresh';
+import { refreshChatContent } from '../features/chat/refresh';
 import { normalizeMessageForCompare } from '../features/files/index';
 import type { PermissionRequestPayload } from '../types';
 import { showCopyToastMsg, scheduleUiRefresh } from '../ui';
@@ -135,22 +135,9 @@ export async function setupEventListeners() {
       syncRunningSubagentsUI();
       updateCostIndicator();
       hideSendingState();
-      // 输出结束后重建消息列表：走渲染缓存 + 指纹跳过，不再整页 innerHTML 重建。
-      // refreshChatContent 的 applyChatDom 内部已做滚动快照/恢复，
-      // 若用户此前已上滑阅读上方消息，重建后保持原位。
-      // 长列表分块挂载期间 DOM 未就绪：流式块恢复挂到 afterChatMounted。
+      // 输出结束只提交一次最终 render plan；cursor reconcile、流式落盘和滚动恢复同事务完成。
       refreshChatContent();
-      const sid = appState.activeConversationId;
-      if (sid && appState.streamingBySession.has(sid)) {
-        afterChatMounted(() => refreshStreamingUI(sid));
-      }
       updateConversationListSpinner();
-      setTimeout(() => {
-        // 仅在用户仍位于底部时置底，避免打断阅读上方内容
-        if (appState.answerScroller?.autoScroll) {
-          appState.answerScroller.scrollToBottom();
-        }
-      }, 100);
     } else {
       // 用户在看别的会话或新聊天页，只更新侧边栏
       updateConversationListSpinner();

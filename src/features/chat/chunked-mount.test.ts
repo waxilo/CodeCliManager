@@ -3,18 +3,23 @@ import { appState } from '../../state';
 import { afterChatMounted, refreshChatContent, resetChatRenderKey, getLastChatRenderKey } from './refresh';
 
 /**
- * 键控 DOM diff 挂载（H1 彻底方案）行为测试：
- * - 消息渲染输出带 data-message-id；applyChatDom 按 (id, renderKey) 复用既有节点，
- *   内容/状态未变的消息节点保持同一性（保留事件监听、展开态、滚动位置），
- *   只新建变化消息、删除已移除消息。
- * - 首次渲染长会话（无现成节点）或新建节点过多时，回退到分块挂载让出主线程。
+ * Cursor keyed reconcile 行为测试：
+ * - 消息渲染输出带稳定 key/revision；未变节点保持同一性，只有变化节点替换。
+ * - 大量解析在 detached staging 中分批完成，live content layer 仅在最后原子提交。
  */
 
 function setupChatDomShell(): HTMLElement {
   document.body.innerHTML = `
     <div class="main-content">
       <div class="main-topbar"><div class="main-topbar-main"></div></div>
-      <div id="message-list"></div>
+      <div class="message-list-shell">
+        <div id="message-list">
+          <div class="message-content-layer" data-chat-content>
+            <div class="chat-bottom-sentinel" data-chat-bottom></div>
+          </div>
+        </div>
+        <button class="scroll-to-bottom-btn" type="button"></button>
+      </div>
     </div>
   `;
   return document.querySelector<HTMLElement>('#message-list')!;
@@ -139,32 +144,40 @@ describe('applyChatDom 键控 diff 挂载', () => {
     expect(list.querySelectorAll('.message[data-message-id]').length).toBe(2);
   });
 
-  it('长列表首次渲染（无现成节点）：分块挂载，rAF 推进后全部插入', async () => {
+  it('长列表 detached staging：完成前 live layer 不暴露半列表，最终一次提交', async () => {
     setupChatDomShell();
     seedConversation(90);
     let mounted = 0;
     refreshChatContent();
     afterChatMounted(() => { mounted += 1; });
     const list = document.querySelector<HTMLElement>('#message-list')!;
+
+    // 新节点仍在 detached fragment 解析；live layer 只有永久 sentinel。
+    expect(list.querySelectorAll('.message[data-message-id]').length).toBe(0);
+    expect(list.querySelector('[data-chat-content]')?.lastElementChild?.matches('[data-chat-bottom]')).toBe(true);
+    expect(mounted).toBe(0);
+
     await flushRaf();
     expect(list.querySelectorAll('.message[data-message-id]').length).toBe(90);
     expect(mounted).toBe(1);
   });
 
-  it('条数少但总字节超阈值（大工具结果）：同样走分块挂载', async () => {
+  it('总字节超阈值时同样先离屏解析，再原子提交', async () => {
     setupChatDomShell();
     seedConversation(30, 'big', 20_000);
     let mounted = 0;
     refreshChatContent();
     afterChatMounted(() => { mounted += 1; });
     const list = document.querySelector<HTMLElement>('#message-list')!;
+    expect(list.querySelectorAll('.message[data-message-id]').length).toBe(0);
+    expect(mounted).toBe(0);
     await flushRaf();
     expect(list.querySelectorAll('.message[data-message-id]').length).toBe(30);
     expect(mounted).toBe(1);
   }, 20_000);
 });
 
-describe('applyChatDom 纯追加快速路径（流式 tick 滚动稳定）', () => {
+describe('cursor reconcile 追加与定点替换', () => {
   beforeEach(() => {
     document.body.innerHTML = '';
     appState.conversations = [];
@@ -195,7 +208,7 @@ describe('applyChatDom 纯追加快速路径（流式 tick 滚动稳定）', () 
     resetChatRenderKey();
     refreshChatContent();
 
-    const children = [...list.children].filter((el) =>
+    const children = [...list.querySelector<HTMLElement>('[data-chat-content]')!.children].filter((el) =>
       (el as HTMLElement).classList?.contains('message'),
     );
     expect(children.length).toBe(3);
@@ -228,16 +241,18 @@ describe('applyChatDom 纯追加快速路径（流式 tick 滚动稳定）', () 
   });
 });
 
-describe('canAppendOnly 判定（含回到底部按钮场景）', () => {
-  it('列表带「回到底部」按钮时仍判为可追加（生产环境按钮常驻 messageList）', () => {
+describe('cursor reconcile 与外层回底按钮', () => {
+  it('外层「回到底部」按钮不参与消息顺序，追加后保持同一节点', () => {
     setupChatDomShell();
     seedConversation(2);
     resetChatRenderKey();
     refreshChatContent();
     const list = document.querySelector<HTMLElement>('#message-list')!;
-    // setupMessageListPostRender 已创建 answerScroller 的浮动按钮
-    const btn = list.querySelector('.scroll-to-bottom-btn');
+    const shell = document.querySelector<HTMLElement>('.message-list-shell')!;
+    // setupMessageListPostRender 已在消息列表外创建 answerScroller 浮动按钮。
+    const btn = shell.querySelector(':scope > .scroll-to-bottom-btn');
     expect(btn).not.toBeNull();
+    expect(list.querySelector('.scroll-to-bottom-btn')).toBeNull();
 
     const conv = appState.conversations[0];
     conv.messages.push({ id: 'm2', role: 'user', content: 'x', timestamp: 3 });
@@ -245,9 +260,9 @@ describe('canAppendOnly 判定（含回到底部按钮场景）', () => {
     resetChatRenderKey();
     refreshChatContent();
 
-    // 快速路径生效：按钮引用保持（未被移除重建）、新消息追加
-    expect(list.querySelector('.scroll-to-bottom-btn')).toBe(btn);
-    const children = [...list.children].filter((el) =>
+    // 快速路径只追加消息；外层按钮不被移动或重建。
+    expect(shell.querySelector(':scope > .scroll-to-bottom-btn')).toBe(btn);
+    const children = [...list.querySelector<HTMLElement>('[data-chat-content]')!.children].filter((el) =>
       (el as HTMLElement).classList?.contains('message'),
     );
     expect(children.length).toBe(3);
@@ -262,7 +277,7 @@ describe('canAppendOnly 判定（含回到底部按钮场景）', () => {
     const list = document.querySelector<HTMLElement>('#message-list')!;
     const junk = document.createElement('div');
     junk.className = 'ask-card';
-    list.appendChild(junk);
+    list.querySelector<HTMLElement>('[data-chat-content]')!.appendChild(junk);
 
     const conv = appState.conversations[0];
     conv.messages.push({ id: 'm1', role: 'user', content: 'x', timestamp: 3 });

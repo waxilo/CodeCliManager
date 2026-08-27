@@ -123,8 +123,12 @@ describe('renderChatAreaHtml shellOnly（全量渲染聊天壳不序列化消息
     // 关键：不内联任何会话消息，避免全量重建时把全部消息序列化进大 innerHTML
     expect(html).not.toContain('>hi</');
     expect(html).not.toContain('>hello</');
-    // 壳内的消息列表是空的（待 refreshChatContent 从缓存/指纹填充）
-    expect(html).toMatch(/id="message-list">\s*<\/div>/);
+    // 稳定壳永久包含 content layer 与 bottom sentinel，但不含 managed 消息。
+    const root = document.createElement('div');
+    root.innerHTML = html;
+    expect(root.querySelector('#message-list > [data-chat-content]')).not.toBeNull();
+    expect(root.querySelector('[data-chat-content] > [data-chat-bottom]')).not.toBeNull();
+    expect(root.querySelector('[data-chat-content] > .message')).toBeNull();
   });
 
   it('非 shellOnly 正常内联全部消息（行为不变）', () => {

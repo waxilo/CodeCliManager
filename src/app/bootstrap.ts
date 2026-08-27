@@ -13,7 +13,7 @@ import {
 import { shellApi } from './shell/api';
 import { render, syncTitlebarActions } from './shell/render';
 import { enterManagementView, exitManagementView } from './shell/management-view';
-import { refreshChatContent, afterChatMounted } from '../features/chat/refresh';
+import { refreshChatContent } from '../features/chat/refresh';
 import { initPlatformClass, setupExternalLinkInterceptor } from './shell/platform';
 import { syncPermissionModeToBackend } from '../features/permissions/permission-mode';
 import { loadData } from '../features/conversations';
@@ -35,7 +35,6 @@ import {
 } from '../features/chat/session-context';
 import { hideSendingState } from '../features/chat/session-context';
 import { updateConversationListSpinner, refreshConversationListDom } from '../features/sidebar';
-import { refreshStreamingUI } from '../features/chat/streaming';
 import { syncRunningSubagentsUI } from '../features/chat/subagent-progress';
 import { syncTodoPanelUI } from '../features/chat/todo-panel';
 import {
@@ -181,9 +180,8 @@ export async function init(): Promise<void> {
 
   wireShellApi();
   registerUiRefreshExecutor((flags) => {
-    let chatRebuilt = false;
     if (flags.chat) {
-      chatRebuilt = refreshChatContent();
+      refreshChatContent();
     }
     if (flags.sidebar) {
       updateConversationListSpinner();
@@ -193,15 +191,6 @@ export async function init(): Promise<void> {
     }
     if (flags.todo) {
       syncTodoPanelUI();
-    }
-    // 统一 diff 挂载后按 appState 恢复流式块内容（幂等；refreshChatContent 内部
-    // 已做挂载完成后的流式同步，此处为兜底）。长列表分块挂载期间 DOM 未就绪：
-    // 流式块恢复挂到 afterChatMounted，挂载完成后执行。
-    if (chatRebuilt) {
-      const sid = appState.activeConversationId;
-      if (sid && appState.streamingBySession.has(sid)) {
-        afterChatMounted(() => refreshStreamingUI(sid));
-      }
     }
   });
   initPlatformClass();

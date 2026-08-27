@@ -74,6 +74,14 @@ impl ProtocolLeakGuard {
 pub(crate) struct SessionErrorPayload {
     pub(crate) conversation_id: Option<String>,
     pub(crate) error: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) recoverable: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) technical: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) detail: Option<String>,
 }
 
 pub(crate) enum StreamOutcome {
@@ -203,15 +211,214 @@ fn emit_tool_result_if_any(
 }
 
 pub(crate) fn emit_session_error(app: &AppHandle, conversation_id: Option<&str>, error: &str) {
+    emit_structured_session_error(app, conversation_id, error, None, None, None, None);
+}
+
+pub(crate) fn emit_structured_session_error(
+    app: &AppHandle,
+    conversation_id: Option<&str>,
+    error: &str,
+    code: Option<&str>,
+    recoverable: Option<bool>,
+    technical: Option<bool>,
+    detail: Option<&str>,
+) {
     let trimmed = error.trim();
     if trimmed.is_empty() {
         return;
     }
     let payload = SessionErrorPayload {
-        conversation_id: conversation_id.map(|id| id.to_string()),
+        conversation_id: conversation_id.map(str::to_string),
         error: trimmed.to_string(),
+        code: code.map(str::to_string),
+        recoverable,
+        technical,
+        detail: detail
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
     };
     let _ = app.emit("session-error", &payload);
+}
+
+const EDE_DIAGNOSTIC_MARKER: &str = "[ede_diagnostic]";
+const CLAUDE_DERIVED_DIAGNOSTIC_CODE: &str = "claude_derived_diagnostic";
+const KIRO_INVALID_TOOL_STREAM_CODE: &str = "kiro_invalid_tool_stream";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StreamErrorClassification {
+    Ordinary,
+    ClaudeDerivedDiagnostic,
+    KiroInvalidToolStream,
+}
+
+pub(crate) fn classify_stream_error(
+    error: &str,
+    has_primary_error: bool,
+) -> Option<StreamErrorClassification> {
+    let trimmed = error.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.contains(EDE_DIAGNOSTIC_MARKER) {
+        return Some(if has_primary_error {
+            StreamErrorClassification::ClaudeDerivedDiagnostic
+        } else {
+            StreamErrorClassification::KiroInvalidToolStream
+        });
+    }
+    Some(StreamErrorClassification::Ordinary)
+}
+
+#[derive(Debug, Clone)]
+struct RecordedStreamError {
+    error: String,
+    classification: StreamErrorClassification,
+}
+
+/// Collects all error-shaped records for one stream turn and exposes one primary failure.
+/// Claude Code can append `[ede_diagnostic]` to an upstream error in its final `result`;
+/// that record is retained as technical context but never replaces or re-emits the primary.
+#[derive(Debug, Default)]
+pub(crate) struct StreamErrorState {
+    primary: Option<RecordedStreamError>,
+    technical_diagnostics: Vec<String>,
+}
+
+impl StreamErrorState {
+    pub(crate) fn is_some(&self) -> bool {
+        self.primary.is_some()
+    }
+
+    pub(crate) fn error(&self) -> Option<&str> {
+        self.primary.as_ref().map(|primary| primary.error.as_str())
+    }
+
+    pub(crate) fn record(&mut self, error: impl Into<String>) {
+        let error = error.into();
+        let trimmed = error.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        // Some result implementations concatenate the upstream failure and the final Claude
+        // diagnostic. Treat the prefix as the primary and retain the marker section as technical.
+        if let Some(marker_index) = trimmed.find(EDE_DIAGNOSTIC_MARKER) {
+            let primary_prefix = trimmed[..marker_index]
+                .trim()
+                .trim_end_matches(['\n', '\r', ':', '-', '—'])
+                .trim();
+            if !primary_prefix.is_empty() {
+                self.record_classified(
+                    primary_prefix,
+                    StreamErrorClassification::Ordinary,
+                );
+            }
+            let diagnostic = trimmed[marker_index..].trim();
+            let classification = classify_stream_error(diagnostic, self.primary.is_some())
+                .expect("non-empty ede diagnostic");
+            self.record_classified(diagnostic, classification);
+            return;
+        }
+
+        self.record_classified(trimmed, StreamErrorClassification::Ordinary);
+    }
+
+    fn record_classified(&mut self, error: &str, classification: StreamErrorClassification) {
+        match classification {
+            StreamErrorClassification::ClaudeDerivedDiagnostic => {
+                eprintln!("[claude] {CLAUDE_DERIVED_DIAGNOSTIC_CODE}: {error}");
+                if !self
+                    .technical_diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic == error)
+                {
+                    self.technical_diagnostics.push(error.to_string());
+                }
+            }
+            StreamErrorClassification::KiroInvalidToolStream => {
+                eprintln!("[claude] {KIRO_INVALID_TOOL_STREAM_CODE}: {error}");
+                self.primary = Some(RecordedStreamError {
+                    error: error.to_string(),
+                    classification,
+                });
+            }
+            StreamErrorClassification::Ordinary => match self.primary.as_ref() {
+                None => {
+                    self.primary = Some(RecordedStreamError {
+                        error: error.to_string(),
+                        classification,
+                    });
+                }
+                Some(primary)
+                    if primary.classification
+                        == StreamErrorClassification::KiroInvalidToolStream =>
+                {
+                    // A diagnostic received before its actual upstream error is not standalone.
+                    let diagnostic = primary.error.clone();
+                    self.primary = Some(RecordedStreamError {
+                        error: error.to_string(),
+                        classification,
+                    });
+                    if !self.technical_diagnostics.contains(&diagnostic) {
+                        self.technical_diagnostics.push(diagnostic);
+                    }
+                }
+                Some(_) => {
+                    // Preserve the first real stream error as the StreamOutcome failure.
+                    // Repeated result/assistant forms of the same failure do not emit again.
+                }
+            },
+        }
+    }
+
+    fn detail(&self) -> Option<String> {
+        if self.technical_diagnostics.is_empty() {
+            return self
+                .primary
+                .as_ref()
+                .filter(|primary| {
+                    primary.classification == StreamErrorClassification::KiroInvalidToolStream
+                })
+                .map(|primary| primary.error.clone());
+        }
+        Some(
+            self.technical_diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    format!("{CLAUDE_DERIVED_DIAGNOSTIC_CODE}: {diagnostic}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    fn payload(&self, conversation_id: Option<&str>) -> Option<SessionErrorPayload> {
+        let primary = self.primary.as_ref()?;
+        let code = match primary.classification {
+            StreamErrorClassification::KiroInvalidToolStream => {
+                Some(KIRO_INVALID_TOOL_STREAM_CODE.to_string())
+            }
+            _ => None,
+        };
+        Some(SessionErrorPayload {
+            conversation_id: conversation_id.map(str::to_string),
+            error: primary.error.clone(),
+            code,
+            recoverable: None,
+            technical: None,
+            detail: self.detail(),
+        })
+    }
+
+    pub(crate) fn emit(&self, app: &AppHandle, conversation_id: Option<&str>) {
+        let Some(payload) = self.payload(conversation_id) else {
+            return;
+        };
+        // 最终错误只走结构化 session-error。避免 message-chunk(error) 先清理一次、
+        // session-error 再落卡一次，造成重复刷新与衍生诊断竞态。
+        let _ = app.emit("session-error", &payload);
+    }
 }
 
 pub(crate) fn is_api_error_text(text: &str) -> bool {
@@ -221,6 +428,7 @@ pub(crate) fn is_api_error_text(text: &str) -> bool {
         || trimmed.contains("authentication_error")
         || trimmed.contains("rate_limit_error")
         || trimmed.contains("overloaded_error")
+        || trimmed.contains(EDE_DIAGNOSTIC_MARKER)
 }
 
 pub(crate) fn extract_result_error(value: &serde_json::Value) -> String {
@@ -318,20 +526,8 @@ fn is_sidechain_event(value: &serde_json::Value) -> bool {
     false
 }
 
-pub(crate) fn record_stream_error(
-    stream_error: &mut Option<String>,
-    app: &AppHandle,
-    session_id: Option<&str>,
-    error: String,
-) {
-    if error.trim().is_empty() {
-        return;
-    }
-    if let Some(sid) = session_id.filter(|id| !id.is_empty()) {
-        emit_message_chunk(app, sid, "error", &error);
-    }
-    emit_session_error(app, session_id, &error);
-    *stream_error = Some(error);
+pub(crate) fn record_stream_error(stream_error: &mut StreamErrorState, error: String) {
+    stream_error.record(error);
 }
 
 pub(crate) fn resolve_stream_session_id(
@@ -438,7 +634,7 @@ pub(crate) fn process_claude_stream_line(
     known_task_ids: &mut HashSet<String>,
     outstanding_task_ids: &mut HashSet<String>,
     protocol_guard: &mut ProtocolLeakGuard,
-    stream_error: &mut Option<String>,
+    stream_error: &mut StreamErrorState,
     last_assistant_text: &mut Option<String>,
     thinking_started_at: &mut Option<Instant>,
 ) {
@@ -452,8 +648,7 @@ pub(crate) fn process_claude_stream_line(
     match typ {
         "error" => {
             if let Some(error) = extract_top_level_error(&value) {
-                let sid = resolve_stream_session_id(captured_session_id, &value);
-                record_stream_error(stream_error, app, sid.as_deref(), error);
+                record_stream_error(stream_error, error);
             }
         }
         "system" => {
@@ -499,7 +694,7 @@ pub(crate) fn process_claude_stream_line(
                             error_status.unwrap_or(401),
                             error_code
                         );
-                        record_stream_error(stream_error, app, sid.as_deref(), error_msg);
+                        record_stream_error(stream_error, error_msg);
                     }
                 }
                 Some("task_started") => {
@@ -696,12 +891,8 @@ pub(crate) fn process_claude_stream_line(
                             if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
                                 if !text.is_empty() {
                                     if is_api_error_text(text) {
-                                        let sid =
-                                            resolve_stream_session_id(captured_session_id, &value);
                                         record_stream_error(
                                             stream_error,
-                                            app,
-                                            sid.as_deref(),
                                             text.trim().to_string(),
                                         );
                                     } else {
@@ -829,8 +1020,7 @@ pub(crate) fn process_claude_stream_line(
         "assistant" => {
             if let Some(text) = extract_assistant_text(&value) {
                 if is_api_error_text(&text) {
-                    let sid = resolve_stream_session_id(captured_session_id, &value);
-                    record_stream_error(stream_error, app, sid.as_deref(), text);
+                    record_stream_error(stream_error, text);
                 }
             }
             // 仅主链 assistant 事件更新“最终助手文本”；子代理文本不会落入本会话 JSONL 主链
@@ -849,9 +1039,8 @@ pub(crate) fn process_claude_stream_line(
                 }
             }
             if value.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
-                let sid = resolve_stream_session_id(captured_session_id, &value);
                 let error = extract_result_error(&value);
-                record_stream_error(stream_error, app, sid.as_deref(), error);
+                record_stream_error(stream_error, error);
                 return;
             }
             // complete 由 spawn 在确认不会自动续跑后再发，避免 recovery 路径先收尾再续写
@@ -862,7 +1051,80 @@ pub(crate) fn process_claude_stream_line(
 
 #[cfg(test)]
 mod tests {
-    use super::{is_subagent_launch_metadata, ProtocolLeakGuard};
+    use super::{
+        classify_stream_error, is_subagent_launch_metadata, ProtocolLeakGuard,
+        StreamErrorClassification, StreamErrorState, CLAUDE_DERIVED_DIAGNOSTIC_CODE,
+        KIRO_INVALID_TOOL_STREAM_CODE,
+    };
+
+    const DIAGNOSTIC: &str =
+        "[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null";
+
+    #[test]
+    fn primary_and_derived_diagnostic_keep_one_primary_payload() {
+        let mut errors = StreamErrorState::default();
+        errors.record("API Error: 502 Improperly formed request");
+        errors.record(DIAGNOSTIC);
+
+        let payload = errors.payload(Some("session-1")).expect("primary error");
+        assert_eq!(payload.conversation_id.as_deref(), Some("session-1"));
+        assert_eq!(payload.error, "API Error: 502 Improperly formed request");
+        assert_eq!(payload.code, None);
+        assert_eq!(payload.recoverable, None);
+        assert_eq!(payload.technical, None);
+        let detail = payload.detail.expect("derived technical diagnostic detail");
+        assert!(detail.contains(CLAUDE_DERIVED_DIAGNOSTIC_CODE));
+        assert!(detail.contains(DIAGNOSTIC));
+    }
+
+    #[test]
+    fn standalone_diagnostic_is_kiro_invalid_tool_stream() {
+        let mut errors = StreamErrorState::default();
+        errors.record(DIAGNOSTIC);
+
+        let payload = errors.payload(None).expect("diagnostic error");
+        assert_eq!(payload.error, DIAGNOSTIC);
+        assert_eq!(payload.code.as_deref(), Some(KIRO_INVALID_TOOL_STREAM_CODE));
+        assert_eq!(payload.recoverable, None);
+        assert_eq!(payload.technical, None);
+        assert_eq!(payload.detail.as_deref(), Some(DIAGNOSTIC));
+        assert_eq!(
+            classify_stream_error(DIAGNOSTIC, false),
+            Some(StreamErrorClassification::KiroInvalidToolStream)
+        );
+        assert_eq!(
+            classify_stream_error(DIAGNOSTIC, true),
+            Some(StreamErrorClassification::ClaudeDerivedDiagnostic)
+        );
+    }
+
+    #[test]
+    fn ordinary_stream_error_is_unchanged() {
+        let mut errors = StreamErrorState::default();
+        errors.record("Error: ordinary failure");
+        errors.record("Error: ordinary failure");
+
+        let payload = errors.payload(Some("session-2")).expect("ordinary error");
+        assert_eq!(payload.error, "Error: ordinary failure");
+        assert_eq!(payload.code, None);
+        assert_eq!(payload.recoverable, None);
+        assert_eq!(payload.technical, None);
+        assert_eq!(payload.detail, None);
+    }
+
+    #[test]
+    fn combined_primary_and_diagnostic_are_split() {
+        let mut errors = StreamErrorState::default();
+        errors.record(format!("API Error: 502 gateway failure\n{DIAGNOSTIC}"));
+
+        let payload = errors.payload(None).expect("combined error");
+        assert_eq!(payload.error, "API Error: 502 gateway failure");
+        assert_eq!(payload.technical, None);
+        assert!(payload
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains(DIAGNOSTIC)));
+    }
 
     #[test]
     fn protocol_guard_filters_split_internal_route() {

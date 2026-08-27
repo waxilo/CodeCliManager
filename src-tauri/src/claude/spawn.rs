@@ -19,6 +19,10 @@ fn should_auto_recover(was_aborted: bool, recovery_needed: bool, recovery_attemp
     !was_aborted && recovery_needed && recovery_attempts < 1
 }
 
+fn should_emit_stream_error(was_aborted: bool, stream_error: &StreamErrorState) -> bool {
+    !was_aborted && stream_error.is_some()
+}
+
 /// 使用 stream-json 模式启动 claude，实时推送 thinking / answer 增量
 pub(crate) fn spawn_claude_stream(
     app: AppHandle,
@@ -179,7 +183,7 @@ pub(crate) fn spawn_claude_stream(
     let mut outstanding_task_ids: HashSet<String> = HashSet::new();
     let mut protocol_guard = ProtocolLeakGuard::default();
     let mut recovery_attempts = 0u8;
-    let mut stream_error: Option<String> = None;
+    let mut stream_error = StreamErrorState::default();
     // 本轮流式中主链最后一条 assistant 文本（全部文本块 \n\n 拼接）。
     // turn-complete 时据此等待最终回复真正落盘，避免提前 messages-updated 清掉前端流式文本。
     let mut last_assistant_text: Option<String> = None;
@@ -260,7 +264,7 @@ pub(crate) fn spawn_claude_stream(
                         if is_init_ok || is_system_init {
                             if let Err(e) = write_stdin_json(&stdin, &user_msg) {
                                 // 不 kill：走出循环后由统一收尾关闭 stdin
-                                stream_error = Some(e);
+                                stream_error.record(e);
                                 stdout_finished = true;
                                 continue;
                             }
@@ -383,7 +387,7 @@ pub(crate) fn spawn_claude_stream(
                     });
                     if let Err(e) = write_stdin_json(&stdin, &response) {
                         eprintln!("[permission] 写入响应失败: {e}");
-                        stream_error = Some(e);
+                        stream_error.record(e);
                         stdout_finished = true;
                         continue;
                     }
@@ -420,7 +424,9 @@ pub(crate) fn spawn_claude_stream(
                         captured_registry_key = sid.clone();
                     }
                 }
-                if stream_error.is_some() {
+                // primary 后可能还有 Claude Code 在主链 result 附带的 `[ede_diagnostic]`；
+                // 继续读到该 result，再统一收尾，避免覆盖 primary 或重复发错误。
+                if stream_error.is_some() && is_main_stream_result(&line) {
                     reject_pending_permissions_for_session(
                         &captured_registry_key,
                         "会话出错，权限请求已取消",
@@ -432,10 +438,6 @@ pub(crate) fn spawn_claude_stream(
                                 "会话出错，权限请求已取消",
                             );
                         }
-                    }
-                    if let Ok(mut c) = child_arc.lock() {
-                        // stream 已出错：不 kill，交由收尾关 stdin
-                        let _ = c.try_wait();
                     }
                     stdout_finished = true;
                     continue;
@@ -579,7 +581,7 @@ pub(crate) fn spawn_claude_stream(
                 // initialize 迟迟无回时，兜底发送用户消息，避免整轮卡死
                 if !user_prompt_sent && started.elapsed() >= Duration::from_secs(3) {
                     if let Err(e) = write_stdin_json(&stdin, &user_msg) {
-                        stream_error = Some(e);
+                        stream_error.record(e);
                         stdout_finished = true;
                         continue;
                     }
@@ -650,13 +652,8 @@ pub(crate) fn spawn_claude_stream(
                             "请求超时：{} 秒内未收到任何响应，请检查 API 地址、密钥和网络连接",
                             turn_idle_timeout.as_secs()
                         );
-                        emit_session_error(
-                            &app,
-                            captured_session_id.as_deref(),
-                            &timeout_msg,
-                        );
-                        // 不 kill：关 stdin 优雅退出，错误已推送前端
-                        stream_error = Some(timeout_msg);
+                        // 不 kill：关 stdin 优雅退出，由统一收尾只发一次错误
+                        stream_error.record(timeout_msg);
                         stdout_finished = true;
                         continue;
                     }
@@ -724,13 +721,16 @@ pub(crate) fn spawn_claude_stream(
     };
     eprintln!("[claude] 退出码: {}", status);
 
-    if let Some(error) = stream_error {
-        // 用户主动终止时，stream 解析错误不视为失败
-        if is_stream_aborted(&captured_registry_key, &captured_session_id) {
+    if stream_error.is_some() {
+        let error = stream_error.error().unwrap_or("模型调用失败").to_string();
+        let was_aborted = is_stream_aborted(&captured_registry_key, &captured_session_id);
+        // 用户主动终止时，任何已收集错误都不发给前端，也不视为失败。
+        if !should_emit_stream_error(was_aborted, &stream_error) {
             clear_stream_aborted(&captured_registry_key, &captured_session_id);
             eprintln!("[claude] 用户主动终止，忽略 stream error: {}", error);
             return Ok(StreamOutcome::Cancelled(captured_session_id));
         }
+        stream_error.emit(&app, captured_session_id.as_deref());
         return Ok(StreamOutcome::Failed {
             session_id: captured_session_id,
             error,
@@ -784,7 +784,7 @@ pub(crate) fn spawn_claude_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::should_auto_recover;
+    use super::{should_auto_recover, should_emit_stream_error, StreamErrorState};
 
     #[test]
     fn user_abort_always_prevents_auto_recovery() {
@@ -796,5 +796,14 @@ mod tests {
         assert!(should_auto_recover(false, true, 0));
         assert!(!should_auto_recover(false, true, 1));
         assert!(!should_auto_recover(false, false, 0));
+    }
+
+    #[test]
+    fn abort_never_emits_collected_stream_error() {
+        let mut stream_error = StreamErrorState::default();
+        stream_error.record("API Error: interrupted request");
+
+        assert!(!should_emit_stream_error(true, &stream_error));
+        assert!(should_emit_stream_error(false, &stream_error));
     }
 }

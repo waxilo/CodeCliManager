@@ -31,7 +31,7 @@ import {
   setRunStatusOverride,
   transferSessionRunTimer,
 } from './run-status';
-import { ScrollController, scheduleUiRefresh, type ScrollSnapshot } from '../../ui';
+import { scheduleUiRefresh } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
 import { mergeStreamBlocks, getToolAnchorBlockIndexes } from './render-chat';
 import { formatSubagentUsage } from './subagent-usage';
@@ -342,11 +342,42 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
   return false;
 }
 
+function ensureStreamSegmentIds(state: StreamingState): void {
+  let next = state.nextSegmentIndex ?? 0;
+  for (const block of state.blocks) {
+    if (!block.segmentId) {
+      block.segmentId = `streaming-block-${next}`;
+    }
+    const match = /^streaming-block-(\d+)$/.exec(block.segmentId);
+    if (match) next = Math.max(next, Number(match[1]) + 1);
+  }
+  state.nextSegmentIndex = next;
+}
+
+function createStreamBlock(state: StreamingState, type: 'thinking' | 'text'): StreamBlock {
+  ensureStreamSegmentIds(state);
+  const index = state.nextSegmentIndex ?? 0;
+  state.nextSegmentIndex = index + 1;
+  return {
+    segmentId: `streaming-block-${index}`,
+    type,
+    content: '',
+    finalized: false,
+  };
+}
+
 export function getStreamingState(sessionId: string): StreamingState {
   if (!appState.streamingBySession.has(sessionId)) {
-    appState.streamingBySession.set(sessionId, { blocks: [], thinkingDone: false, currentBlockIdx: -1 });
+    appState.streamingBySession.set(sessionId, {
+      blocks: [],
+      thinkingDone: false,
+      nextSegmentIndex: 0,
+      currentBlockIdx: -1,
+    });
   }
-  return appState.streamingBySession.get(sessionId)!;
+  const state = appState.streamingBySession.get(sessionId)!;
+  ensureStreamSegmentIds(state);
+  return state;
 }
 
 export function clearStreamingState(sessionId: string) {
@@ -612,7 +643,7 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       appState.runStatusOverride.delete(sid);
       state.thinkingDone = false;
       // 创建新的 thinking 块
-      state.blocks.push({ type: 'thinking', content: '' });
+      state.blocks.push(createStreamBlock(state, 'thinking'));
       state.currentBlockIdx = state.blocks.length - 1;
       if (isActive) refreshStreamingUI(sid);
       break;
@@ -644,7 +675,7 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       // 新内容恢复：清除 api_retry 等临时状态文案
       appState.runStatusOverride.delete(sid);
       // 创建新的 text 块
-      state.blocks.push({ type: 'text', content: '', finalized: false });
+      state.blocks.push(createStreamBlock(state, 'text'));
       state.currentBlockIdx = state.blocks.length - 1;
       break;
     case 'text_delta':
@@ -683,10 +714,6 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
       });
       if (isActive) {
         refreshStreamingUI(sid);
-        // result 已到但 session-ended 稍晚：去掉流式标记，避免误以为还在生成
-        document.querySelectorAll('.message.streaming').forEach((el) => {
-          el.classList.remove('streaming');
-        });
       }
       break;
     default:
@@ -722,12 +749,62 @@ export function scheduleStreamingRefresh(sessionId: string) {
   refresh.rafId = requestAnimationFrame(doRefresh);
 }
 
+function inferSessionErrorCode(payload: SessionErrorPayload, errorText: string): string | undefined {
+  if (payload.code) return payload.code;
+  if (/same body is already in progress/i.test(errorText)) return 'singleflight_wait_timeout';
+  if (/\[ede_diagnostic\]/i.test(errorText) && /stop_reason=tool_use/i.test(errorText)) {
+    return 'kiro_invalid_tool_stream';
+  }
+  if (/empty assistant response/i.test(errorText)) return 'kiro_empty_response';
+  return undefined;
+}
+
+function recoverableErrorStatus(code: string | undefined): string {
+  switch (code) {
+    case 'kiro_duplicate_inflight':
+    case 'singleflight_wait_timeout':
+      return 'Kiro 正在等待上一请求完成…';
+    case 'upstream_busy':
+    case 'upstream_rate_limit':
+      return 'Kiro 服务繁忙，正在自动重试…';
+    default:
+      return '遇到临时错误，正在自动恢复…';
+  }
+}
+
 export function handleSessionError(payload: SessionErrorPayload) {
   const sid = payload.conversationId || appState.activeConversationId || null;
   const errorText = payload.error.trim();
   if (!errorText) return;
+  const errorCode = inferSessionErrorCode(payload, errorText);
+  const isLegacyDerivedDiagnostic =
+    !payload.code && /\[ede_diagnostic\]/i.test(errorText);
 
-  // 会话出错意味着后端将结束（或已结束）该会话进程：清掉运行/停止标记。
+  if (payload.technical) {
+    console.warn('[session-error] 已抑制衍生技术诊断:', errorCode || 'technical', errorText);
+    return;
+  }
+
+  if (payload.recoverable) {
+    setRunStatusOverride(sid || 'pending', recoverableErrorStatus(errorCode));
+    return;
+  }
+
+  // 兼容旧版后端：真实主错误之后 Claude Code 可能再补一条 ede_diagnostic。
+  // 该诊断只是同一失败的第二症状，不应结束会话两次或污染永久错误卡。
+  if (isLegacyDerivedDiagnostic && sid) {
+    const conversation = findConversationById(sid);
+    const last = conversation?.messages[conversation.messages.length - 1];
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (last?.role === 'error' && nowSec - last.timestamp <= 120) {
+      console.warn('[session-error] 已抑制旧版衍生诊断:', errorText);
+      return;
+    }
+  }
+
+  setRunStatusOverride(sid || 'pending', null);
+
+  // 最终会话错误意味着后端将结束（或已结束）该会话进程：清掉运行/停止标记。
   // 否则「切模型重启 / 重新生成后进程异常退出」时，session-ended 会被
   // runningSessions 拦截忽略，输入框状态条与时长永远停在「执行中」。
   if (sid) {
@@ -751,6 +828,8 @@ export function handleSessionError(payload: SessionErrorPayload) {
     id: `error-${Date.now()}`,
     role: 'error',
     content: errorText,
+    errorCode,
+    errorDetail: payload.detail?.trim() || errorText,
     timestamp: Math.floor(Date.now() / 1000),
   };
 
@@ -782,8 +861,9 @@ export function handleSessionError(payload: SessionErrorPayload) {
     const lastIsRecentError =
       !!last && last.role === 'error' && nowSec - last.timestamp <= 120;
 
-    if (lastIsRecentError && !last.content.includes(errorText)) {
-      last.content = `${last.content}\n${errorText}`;
+    if (lastIsRecentError && !last.errorDetail?.includes(errorText) && !last.content.includes(errorText)) {
+      // 第一条是用户主提示；后续同回合错误只进入折叠详情，不污染主文案。
+      last.errorDetail = [last.errorDetail || last.content, errorText].filter(Boolean).join('\n');
       conversation.updated_at = nowSec;
     } else {
       const hasSameError = conversation.messages.some(
@@ -827,11 +907,9 @@ export function ensureChatViewVisible(): boolean {
 }
 
 export function removeStreamingElements(sessionId?: string) {
-  // DOM 只代表当前可见会话；后台会话清理不能碰当前会话的流式节点。
+  // DOM 清理由最终 render plan 的 cursor reconcile 统一提交，禁止在状态清理时先缩短列表。
   if (sessionId && sessionId !== appState.activeConversationId) return;
-  // 统一 diff 下的安全网：状态已清空时立刻摘掉残留的流式块/实时工具卡，
-  // 避免 abort 兜底等「无后续刷新」路径下残留块一直显示。
-  document.querySelectorAll('[data-stream-id^="streaming-"], [data-stream-id^="live-tool-"]').forEach((el) => el.remove());
+  scheduleUiRefresh({ chat: true });
 }
 
 function updateStreamingTextBody(mdBody: HTMLElement, block: StreamBlock): boolean {
@@ -872,8 +950,8 @@ export function syncStreamingBlocksInPlace(sessionId: string): void {
   const anchorTools = appState.activeToolsBySession.get(sessionId);
   const noMergeAfterRaw = getToolAnchorBlockIndexes(anchorTools ? [...anchorTools.values()] : []);
   const merged = mergeStreamBlocks(state.blocks, noMergeAfterRaw);
-  merged.forEach((block, idx) => {
-    const blockId = `streaming-block-${idx}`;
+  merged.forEach((block) => {
+    const blockId = block.segmentId ?? `streaming-block-${block.rawStart}`;
     const existingEl = messageList.querySelector<HTMLElement>(
       `.message[data-stream-id="${blockId}"]`,
     );
@@ -928,60 +1006,13 @@ export function syncStreamingBlocksInPlace(sessionId: string): void {
     }
   }
 
-  // Answer 区域自动置底
-  appState.answerScroller?.onNewContent();
 }
 
-/**
- * 流式 UI 刷新（统一渲染管线）：
- * 1. 就地增量更新已挂载的流式块内容（不重建 DOM，避免闪烁）；
- * 2. 调度 refreshChatContent：流式签名变化 → 同一 diff 创建/复用/移除块与工具卡，
- *    历史消息与已挂载块按 id 复用（text renderKey 不含内容，节点稳定不重建）；
- *    diff 挂载完成后会再次调用 syncStreamingBlocksInPlace 填充新建块。
- */
+/** 流式状态变化只调度唯一聊天 commit；DOM patch 与几何恢复由该 commit 统一完成。 */
 export function refreshStreamingUI(sessionId: string) {
-  // 只有当 sessionId 匹配当前会话时才更新
   if (sessionId !== appState.activeConversationId && !(appState.pendingUserMessage && !appState.activeConversationId && !appState.pendingUserMessageConvId)) return;
 
-  // 先同步已挂载块（diff 前的即时反馈）
-  syncStreamingBlocksInPlace(sessionId);
-
-  // 思考中/输入中状态同步到输入框下方状态条
   refreshRunStatusStrip();
-
-  // 触发统一 diff：流式签名变化 → refreshChatContent 重建序列，
-  // 历史消息 / 已挂载流式块复用，仅新增块 / 工具卡变化被处理。
   scheduleUiRefresh({ chat: true });
 }
-
-/** 初始化 Answer 区域 ScrollController（#message-list） */
-export function initAnswerScroller(): void {
-  const messageList = document.querySelector<HTMLDivElement>('#message-list');
-  if (!messageList) return;
-
-  // 同一列表元素已绑定：跳过（流式 tick 的 applyChatDom 复用 #message-list，
-  // 不销毁/重建滚动控制器，避免按钮重建闪烁与 autoScroll 状态抖动）
-  if (appState.answerScroller?.el === messageList) return;
-
-  // 销毁旧实例
-  appState.answerScroller?.destroy();
-  appState.thinkingScrollers.forEach((sc) => sc.destroy());
-  appState.thinkingScrollers.clear();
-
-  appState.answerScroller = new ScrollController(messageList, {
-    resumePx: 20,
-    createButton: true,
-  });
-}
-
-/** 捕获消息列表重建前的滚动状态；非跟随态记录可见消息锚点。 */
-export function captureScrollState(): ScrollSnapshot | null {
-  return appState.answerScroller?.snapshot() ?? null;
-}
-
-/** 重建后恢复跟随状态或同一消息阅读锚点。 */
-export function restoreScrollState(snap: ScrollSnapshot | null): void {
-  appState.answerScroller?.restoreSnapshot(snap);
-}
-
 

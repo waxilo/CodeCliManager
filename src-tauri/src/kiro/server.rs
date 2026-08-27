@@ -14,7 +14,7 @@ use std::io::{self, Cursor, Read};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -78,8 +78,9 @@ const RETRY_HEALTH_WINDOW: Duration = Duration::from_secs(30);
 const SSE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20);
 /// 完成响应可被同 body 请求重放的有效期。
 const DEDUP_TTL: Duration = Duration::from_secs(300);
-/// 同 body 请求撞上 in-flight 时，等待原请求完成的最大时长；超时返回 429 让客户端稍后重试。
-const DEDUP_REPLAY_WAIT: Duration = Duration::from_secs(5);
+/// follower 等待同 body leader 的上限，与 Auth runtime 客户端的 1500s 总超时保持一致。
+/// 测试通过 `acquire_with_limits` 注入更短时长，不缩短生产环境的正常生成窗口。
+const DEDUP_FOLLOWER_WAIT: Duration = Duration::from_secs(1500);
 /// 重放缓冲上限，超过则放弃缓冲（该请求不再可重放），避免内存膨胀。
 const DEDUP_BUFFER_CAP: usize = 16 * 1024 * 1024;
 
@@ -174,33 +175,39 @@ impl ProxyHealth {
     }
 }
 
-/// 同 body 请求的去重存储：in-flight 时复用/429，完成后短 TTL 内重放缓冲的完整 SSE。
-///
-/// 重试/重发同一条消息时，若原生成还在进行或已完成，直接复用其结果，**不再打一次 Kiro 生成**，
-/// 从而结构性保证不重复扣 Credits。缓冲有上限，超限的请求不做重放。
+/// 同 body 请求的去重存储：同一 key 的 acquire 在 entries 锁内选出唯一 leader，
+/// follower 等待 leader 的终态并重放完整 SSE，绝不再次穿透到 Kiro。
 struct DedupStore {
     entries: Mutex<HashMap<u64, Arc<DedupEntry>>>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum DedupStatus {
     InFlight,
-    Completed,
+    Completed { completed_at: Instant },
     Failed,
 }
 
-struct DedupEntry {
-    buffer: Mutex<Vec<u8>>,
-    status: Mutex<DedupStatus>,
-    created: Instant,
-    overflow: AtomicBool,
+#[derive(Debug)]
+struct DedupEntryState {
+    buffer: Vec<u8>,
+    status: DedupStatus,
+    overflow: bool,
 }
 
 #[derive(Debug)]
-enum DedupLookup {
-    Miss,
+struct DedupEntry {
+    key: u64,
+    state: Mutex<DedupEntryState>,
+    changed: Condvar,
+}
+
+#[derive(Debug)]
+enum DedupAcquire {
+    Leader(Arc<DedupEntry>),
     Replay(Vec<u8>),
-    Busy,
+    Failed,
+    TimedOut,
 }
 
 impl DedupStore {
@@ -218,124 +225,159 @@ impl DedupStore {
         hasher.finish()
     }
 
-    fn lookup(&self, key: u64) -> DedupLookup {
-        let entry = {
-            let entries = match self.entries.lock() {
-                Ok(g) => g,
-                Err(_) => return DedupLookup::Miss,
-            };
-            match entries.get(&key) {
-                Some(e) => Arc::clone(e),
-                None => return DedupLookup::Miss,
-            }
-        };
-        let status = entry.status.lock().map(|g| g.clone()).unwrap_or(DedupStatus::Failed);
-        match status {
-            DedupStatus::Completed if entry.created.elapsed() >= DEDUP_TTL => {
-                self.remove(&key);
-                DedupLookup::Miss
-            }
-            DedupStatus::Completed => self.replay_or_clear(entry, key),
-            DedupStatus::Failed => {
-                self.remove(&key);
-                DedupLookup::Miss
-            }
-            DedupStatus::InFlight => {
-                // 原请求仍在生成：等它完成（至多 DEDUP_REPLAY_WAIT），完成后直接重放。
-                let deadline = Instant::now() + DEDUP_REPLAY_WAIT;
-                loop {
-                    let done = match entry.status.lock().map(|g| g.clone()).unwrap_or(DedupStatus::Failed) {
-                        DedupStatus::Completed => true,
-                        DedupStatus::Failed => {
-                            self.remove(&key);
-                            return DedupLookup::Miss;
+    fn new_entry(key: u64) -> Arc<DedupEntry> {
+        Arc::new(DedupEntry {
+            key,
+            state: Mutex::new(DedupEntryState {
+                buffer: Vec::new(),
+                status: DedupStatus::InFlight,
+                overflow: false,
+            }),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn acquire(&self, key: u64) -> DedupAcquire {
+        self.acquire_with_limits(key, DEDUP_FOLLOWER_WAIT, DEDUP_TTL)
+    }
+
+    /// 原子 acquire：entries 锁内只允许一个调用插入 InFlight；其他调用在该条目的
+    /// Condvar 上等待。Failed、过期 Completed 和 overflow Completed 都先原子移除再竞选新 leader。
+    fn acquire_with_limits(&self, key: u64, wait: Duration, ttl: Duration) -> DedupAcquire {
+        let deadline = Instant::now() + wait;
+        loop {
+            let entry = {
+                let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+                if entries.len() >= 64 {
+                    entries.retain(|_, entry| {
+                        let state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                        match &state.status {
+                            DedupStatus::InFlight => true,
+                            DedupStatus::Completed { completed_at } => completed_at.elapsed() < ttl,
+                            DedupStatus::Failed => false,
                         }
-                        _ => false,
-                    };
-                    if done {
+                    });
+                }
+                if let Some(entry) = entries.get(&key) {
+                    Arc::clone(entry)
+                } else {
+                    let entry = Self::new_entry(key);
+                    entries.insert(key, Arc::clone(&entry));
+                    return DedupAcquire::Leader(entry);
+                }
+            };
+
+            let mut state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut waited_on_entry = false;
+            loop {
+                match &state.status {
+                    DedupStatus::Completed { completed_at }
+                        if completed_at.elapsed() < ttl
+                            && !state.overflow
+                            && !state.buffer.is_empty() =>
+                    {
+                        return DedupAcquire::Replay(state.buffer.clone());
+                    }
+                    DedupStatus::Completed { .. } | DedupStatus::Failed => {
+                        drop(state);
+                        self.remove_if_same(key, &entry);
+                        if waited_on_entry {
+                            // 已等待该 leader 的 follower 只观察终态，不会在本次请求中晋升并穿透上游。
+                            return DedupAcquire::Failed;
+                        }
+                        // 新到请求遇到过期/不可重放终态时，可以在下一轮原子竞选 leader。
                         break;
                     }
-                    if Instant::now() >= deadline {
-                        return DedupLookup::Busy;
+                    DedupStatus::InFlight => {
+                        waited_on_entry = true;
+                        let now = Instant::now();
+                        if now >= deadline {
+                            return DedupAcquire::TimedOut;
+                        }
+                        let remaining = deadline.saturating_duration_since(now);
+                        let waited = entry.changed.wait_timeout(state, remaining);
+                        let (next, timeout) = match waited {
+                            Ok(result) => result,
+                            Err(poisoned) => poisoned.into_inner(),
+                        };
+                        state = next;
+                        if timeout.timed_out()
+                            && matches!(&state.status, DedupStatus::InFlight)
+                        {
+                            return DedupAcquire::TimedOut;
+                        }
                     }
-                    thread::sleep(Duration::from_millis(100));
                 }
-                self.replay_or_clear(entry, key)
             }
         }
-    }
-
-    fn replay_or_clear(&self, entry: Arc<DedupEntry>, key: u64) -> DedupLookup {
-        if entry.overflow.load(Ordering::Relaxed) {
-            self.remove(&key);
-            return DedupLookup::Miss;
-        }
-        let bytes = entry.buffer.lock().map(|g| g.clone()).unwrap_or_default();
-        if bytes.is_empty() {
-            self.remove(&key);
-            return DedupLookup::Miss;
-        }
-        DedupLookup::Replay(bytes)
-    }
-
-    fn register(&self, key: u64) -> Arc<DedupEntry> {
-        // 顺手清掉过期条目，避免长期 in-flight（如挂死线程）撑爆内存
-        if let Ok(mut entries) = self.entries.lock() {
-            if entries.len() >= 64 {
-                let now = Instant::now();
-                entries.retain(|_, e| now.duration_since(e.created) < DEDUP_TTL);
-            }
-            let entry = Arc::new(DedupEntry {
-                buffer: Mutex::new(Vec::new()),
-                status: Mutex::new(DedupStatus::InFlight),
-                created: Instant::now(),
-                overflow: AtomicBool::new(false),
-            });
-            entries.insert(key, Arc::clone(&entry));
-            return entry;
-        }
-        Arc::new(DedupEntry {
-            buffer: Mutex::new(Vec::new()),
-            status: Mutex::new(DedupStatus::InFlight),
-            created: Instant::now(),
-            overflow: AtomicBool::new(false),
-        })
     }
 
     fn append(&self, entry: &DedupEntry, bytes: &[u8]) {
         if bytes.is_empty() {
             return;
         }
-        let mut buf = match entry.buffer.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
-        if buf.len() + bytes.len() > DEDUP_BUFFER_CAP {
-            entry.overflow.store(true, Ordering::Relaxed);
+        let mut state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(&state.status, DedupStatus::InFlight) || state.overflow {
             return;
         }
-        buf.extend_from_slice(bytes);
-    }
-
-    fn mark_completed(&self, entry: &DedupEntry) {
-        if let Ok(mut s) = entry.status.lock() {
-            *s = DedupStatus::Completed;
+        let Some(next_len) = state.buffer.len().checked_add(bytes.len()) else {
+            state.buffer.clear();
+            state.overflow = true;
+            return;
+        };
+        if next_len > DEDUP_BUFFER_CAP {
+            // 丢弃 partial buffer，但保持 InFlight：follower 仍必须等 leader 结束，不能穿透。
+            state.buffer.clear();
+            state.overflow = true;
+            return;
         }
+        state.buffer.extend_from_slice(bytes);
     }
 
-    fn mark_failed(&self, entry: &DedupEntry) {
-        if let Ok(mut s) = entry.status.lock() {
-            *s = DedupStatus::Failed;
+    /// 只有持有 leader entry 的 producer 可以完成该转换；终态不会被 Drop 或迟到写入覆盖。
+    fn mark_completed(&self, entry: &DedupEntry) -> bool {
+        let mut state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(&state.status, DedupStatus::InFlight) {
+            return false;
         }
+        let overflow = state.overflow;
+        state.status = DedupStatus::Completed {
+            completed_at: Instant::now(),
+        };
+        entry.changed.notify_all();
+        drop(state);
+        // overflow 没有可重放结果；仅在 producer 已发布终态后移除，in-flight 期间绝不穿透。
+        if overflow {
+            self.remove_if_same(entry.key, entry);
+        }
+        true
     }
 
-    fn remove(&self, key: &u64) {
-        if let Ok(mut entries) = self.entries.lock() {
-            entries.remove(key);
+    /// Failed 会清空 partial buffer，避免之后任何路径把不完整响应复活为 Completed。
+    fn mark_failed(&self, entry: &DedupEntry) -> bool {
+        let mut state = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !matches!(&state.status, DedupStatus::InFlight) {
+            return false;
+        }
+        state.buffer.clear();
+        state.status = DedupStatus::Failed;
+        entry.changed.notify_all();
+        drop(state);
+        // 已持有 Arc 的 follower 仍能观察 Failed；新请求可以原子竞选新的 leader。
+        self.remove_if_same(entry.key, entry);
+        true
+    }
+
+    fn remove_if_same(&self, key: u64, expected: &DedupEntry) {
+        let mut entries = self.entries.lock().unwrap_or_else(|e| e.into_inner());
+        if entries
+            .get(&key)
+            .is_some_and(|current| std::ptr::eq(current.as_ref(), expected))
+        {
+            entries.remove(&key);
         }
     }
 }
-
 #[derive(Debug)]
 enum BodyReadError {
     TooLarge,
@@ -476,24 +518,20 @@ pub fn start_proxy(mut config: ProxyConfig) -> Result<ProxyHandle, String> {
             }
             match server.recv_timeout(Duration::from_millis(200)) {
                 Ok(Some(request)) => {
-                    let Some(permit) =
-                        try_acquire_request(&active_requests, MAX_CONCURRENT_REQUESTS)
-                    else {
-                        error_response(
-                            request,
-                            429,
-                            "Too many concurrent requests.",
-                            "rate_limit_error",
-                        );
-                        continue;
-                    };
                     let auth = auth.clone();
                     let config = thread_config.clone();
                     let health = Arc::clone(&health);
                     let dedup = Arc::clone(&dedup);
+                    let active_requests = Arc::clone(&active_requests);
                     thread::spawn(move || {
-                        let _permit = permit;
-                        handle_request(request, &config, &auth, health, dedup);
+                        handle_request(
+                            request,
+                            &config,
+                            &auth,
+                            health,
+                            dedup,
+                            active_requests,
+                        );
                     });
                 }
                 Ok(None) => {}
@@ -528,6 +566,7 @@ fn handle_request(
     auth: &Arc<Auth>,
     health: Arc<ProxyHealth>,
     dedup: Arc<DedupStore>,
+    active_requests: Arc<AtomicUsize>,
 ) {
     // Host 校验：仅接受本机回环地址，阻断 DNS rebinding（浏览器把恶意域名解析到 127.0.0.1）
     let host_ok = request
@@ -576,7 +615,14 @@ fn handle_request(
         (Method::Get, "/") | (Method::Get, "/health") => handle_health(request, config, auth),
         (Method::Get, "/v1/models") => handle_models(request, config, auth),
         (Method::Post, "/v1/messages/count_tokens") => handle_count_tokens(request, config),
-        (Method::Post, "/v1/messages") => handle_messages(request, config, auth, health, dedup),
+        (Method::Post, "/v1/messages") => handle_messages(
+            request,
+            config,
+            auth,
+            health,
+            dedup,
+            active_requests,
+        ),
         _ => {
             let body = json!({ "type": "error", "error": { "type": "invalid_request_error", "message": format!("No route for {method} {path}") } });
             json_response(request, 404, &body);
@@ -663,16 +709,9 @@ fn sse_event(event: &str, data: &Value) -> String {
 ///
 /// Claude Code 若只收到 error + message_stop、没有 message_delta，
 /// 会以 `stop_reason=null` + `result_type=user` 报 `[ede_diagnostic]`。
-/// 这里补齐文本错误块与 message_delta，让客户端能正常结束本轮。
+/// 这里把错误表示成普通文本块后正常 message_delta/message_stop 收尾。
+/// `error` SSE 是终端事件，不能先发送它再继续补文本或 message_stop。
 fn finish_sse_after_error(mut send: impl FnMut(String), message: &str) {
-    send(sse_event(
-        "error",
-        &json!({
-            "type": "error",
-            "error": { "type": "api_error", "message": message },
-        }),
-    ));
-
     let error_text = if message.trim().is_empty() {
         "API Error: upstream request failed".to_string()
     } else if message.trim().starts_with("API Error:") {
@@ -721,23 +760,16 @@ struct ChannelReader {
     current: Vec<u8>,
     pos: usize,
     eof: bool,
-    /// 客户端断开信号：连接关闭导致本 reader 被丢弃时置位（通知 producer/心跳停止）。
+    /// 只表示下游连接不可再写；不得参与 dedup 的 producer 终态转换。
     client_gone: Option<Arc<AtomicBool>>,
-    /// 释放 dedup 条目所需引用：断开时立即 mark_failed，避免同 body 请求永久 429。
-    dedup_gone: Option<Arc<DedupStore>>,
-    entry_gone: Option<Arc<DedupEntry>>,
 }
 
 impl Drop for ChannelReader {
     fn drop(&mut self) {
-        // 客户端连接关闭（正常 eof 或异常断开）：通知 producer 停止发送，
-        // 并把同 body 去重条目标记为 failed——否则条目停在 InFlight，
-        // 后续同 body 请求会永久 429（DedupLookup::Busy 等待后仍 429）。
+        // 正常 EOF 和客户端断开都会 Drop reader。这里只停止向下游 tx 写入；producer 继续读完
+        // 上游并缓冲，随后独占 InFlight -> Completed/Failed。
         if let Some(gone) = &self.client_gone {
-            gone.store(true, Ordering::Relaxed);
-        }
-        if let (Some(dedup), Some(entry)) = (&self.dedup_gone, &self.entry_gone) {
-            dedup.mark_failed(entry);
+            gone.store(true, Ordering::Release);
         }
     }
 }
@@ -771,7 +803,6 @@ impl Read for ChannelReader {
         }
     }
 }
-
 fn map_kiro_stop_reason(stop_reason: &str) -> String {
     match stop_reason {
         "TOOL_USE" => "tool_use".to_string(),
@@ -909,54 +940,82 @@ fn close_thinking_block_sse(
     *thinking_started = false;
 }
 
-fn emit_tool_use_start_sse(index: usize, tool_id: &str, name: &str, mut send: impl FnMut(String)) {
-    send(sse_event(
-        "content_block_start",
-        &json!({
-            "type": "content_block_start",
-            "index": index,
-            "content_block": { "type": "tool_use", "id": tool_id, "name": name, "input": {} },
-        }),
-    ));
+#[derive(Debug)]
+struct NativeToolBlock {
+    id: String,
+    name: String,
+    input_json: String,
+    object_input: Option<Value>,
+    open: bool,
 }
 
-/// 决定是否把原生 toolUseEvent 当作 tool_use 块转发，并返回其 block index。
-/// name="" 是残缺事件：返回 None（不转发），避免 Claude Code 收到空名 tool_use 内容块
-/// 而把它判为「空 assistant 回合」（报 ede_diagnostic、并让 stop_reason 误认为 tool_use）。
-fn emit_native_tool_start(
-    tool_id: &str,
-    name: &str,
-    block_counter: &mut usize,
-    send: impl FnMut(String),
-) -> Option<usize> {
-    if name.is_empty() {
+impl NativeToolBlock {
+    fn finish(&mut self) -> Option<Value> {
+        self.open = false;
+        let input = if let Some(value) = self.object_input.clone() {
+            value
+        } else if self.input_json.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str::<Value>(&self.input_json).ok()?
+        };
+        if !input.is_object() {
+            return None;
+        }
+        Some(json!({
+            "type": "tool_use",
+            "id": self.id,
+            "name": self.name,
+            "input": input,
+        }))
+    }
+}
+
+#[derive(Debug)]
+enum NativeToolUpdate {
+    Pending,
+    Complete(Value),
+    Invalid,
+}
+
+fn new_native_tool_block(tool_id: &str, name: &str) -> Option<NativeToolBlock> {
+    let id = tool_id.trim();
+    let name = name.trim();
+    if id.is_empty() || name.is_empty() {
         return None;
     }
-    let index = *block_counter;
-    *block_counter += 1;
-    emit_tool_use_start_sse(index, tool_id, name, send);
-    Some(index)
+    Some(NativeToolBlock {
+        id: id.to_string(),
+        name: name.to_string(),
+        input_json: String::new(),
+        object_input: None,
+        open: true,
+    })
 }
 
-fn emit_tool_use_input_delta_sse(index: usize, partial_json: &str, mut send: impl FnMut(String)) {
-    if partial_json.is_empty() {
-        return;
+/// 在代理内累计完整工具输入；只有最终 JSON 是对象时才返回完整 tool_use 块。
+/// 这样残缺 JSON、迟到 delta 和重复 stop 永远不会泄漏给 Claude Code。
+fn update_native_tool(
+    block: &mut NativeToolBlock,
+    input: Option<&Value>,
+    is_stop: bool,
+) -> NativeToolUpdate {
+    if !block.open {
+        return NativeToolUpdate::Pending;
     }
-    send(sse_event(
-        "content_block_delta",
-        &json!({
-            "type": "content_block_delta",
-            "index": index,
-            "delta": { "type": "input_json_delta", "partial_json": partial_json },
-        }),
-    ));
-}
+    match input {
+        Some(Value::String(chunk)) if !chunk.is_empty() => block.input_json.push_str(chunk),
+        Some(value) if value.is_object() => block.object_input = Some(value.clone()),
+        _ => {}
+    }
+    if !is_stop {
+        return NativeToolUpdate::Pending;
+    }
 
-fn emit_tool_use_stop_sse(index: usize, mut send: impl FnMut(String)) {
-    send(sse_event(
-        "content_block_stop",
-        &json!({ "type": "content_block_stop", "index": index }),
-    ));
+    match block.finish() {
+        Some(value) => NativeToolUpdate::Complete(value),
+        None => NativeToolUpdate::Invalid,
+    }
 }
 
 fn emit_fallback_text_block_sse(
@@ -1002,9 +1061,11 @@ fn pipe_kiro_body_to_anthropic_sse(
     let mut thinking_signature: Option<String> = None;
     let mut saw_native_tool = false;
     let mut emitted_tool_use = false;
+    let mut invalid_native_tool = false;
     let mut block_counter = 0usize;
-    // toolUseId -> (name, index, open)
-    let mut native_tool_blocks: HashMap<String, (String, usize, bool)> = HashMap::new();
+    let mut native_tool_blocks: HashMap<String, NativeToolBlock> = HashMap::new();
+    let mut native_tool_order: Vec<String> = Vec::new();
+    let mut completed_native_tools: HashMap<String, Value> = HashMap::new();
     let mut stop_reason = "end_turn".to_string();
     let mut protocol_guard = ProtocolTextGuard::default();
     // 请求声明了 tools 时才恢复文本中泄漏的 SDK tool_use，避免普通对话里的 JSON 示例被执行。
@@ -1015,15 +1076,8 @@ fn pipe_kiro_body_to_anthropic_sse(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                // 已 message_start：必须补 message_delta，否则 Claude Code 报 ede_diagnostic
+                // 已 message_start：用文本/message_delta 正常收尾；不能先发终端 error 再补事件。
                 let msg = format!("读取 Kiro 流失败: {e}");
-                send(sse_event(
-                    "error",
-                    &json!({
-                        "type": "error",
-                        "error": { "type": "api_error", "message": msg },
-                    }),
-                ));
                 let had_assistant_content =
                     text_started || thinking_started || emitted_tool_use || !full_text.is_empty();
                 close_thinking_block_sse(
@@ -1039,11 +1093,8 @@ fn pipe_kiro_body_to_anthropic_sse(
                         &json!({ "type": "content_block_stop", "index": index }),
                     ));
                 }
-                for (_id, (_name, index, open)) in native_tool_blocks.iter_mut() {
-                    if *open {
-                        emit_tool_use_stop_sse(*index, &mut send);
-                        *open = false;
-                    }
+                for block in native_tool_blocks.values_mut() {
+                    block.open = false;
                 }
                 // 若本轮尚未产出任何助手内容，补一条 API Error 文本，避免 result_type=user
                 if !had_assistant_content {
@@ -1144,45 +1195,31 @@ fn pipe_kiro_body_to_anthropic_sse(
                             text_block_index = None;
                             text_started = false;
                         }
-                        // 原生 toolUseEvent 必须带上非空 name 才能当作 tool_use 块转发；
-                        // name="" 是残缺事件，跳过并交由文本/收尾兜底（name 到得晚时，后续
-                        // 同名事件仍会走 else-if 分支补上），避免 Claude Code 收到空名
-                        // tool_use 内容块而判为「空 assistant 回合」（报 ede_diagnostic）。
-                        let Some(index) =
-                            emit_native_tool_start(&tool_id, &name, &mut block_counter, &mut send)
-                        else {
+                        let Some(block) = new_native_tool_block(&tool_id, &name) else {
                             continue;
                         };
-                        native_tool_blocks.insert(tool_id.clone(), (name.clone(), index, true));
+                        native_tool_order.push(tool_id.clone());
+                        native_tool_blocks.insert(tool_id.clone(), block);
                         saw_native_tool = true;
-                        emitted_tool_use = true;
-                        stop_reason = "tool_use".to_string();
-                    } else if let Some(entry) = native_tool_blocks.get_mut(&tool_id) {
-                        if entry.0.is_empty() && !name.is_empty() {
-                            entry.0 = name;
-                        }
                     }
 
-                    let index = native_tool_blocks.get(&tool_id).map(|e| e.1).unwrap_or(0);
-                    match event.payload.get("input") {
-                        Some(Value::String(chunk)) if !chunk.is_empty() => {
-                            emit_tool_use_input_delta_sse(index, chunk, &mut send);
-                        }
-                        Some(value) if value.is_object() => {
-                            emit_tool_use_input_delta_sse(index, &value.to_string(), &mut send);
-                        }
-                        _ => {}
-                    }
                     let is_stop = event
                         .payload
                         .get("stop")
                         .and_then(|v| v.as_bool())
                         .unwrap_or(false);
-                    if is_stop {
-                        emit_tool_use_stop_sse(index, &mut send);
-                        if let Some(entry) = native_tool_blocks.get_mut(&tool_id) {
-                            entry.2 = false;
+                    let Some(block) = native_tool_blocks.get_mut(&tool_id) else {
+                        continue;
+                    };
+                    if block.name.is_empty() && !name.is_empty() {
+                        block.name = name;
+                    }
+                    match update_native_tool(block, event.payload.get("input"), is_stop) {
+                        NativeToolUpdate::Pending => {}
+                        NativeToolUpdate::Complete(tool) => {
+                            completed_native_tools.insert(tool_id.clone(), tool);
                         }
+                        NativeToolUpdate::Invalid => invalid_native_tool = true,
                     }
                 }
                 "metadataEvent" => {
@@ -1265,22 +1302,54 @@ fn pipe_kiro_body_to_anthropic_sse(
         }
     }
 
-    // 上游可能省略 toolUseEvent.stop；收尾时补 content_block_stop
-    for (_id, (_name, index, open)) in native_tool_blocks.iter_mut() {
-        if *open {
-            emit_tool_use_stop_sse(*index, &mut send);
-            *open = false;
+    // 上游可能省略 toolUseEvent.stop；EOF 时仍需验证完整 JSON，不能把半截 input 当工具调用。
+    for tool_id in &native_tool_order {
+        let Some(block) = native_tool_blocks.get_mut(tool_id) else {
+            invalid_native_tool = true;
+            continue;
+        };
+        if block.open {
+            match block.finish() {
+                Some(tool) => {
+                    completed_native_tools.insert(tool_id.clone(), tool);
+                }
+                None => invalid_native_tool = true,
+            }
+        }
+    }
+
+    // 原生工具整轮均合法后才按首次出现顺序向 Claude Code 发出，避免部分合法、
+    // 部分残缺的混合流，也避免 HashMap/完成时序导致工具块乱序。
+    let ordered_native_tools = native_tool_order
+        .iter()
+        .filter_map(|tool_id| completed_native_tools.get(tool_id).cloned())
+        .collect::<Vec<_>>();
+    if saw_native_tool
+        && !invalid_native_tool
+        && ordered_native_tools.len() == native_tool_order.len()
+        && !ordered_native_tools.is_empty()
+    {
+        let mut out = String::new();
+        emit_tool_blocks_sse(&ordered_native_tools, &mut block_counter, &mut out);
+        if !out.is_empty() {
+            send(out);
+            emitted_tool_use = true;
+            stop_reason = "tool_use".to_string();
         }
     }
 
     let had_assistant_content =
         emitted_tool_use || text_started || text_block_index.is_some() || thinking_block_index.is_some();
 
-    let final_stop =
-        normalize_stop_reason(&stop_reason, emitted_tool_use, protocol_guard.detected());
-
-    // 无任何助手内容时必须补文本块，否则 Claude Code 会以 result_type=user 报 ede_diagnostic
-    if !had_assistant_content {
+    // 无效工具输入即使前面有思考/正文，也追加一条合法文本错误并以 end_turn 收尾。
+    if invalid_native_tool {
+        emit_fallback_text_block_sse(
+            &mut block_counter,
+            "API Error: model returned an incomplete tool call",
+            &mut send,
+        );
+        stop_reason = "end_turn".to_string();
+    } else if !had_assistant_content {
         let fallback = if stop_reason == "tool_use" {
             "API Error: upstream claimed tool_use but returned no tool call"
         } else if protocol_guard.detected() {
@@ -1290,6 +1359,9 @@ fn pipe_kiro_body_to_anthropic_sse(
         };
         emit_fallback_text_block_sse(&mut block_counter, fallback, &mut send);
     }
+
+    let final_stop =
+        normalize_stop_reason(&stop_reason, emitted_tool_use, protocol_guard.detected());
 
     send(sse_event(
         "message_delta",
@@ -1313,36 +1385,25 @@ fn respond_sse_stream_fetch(
     built: Value,
     has_tools: bool,
     health: Arc<ProxyHealth>,
-    dedup_key: Option<u64>,
+    entry: Option<Arc<DedupEntry>>,
     dedup: Arc<DedupStore>,
+    active_requests: Arc<AtomicUsize>,
 ) {
-    // 同 body 去重：已生成完（TTL 内）→ 直接重放，不再打 Kiro；仍在生成 → 429 让客户端稍后重试命中重放。
-    // 只在响应还没开始时判定，因此不会破坏「200 后不可重试」的流式语义。
-    if let Some(key) = dedup_key {
-        match dedup.lookup(key) {
-            DedupLookup::Replay(bytes) => {
-                return respond_replayed_sse(request, bytes);
-            }
-            DedupLookup::Busy => {
-                return error_response(
-                    request,
-                    429,
-                    "A request with the same body is already in progress; retry shortly.",
-                    "rate_limit_error",
-                );
-            }
-            DedupLookup::Miss => {}
+    // 只有真正会打 GenerateAssistantResponse 的 leader 才占用上游并发许可。
+    let Some(permit) = try_acquire_request(&active_requests, MAX_CONCURRENT_REQUESTS) else {
+        if let Some(entry) = &entry {
+            dedup.mark_failed(entry);
         }
-    }
-    // Miss：注册去重条目（可选，busy 降级时不再注册，避免覆盖原条目）
-    let entry = dedup_key.map(|key| dedup.register(key));
-    // 供 reader Drop 时释放去重条目（producer 闭包会 move 走 dedup/entry，需先 clone）
-    let dedup_for_reader = dedup.clone();
-    let reader_entry = entry.clone();
+        return error_response(
+            request,
+            429,
+            "Too many concurrent requests.",
+            "rate_limit_error",
+        );
+    };
 
     let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(16);
-    // 客户端断开信号：reader 被丢弃（连接关闭）时置位，通知 producer/心跳停止，
-    // 并立即释放 dedup 条目（否则同 body 请求会永久 429，见 ChannelReader::drop）。
+    // reader Drop 只停止下游写入；producer 仍完整消费上游并填满 dedup buffer。
     let client_gone = Arc::new(AtomicBool::new(false));
     // 心跳：producer 阻塞等 Kiro 首字节 / 事件间隙期间持续发 SSE 注释，防止连接空转被掐。
     let hb_tx = tx.clone();
@@ -1361,17 +1422,17 @@ fn respond_sse_stream_fetch(
     let eof_tx = tx.clone();
     let producer_gone = Arc::clone(&client_gone);
     let producer = thread::spawn(move || {
-        // 客户端断开（producer_gone 置位）后静默跳过发送：不再向已断开的连接写数据。
-        // 上游请求仍会读完（孤儿线程），但 handler 不被 join 卡住、dedup 条目已由
-        // ChannelReader::drop 释放，不会出现「同 body 永久 429」或线程堆积。
+        let _permit = permit;
+        // 即使客户端已断开也继续 append 完整缓冲；仅跳过对已关闭 tx 的写入。
         let mut send = |chunk: String| {
-            if producer_gone.load(Ordering::Relaxed) {
-                return;
+            if let Some(entry) = &entry {
+                dedup.append(entry, chunk.as_bytes());
             }
-            if let Some(e) = &entry {
-                dedup.append(e, chunk.as_bytes());
+            if !producer_gone.load(Ordering::Acquire)
+                && tx.send(chunk.into_bytes()).is_err()
+            {
+                producer_gone.store(true, Ordering::Release);
             }
-            let _ = tx.send(chunk.into_bytes());
         };
 
         send(sse_event(
@@ -1407,11 +1468,11 @@ fn respond_sse_stream_fetch(
                     "[stream] network_error={e} body={}",
                     truncate_for_log(&serde_json::to_string(&built).unwrap_or_default(), 2048)
                 ));
-                if let Some(e) = &entry {
-                    dedup.mark_failed(e);
-                }
-                // 已提前 message_start：不可只发 error + message_stop（会触发 ede_diagnostic）
+                // 已提前 message_start：以文本块正常收尾，再由 producer 发布 Failed。
                 finish_sse_after_error(&mut send, &e);
+                if let Some(entry) = &entry {
+                    dedup.mark_failed(entry);
+                }
                 let _ = eof_tx.send(Vec::new());
                 return;
             }
@@ -1420,9 +1481,6 @@ fn respond_sse_stream_fetch(
         let status = upstream.status();
         if !status.is_success() {
             health.record_failure();
-            if let Some(e) = &entry {
-                dedup.mark_failed(e);
-            }
             let bytes = upstream.bytes().unwrap_or_default();
             let text = String::from_utf8_lossy(&bytes).to_string();
             diag_log(&format!(
@@ -1439,6 +1497,9 @@ fn respond_sse_stream_fetch(
                 })
                 .unwrap_or(text);
             finish_sse_after_error(&mut send, &message);
+            if let Some(entry) = &entry {
+                dedup.mark_failed(entry);
+            }
             let _ = eof_tx.send(Vec::new());
             return;
         }
@@ -1463,10 +1524,7 @@ fn respond_sse_stream_fetch(
         current: Vec::new(),
         pos: 0,
         eof: false,
-        // 客户端断开（reader 被丢弃）时通知 producer 停止并释放 dedup 条目
         client_gone: Some(Arc::clone(&client_gone)),
-        dedup_gone: Some(dedup_for_reader),
-        entry_gone: reader_entry,
     };
     let mut headers = vec![
         Header::from_bytes("Content-Type", "text/event-stream; charset=utf-8").unwrap(),
@@ -1717,21 +1775,50 @@ fn handle_messages(
     auth: &Arc<Auth>,
     health: Arc<ProxyHealth>,
     dedup: Arc<DedupStore>,
+    active_requests: Arc<AtomicUsize>,
 ) {
     if !check_proxy_auth(&request, config) {
         return error_response(request, 401, "Invalid proxy API key.", "authentication_error");
-    }
-
-    // 检测到连续失败（Claude Code 重试风暴）时，先自检/恢复代理状态再继续服务，
-    // 避免重试请求带着失效凭据/过期 token 再白白打一次生成。恢复只碰认证/控制面，不扣 Credits。
-    if health.needs_preflight() {
-        health.run_preflight_recovery(auth);
     }
 
     let body = match read_json_body(&mut request) {
         Ok(body) => body,
         Err(error) => return respond_body_error(request, error),
     };
+    let is_stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // 在任何 Kiro 认证恢复、模型解析或 profile 发现前先原子去重。
+    // follower 因而既不占 GenerateAssistantResponse 许可，也不触发 Kiro 控制面/运行时请求。
+    let dedup_entry = if is_stream {
+        let key = DedupStore::fingerprint(&body);
+        match dedup.acquire(key) {
+            DedupAcquire::Leader(entry) => Some(entry),
+            DedupAcquire::Replay(bytes) => return respond_replayed_sse(request, bytes),
+            DedupAcquire::Failed => {
+                return error_response(
+                    request,
+                    502,
+                    "The in-progress request with the same body failed.",
+                    "api_error",
+                );
+            }
+            DedupAcquire::TimedOut => {
+                return error_response(
+                    request,
+                    504,
+                    "Timed out waiting for the in-progress request with the same body.",
+                    "api_error",
+                );
+            }
+        }
+    } else {
+        None
+    };
+
+    // 检测到连续失败（Claude Code 重试风暴）时，leader 再自检/恢复代理状态。
+    if health.needs_preflight() {
+        health.run_preflight_recovery(auth);
+    }
 
     let model = body.get("model").and_then(|v| v.as_str()).unwrap_or("");
     let kiro_model = resolve_kiro_model(auth, model, &config.default_model);
@@ -1739,6 +1826,9 @@ fn handle_messages(
         Ok(arn) => arn,
         Err(e) => {
             health.record_failure();
+            if let Some(entry) = &dedup_entry {
+                dedup.mark_failed(entry);
+            }
             return error_response(request, 502, &e, "api_error");
         }
     };
@@ -1752,13 +1842,17 @@ fn handle_messages(
     };
     let built = match build_result {
         Ok(built) => built,
-        Err(e) => return error_response(request, 400, &e, "invalid_request_error"),
+        Err(e) => {
+            if let Some(entry) = &dedup_entry {
+                dedup.mark_failed(entry);
+            }
+            return error_response(request, 400, &e, "invalid_request_error");
+        }
     };
 
     let id = format!("msg_{}", Uuid::new_v4().to_string().replace('-', ""));
     let response_model = if model.is_empty() { kiro_model.clone() } else { model.to_string() };
 
-    let is_stream = body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false);
     let has_tools = body
         .get("tools")
         .and_then(|v| v.as_array())
@@ -1766,8 +1860,6 @@ fn handle_messages(
 
     // 先发 SSE 头/message_start，再请求 Kiro；文本按节奏拆开，改善“整包突发”观感
     if is_stream {
-        // 去重仅对流式生成生效（Claude Code 的主路径）
-        let dedup_key = Some(DedupStore::fingerprint(&body));
         return respond_sse_stream_fetch(
             request,
             id,
@@ -1777,10 +1869,20 @@ fn handle_messages(
             built,
             has_tools,
             health,
-            dedup_key,
+            dedup_entry,
             dedup,
+            active_requests,
         );
     }
+
+    let Some(_permit) = try_acquire_request(&active_requests, MAX_CONCURRENT_REQUESTS) else {
+        return error_response(
+            request,
+            429,
+            "Too many concurrent requests.",
+            "rate_limit_error",
+        );
+    };
 
     let events = match call_kiro_generate(&auth.runtime, auth, config, &built) {
         Ok(events) => events,
@@ -1844,39 +1946,200 @@ mod tests {
     }
 
     #[test]
-    fn dedup_replays_completed_buffer_within_ttl() {
+    fn dedup_acquire_elects_exactly_one_concurrent_leader() {
+        use std::sync::Barrier;
+
+        let store = Arc::new(DedupStore::new());
+        let barrier = Arc::new(Barrier::new(16));
+        let leaders = Arc::new(AtomicUsize::new(0));
+        let replays = Arc::new(AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        for _ in 0..16 {
+            let store = Arc::clone(&store);
+            let barrier = Arc::clone(&barrier);
+            let leaders = Arc::clone(&leaders);
+            let replays = Arc::clone(&replays);
+            threads.push(thread::spawn(move || {
+                barrier.wait();
+                match store.acquire_with_limits(
+                    42,
+                    Duration::from_secs(1),
+                    Duration::from_secs(1),
+                ) {
+                    DedupAcquire::Leader(entry) => {
+                        leaders.fetch_add(1, Ordering::SeqCst);
+                        thread::sleep(Duration::from_millis(40));
+                        store.append(&entry, b"complete-sse");
+                        assert!(store.mark_completed(&entry));
+                    }
+                    DedupAcquire::Replay(bytes) => {
+                        assert_eq!(bytes, b"complete-sse");
+                        replays.fetch_add(1, Ordering::SeqCst);
+                    }
+                    DedupAcquire::Failed => panic!("leader unexpectedly failed"),
+                    DedupAcquire::TimedOut => panic!("follower unexpectedly timed out"),
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().unwrap();
+        }
+        assert_eq!(leaders.load(Ordering::SeqCst), 1);
+        assert_eq!(replays.load(Ordering::SeqCst), 15);
+    }
+
+    #[test]
+    fn dedup_follower_waits_past_old_short_window_and_replays() {
+        assert!(DEDUP_FOLLOWER_WAIT > Duration::from_secs(5));
+        let store = Arc::new(DedupStore::new());
+        let entry = match store.acquire_with_limits(
+            7,
+            Duration::from_millis(400),
+            Duration::from_secs(1),
+        ) {
+            DedupAcquire::Leader(entry) => entry,
+            other => panic!("expected leader, got {other:?}"),
+        };
+        let follower_store = Arc::clone(&store);
+        let started = Instant::now();
+        let follower = thread::spawn(move || {
+            follower_store.acquire_with_limits(
+                7,
+                Duration::from_millis(400),
+                Duration::from_secs(1),
+            )
+        });
+        thread::sleep(Duration::from_millis(80));
+        store.append(&entry, b"late-complete");
+        assert!(store.mark_completed(&entry));
+        match follower.join().unwrap() {
+            DedupAcquire::Replay(bytes) => assert_eq!(bytes, b"late-complete"),
+            other => panic!("expected replay, got {other:?}"),
+        }
+        assert!(started.elapsed() >= Duration::from_millis(60));
+    }
+
+    #[test]
+    fn dedup_ttl_starts_when_producer_completes() {
         let store = DedupStore::new();
-        let entry = store.register(42);
-        store.append(&entry, b"event: message_start\ndata: {}\n\n".as_ref());
-        store.append(&entry, b"event: message_stop\ndata: {}\n\n".as_ref());
-        store.mark_completed(&entry);
-        match store.lookup(42) {
-            DedupLookup::Replay(bytes) => {
-                let text = String::from_utf8_lossy(&bytes);
-                assert!(text.contains("message_start"));
-                assert!(text.contains("message_stop"));
-            }
-            other => panic!("expected Replay, got {other:?}"),
+        let entry = match store.acquire_with_limits(
+            8,
+            Duration::from_millis(100),
+            Duration::from_millis(30),
+        ) {
+            DedupAcquire::Leader(entry) => entry,
+            other => panic!("expected leader, got {other:?}"),
+        };
+        thread::sleep(Duration::from_millis(45));
+        store.append(&entry, b"finished");
+        assert!(store.mark_completed(&entry));
+        assert!(matches!(
+            store.acquire_with_limits(
+                8,
+                Duration::from_millis(100),
+                Duration::from_millis(30)
+            ),
+            DedupAcquire::Replay(_)
+        ));
+        thread::sleep(Duration::from_millis(40));
+        let replacement = match store.acquire_with_limits(
+            8,
+            Duration::from_millis(100),
+            Duration::from_millis(30),
+        ) {
+            DedupAcquire::Leader(entry) => entry,
+            other => panic!("expected new leader after TTL, got {other:?}"),
+        };
+        assert!(store.mark_failed(&replacement));
+    }
+
+    #[test]
+    fn normal_reader_eof_cannot_overwrite_completed_entry() {
+        let store = DedupStore::new();
+        let entry = match store.acquire(9) {
+            DedupAcquire::Leader(entry) => entry,
+            other => panic!("expected leader, got {other:?}"),
+        };
+        store.append(&entry, b"event: message_stop\n\n");
+        assert!(store.mark_completed(&entry));
+
+        let (tx, rx) = mpsc::channel();
+        tx.send(Vec::new()).unwrap();
+        let gone = Arc::new(AtomicBool::new(false));
+        let mut reader = ChannelReader {
+            rx,
+            current: Vec::new(),
+            pos: 0,
+            eof: false,
+            client_gone: Some(Arc::clone(&gone)),
+        };
+        let mut byte = [0u8; 1];
+        assert_eq!(reader.read(&mut byte).unwrap(), 0);
+        drop(reader);
+        assert!(gone.load(Ordering::Acquire));
+        assert!(matches!(store.acquire(9), DedupAcquire::Replay(_)));
+    }
+
+    #[test]
+    fn disconnected_client_still_gets_one_complete_replay_buffer() {
+        let store = DedupStore::new();
+        let entry = match store.acquire(10) {
+            DedupAcquire::Leader(entry) => entry,
+            other => panic!("expected leader, got {other:?}"),
+        };
+        store.append(&entry, b"start|");
+        let (_tx, rx) = mpsc::channel();
+        let gone = Arc::new(AtomicBool::new(false));
+        drop(ChannelReader {
+            rx,
+            current: Vec::new(),
+            pos: 0,
+            eof: false,
+            client_gone: Some(Arc::clone(&gone)),
+        });
+        assert!(gone.load(Ordering::Acquire));
+        store.append(&entry, b"delta|");
+        store.append(&entry, b"stop");
+        assert!(store.mark_completed(&entry));
+        assert!(!store.mark_failed(&entry));
+        match store.acquire(10) {
+            DedupAcquire::Replay(bytes) => assert_eq!(bytes, b"start|delta|stop"),
+            other => panic!("expected complete replay, got {other:?}"),
         }
     }
 
     #[test]
-    fn dedup_failed_entry_is_removed() {
-        let store = DedupStore::new();
-        let entry = store.register(7);
-        store.mark_failed(&entry);
-        assert!(matches!(store.lookup(7), DedupLookup::Miss));
-    }
-
-    #[test]
-    fn dedup_overflow_disables_replay() {
-        let store = DedupStore::new();
-        let entry = store.register(9);
+    fn dedup_overflow_blocks_followers_until_leader_finishes() {
+        let store = Arc::new(DedupStore::new());
+        let entry = match store.acquire(11) {
+            DedupAcquire::Leader(entry) => entry,
+            other => panic!("expected leader, got {other:?}"),
+        };
         store.append(&entry, vec![b'x'; DEDUP_BUFFER_CAP].as_ref());
-        // 越过上限后标记 overflow，不再继续缓冲
-        store.append(&entry, b"extra".as_ref());
-        store.mark_completed(&entry);
-        assert!(matches!(store.lookup(9), DedupLookup::Miss));
+        store.append(&entry, b"overflow");
+
+        let follower_store = Arc::clone(&store);
+        let (result_tx, result_rx) = mpsc::channel();
+        let follower = thread::spawn(move || {
+            let result = follower_store.acquire_with_limits(
+                11,
+                Duration::from_millis(500),
+                Duration::from_secs(1),
+            );
+            result_tx.send(result).unwrap();
+        });
+        assert!(result_rx.recv_timeout(Duration::from_millis(50)).is_err());
+        assert!(store.mark_completed(&entry));
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(500)).unwrap(),
+            DedupAcquire::Failed
+        ));
+        follower.join().unwrap();
+        let replacement = match store.acquire(11) {
+            DedupAcquire::Leader(entry) => entry,
+            other => panic!("a later request should become leader, got {other:?}"),
+        };
+        assert!(store.mark_failed(&replacement));
     }
 
     #[test]
@@ -1890,27 +2153,71 @@ mod tests {
 
     #[test]
     fn nameless_tool_use_event_is_not_emitted_as_block() {
-        // 空 name 的 toolUseEvent：残缺事件，不能当作 tool_use 块转发。
-        // 否则 Claude Code 会收到 name="" 的 tool_use 块而判为「空 assistant 回合」。
-        let mut out: Vec<String> = Vec::new();
-        let mut counter = 0usize;
-        let index = emit_native_tool_start("call_1", "", &mut counter, &mut |s| out.push(s));
-        assert_eq!(index, None);
-        assert_eq!(counter, 0);
-        assert!(out.is_empty(), "空名工具事件不应产出任何 SSE 内容块");
+        assert!(new_native_tool_block("call_1", "").is_none());
+        assert!(new_native_tool_block("", "Bash").is_none());
     }
 
     #[test]
-    fn named_tool_use_event_emits_named_block_and_bumps_counter() {
-        let mut out: Vec<String> = Vec::new();
-        let mut counter = 0usize;
-        let index = emit_native_tool_start("call_1", "Bash", &mut counter, &mut |s| out.push(s));
-        assert_eq!(index, Some(0));
-        assert_eq!(counter, 1);
-        let joined = out.join("");
-        assert!(joined.contains("content_block_start"));
-        assert!(joined.contains("\"name\":\"Bash\""));
-        assert!(!joined.contains("\"name\":\"\""));
+    fn complete_native_tool_buffers_until_valid_json_stop() {
+        let mut block = new_native_tool_block("call_1", "Bash").expect("valid tool");
+        assert!(matches!(
+            update_native_tool(&mut block, Some(&json!("{\"command\":")), false),
+            NativeToolUpdate::Pending
+        ));
+        match update_native_tool(&mut block, Some(&json!("\"ls\"}")), true) {
+            NativeToolUpdate::Complete(tool) => {
+                assert_eq!(tool["id"], "call_1");
+                assert_eq!(tool["name"], "Bash");
+                assert_eq!(tool["input"]["command"], "ls");
+            }
+            other => panic!("expected complete tool, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn closed_native_tool_ignores_late_delta_and_duplicate_stop() {
+        let mut block = new_native_tool_block("call_1", "Bash").expect("valid tool");
+        assert!(matches!(
+            update_native_tool(&mut block, Some(&json!("{\"command\":\"ls\"}")), true),
+            NativeToolUpdate::Complete(_)
+        ));
+        assert!(matches!(
+            update_native_tool(&mut block, Some(&json!("late")), false),
+            NativeToolUpdate::Pending
+        ));
+        assert!(matches!(
+            update_native_tool(&mut block, None, true),
+            NativeToolUpdate::Pending
+        ));
+    }
+
+    #[test]
+    fn invalid_native_tool_json_never_becomes_tool_use() {
+        let mut block = new_native_tool_block("call_bad", "Bash").expect("valid tool shell");
+        assert!(matches!(
+            update_native_tool(&mut block, Some(&json!("{\"command\":")), true),
+            NativeToolUpdate::Invalid
+        ));
+    }
+
+    #[test]
+    fn metadata_tool_use_without_complete_tool_downgrades_to_end_turn() {
+        let metadata_reason = map_kiro_stop_reason("TOOL_USE");
+        assert_eq!(
+            normalize_stop_reason(&metadata_reason, false, false),
+            "end_turn"
+        );
+    }
+
+    #[test]
+    fn streamed_error_is_text_before_normal_terminal_events() {
+        let mut out = String::new();
+        finish_sse_after_error(|chunk| out.push_str(&chunk), "upstream failed");
+        assert!(!out.contains("event: error"));
+        let text = out.find("event: content_block_start").unwrap();
+        let delta = out.find("event: message_delta").unwrap();
+        let stop = out.find("event: message_stop").unwrap();
+        assert!(text < delta && delta < stop);
     }
 
     #[test]
@@ -1975,8 +2282,6 @@ mod tests {
             pos: 0,
             eof: false,
             client_gone: None,
-            dedup_gone: None,
-            entry_gone: None,
         };
         let mut buf = String::new();
         reader.read_to_string(&mut buf).unwrap();
@@ -1984,17 +2289,15 @@ mod tests {
     }
 
     #[test]
-    fn channel_reader_drop_releases_dedup_entry_and_sets_client_gone() {
-        // 模拟客户端断开：reader 被丢弃时，应置 client_gone 并把同 body 去重条目标记为 failed
-        let dedup = Arc::new(DedupStore::new());
+    fn channel_reader_drop_only_sets_client_gone() {
+        let dedup = DedupStore::new();
         let key = 42u64;
-        let entry = dedup.register(key);
-        assert!(matches!(
-            entry.status.lock().unwrap().clone(),
-            DedupStatus::InFlight
-        ));
+        let entry = match dedup.acquire(key) {
+            DedupAcquire::Leader(entry) => entry,
+            other => panic!("expected leader, got {other:?}"),
+        };
 
-        let (tx, rx) = mpsc::sync_channel::<Vec<u8>>(4);
+        let (_tx, rx) = mpsc::sync_channel::<Vec<u8>>(4);
         let client_gone = Arc::new(AtomicBool::new(false));
         let reader = ChannelReader {
             rx,
@@ -2002,17 +2305,16 @@ mod tests {
             pos: 0,
             eof: false,
             client_gone: Some(Arc::clone(&client_gone)),
-            dedup_gone: Some(Arc::clone(&dedup)),
-            entry_gone: Some(Arc::clone(&entry)),
         };
         drop(reader);
 
-        // 断开信号置位；去重条目已释放（Failed → lookup 视为 Miss，不再 429）
-        assert!(client_gone.load(Ordering::Relaxed));
-        assert!(matches!(
-            dedup.lookup(key),
-            DedupLookup::Miss
-        ));
+        assert!(client_gone.load(Ordering::Acquire));
+        let state = entry.state.lock().unwrap();
+        assert!(matches!(&state.status, DedupStatus::InFlight));
+        drop(state);
+        dedup.append(&entry, b"complete-after-disconnect");
+        assert!(dedup.mark_completed(&entry));
+        assert!(matches!(dedup.acquire(key), DedupAcquire::Replay(_)));
     }
 
     /// 临时手工验证（非 CI）：使用真实 Kiro SSO 凭据走一遍完整代理链路。

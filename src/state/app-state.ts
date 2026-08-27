@@ -174,7 +174,6 @@ export const appState = {
   /** askKey(sessionId|'pending') → 问卡 Enter 提交回调；并发多卡互不覆盖 */
   activeQuestionEnterHandlers: new Map<string, () => boolean>(),
   streamRefreshBySession: new Map<string, StreamRefreshState>(),
-  answerScroller: null as ScrollController | null,
   thinkingScrollers: new Map<string, ScrollController>(),
   activeInteractionPanel: null as ActiveInteractionPanel | null,
   /** tail-N 消息窗口：conversationInstanceKey → 可见消息条数（「加载更早」按会话独立累计，切换不丢失） */

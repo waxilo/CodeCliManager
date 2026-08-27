@@ -2,6 +2,7 @@ import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { appState } from '../../state';
 import { handleMessageChunk } from './streaming';
 import { refreshChatContent, resetChatRenderKey } from './refresh';
+import { renderStreamingBlocksChunks } from './render-chat';
 
 const SID = 's1';
 
@@ -9,7 +10,14 @@ function setup(): void {
   document.body.innerHTML = `
     <div class="main-content">
       <div class="main-topbar"><div class="main-topbar-main"></div></div>
-      <div id="message-list"></div>
+      <div class="message-list-shell">
+        <div id="message-list">
+          <div class="message-content-layer" data-chat-content>
+            <div class="chat-bottom-sentinel" data-chat-bottom></div>
+          </div>
+        </div>
+        <button class="scroll-to-bottom-btn" type="button"></button>
+      </div>
     </div>`;
   appState.conversations = [{ id: SID, title: 't', platform: 'cli', messages: [], created_at: 0, updated_at: 0 }];
   appState.activeConversationId = SID;
@@ -34,8 +42,8 @@ function chunk(kind: string, content = ''): void {
 
 function domSequence(): string[] {
   refreshChatContent();
-  const list = document.querySelector<HTMLElement>('#message-list')!;
-  return [...list.children].map((el) => {
+  const content = document.querySelector<HTMLElement>('[data-chat-content]')!;
+  return [...content.children].map((el) => {
     const sid = el.getAttribute('data-stream-id') || '';
     if (sid.startsWith('streaming-block-')) return `block:${sid}`;
     if (sid.startsWith('live-tool-')) return `tool:${sid.replace('live-tool-', '')}`;
@@ -50,6 +58,22 @@ function domSequence(): string[] {
  * 覆盖 tool_use_end / task_started 覆盖状态时丢失 blockIndexAtStart 的回归。
  */
 describe('真实事件路径的流式顺序', () => {
+  it('工具锚点使相邻段拆分时仍保留创建时的永久 segmentId', () => {
+    const blocks = [
+      { segmentId: 'streaming-block-7', type: 'text' as const, content: 'A', finalized: false },
+      { segmentId: 'streaming-block-8', type: 'text' as const, content: 'B', finalized: false },
+    ];
+
+    const merged = renderStreamingBlocksChunks(blocks);
+    expect(merged.map((chunk) => chunk.id)).toEqual(['streaming-block-7']);
+
+    const split = renderStreamingBlocksChunks(blocks, new Set([0]));
+    expect(split.map((chunk) => chunk.id)).toEqual([
+      'streaming-block-7',
+      'streaming-block-8',
+    ]);
+  });
+
   beforeEach(() => { setup(); vi.restoreAllMocks(); });
 
   it('kiro 场景：tool_use_start 先于 thinking_start → 工具卡在最前，思考块在后', () => {

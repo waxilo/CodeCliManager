@@ -297,6 +297,24 @@ describe('错误提示友好化 parseErrorHint', () => {
     expect(res.hint).toContain('切换模型');
   });
 
+  it('结构化 kiro_invalid_tool_stream → 提示工具调用不完整并给出重试建议', () => {
+    const res = parseErrorHint(
+      '[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use',
+      'kiro_invalid_tool_stream',
+    );
+    expect(res.isKnown).toBe(true);
+    expect(res.hint).toContain('工具调用不完整');
+    expect(res.hint).toContain('重试');
+  });
+
+  it('旧版 duplicate 429 文本 → 中文等待提示', () => {
+    const res = parseErrorHint(
+      'API Error: Request rejected (429) · A request with the same body is already in progress; retry shortly.',
+    );
+    expect(res.isKnown).toBe(true);
+    expect(res.hint).toContain('上一条相同请求');
+  });
+
   it('[ede_diagnostic] → 提示本轮没有生成有效内容', () => {
     const res = parseErrorHint(
       '[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=null',

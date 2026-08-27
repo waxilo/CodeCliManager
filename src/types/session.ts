@@ -3,6 +3,14 @@ import type { FileRef, Message, SessionUsage } from './conversation';
 export interface SessionErrorPayload {
   conversationId: string | null;
   error: string;
+  /** 结构化错误分类；旧后端省略时继续按 error 文本兼容解析。 */
+  code?: string | null;
+  /** true 表示后端仍在自动恢复，只更新状态条，不应落永久错误消息。 */
+  recoverable?: boolean;
+  /** true 表示衍生诊断，仅供日志，不应单独生成错误卡。 */
+  technical?: boolean;
+  /** 技术诊断详情；主提示保持友好，仅在折叠详情中展示。 */
+  detail?: string | null;
 }
 
 export interface SessionEventPayload {
@@ -122,6 +130,8 @@ export interface SessionUsageUpdatedPayload {
 }
 
 export interface StreamBlock {
+  /** 创建时分配的永久段 ID；合并/拆分和工具插入不得改变。 */
+  segmentId?: string;
   type: 'thinking' | 'text';
   content: string;
   /** text 块结束后才执行完整 Markdown 渲染；thinking 块结束后展示「思考过程」标题。
@@ -134,6 +144,8 @@ export interface StreamBlock {
 export interface StreamingState {
   blocks: StreamBlock[];
   thinkingDone: boolean;
+  /** 下一条流式段的永久序号；与当前合并结果索引无关。 */
+  nextSegmentIndex?: number;
   /** 当前正在追加内容的块索引 */
   currentBlockIdx: number;
 }

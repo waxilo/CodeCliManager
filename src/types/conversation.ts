@@ -44,6 +44,10 @@ export interface Message {
   timestamp: number;
   refs?: FileRef[];
   toolData?: ToolMessageData;
+  /** 结构化错误分类；仅 error 消息使用。 */
+  errorCode?: string;
+  /** 后端技术诊断原文；主提示保持友好，详情中仍可查看。 */
+  errorDetail?: string;
 }
 
 /** 会话累计 token / 成本用量 */

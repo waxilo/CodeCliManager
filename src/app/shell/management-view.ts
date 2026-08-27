@@ -26,7 +26,6 @@ import { bindClaudeUpdatePopoverEvents } from '../../features/updates/claude-upd
 import { syncRunningSubagentsUI } from '../../features/chat/subagent-progress';
 import { remountActiveInteractionPanel } from '../../features/permissions';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
-import { refreshStreamingUI } from '../../features/chat/streaming';
 import {
   resetChatRenderKey,
   getLastCommittedChatRenderKey,
@@ -325,10 +324,6 @@ export function exitManagementView(): boolean {
     // → 指纹不等 → 键控 diff 补上 stash 期间新增的块/工具卡（复用节点，非 innerHTML）；
     // 完全无变化 → 指纹相等 → refreshChatContent 早退，零成本。
     scheduleUiRefresh({ chat: true, sidebar: true });
-    const sid = appState.activeConversationId;
-    if (sid && appState.streamingBySession.has(sid)) {
-      refreshStreamingUI(sid);
-    }
   }
   return true;
 }

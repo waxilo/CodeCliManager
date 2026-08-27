@@ -4,12 +4,12 @@ import { invalidateFileCache, restoreComposerDraft, stashComposerDraft } from '.
 import { isActiveConversationRunning, setSendButtonLoading } from '../chat/session-context';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshConversationFromBackend } from './load';
-import { scheduleUiRefresh, afterUiRefresh } from '../../ui';
+import { scheduleUiRefresh } from '../../ui';
 import { conversationInstanceKey } from './normalize';
 import { dismissMcpViewState } from '../mcp/mount';
 import { dismissSettingsViewState } from '../settings/mount';
 import { dismissKiroViewState } from '../kiro/mount';
-import { renderChatAreaHtml } from '../chat/render-chat';
+import { renderChatAreaHtml, renderMessageListShellHtml } from '../chat/render-chat';
 import { syncQueuedPromptsUI } from '../chat/input-composer';
 import { clearInteractionHostUi, remountActiveInteractionPanel } from '../permissions/interaction-panel';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
@@ -40,24 +40,67 @@ function syncConversationActiveHighlight(id: string, sourcePath: string | null):
 }
 
 /**
- * 空状态 → 会话：只补齐主区 topbar + message-list 壳，内容由 refreshChatContent 填充。
+ * 空状态 → 会话：只补齐主区 topbar + message-list-shell 壳，内容由 refreshChatContent 填充。
  * @returns 是否已具备可刷新的消息列表壳
  */
 export function ensureChatMessageShell(): boolean {
-  if (document.querySelector('#message-list')) return true;
+  const existingList = document.querySelector<HTMLElement>('#message-list');
+  if (
+    existingList?.matches('.message-list-shell > #message-list') &&
+    existingList.querySelector(':scope > [data-chat-content] > [data-chat-bottom]') &&
+    existingList.parentElement?.querySelector(':scope > .scroll-to-bottom-btn')
+  ) {
+    return true;
+  }
   const main = document.querySelector('.main-content');
   if (!main || main.classList.contains('is-api-config') || main.classList.contains('is-mcp')) {
     return false;
   }
+  if (existingList) {
+    let listShell = existingList.closest<HTMLElement>('.message-list-shell');
+    if (!listShell) {
+      listShell = document.createElement('div');
+      listShell.className = 'message-list-shell';
+      existingList.replaceWith(listShell);
+      listShell.appendChild(existingList);
+    }
+
+    const legacyButton = existingList.querySelector<HTMLElement>(':scope > .scroll-to-bottom-btn');
+    legacyButton?.remove();
+    let content = existingList.querySelector<HTMLElement>(':scope > [data-chat-content]');
+    if (!content) {
+      content = document.createElement('div');
+      content.className = 'message-content-layer';
+      content.dataset.chatContent = '';
+      const children = [...existingList.children];
+      for (const child of children) content.appendChild(child);
+      existingList.appendChild(content);
+    }
+    if (!content.querySelector(':scope > [data-chat-bottom]')) {
+      const sentinel = document.createElement('div');
+      sentinel.className = 'chat-bottom-sentinel';
+      sentinel.dataset.chatBottom = '';
+      sentinel.setAttribute('aria-hidden', 'true');
+      content.appendChild(sentinel);
+    }
+    existingList.tabIndex = 0;
+    if (!listShell.querySelector(':scope > .scroll-to-bottom-btn')) {
+      const template = document.createElement('template');
+      template.innerHTML = renderMessageListShellHtml();
+      const button = template.content.querySelector<HTMLElement>('.scroll-to-bottom-btn');
+      if (button) listShell.appendChild(button);
+    }
+    return true;
+  }
 
   // 复用全量渲染的聊天区结构（shellOnly 只取壳，消息内容由 refreshChatContent 填充）。
-  // 顺序恒为 drop-zone-overlay → main-topbar → #message-list → input-area，
+  // 顺序恒为 drop-zone-overlay → main-topbar → message-list-shell → input-area，
   // 增量路径与全量渲染共用同一份结构定义，杜绝漂移。
   const shell = document.createElement('div');
   shell.innerHTML = renderChatAreaHtml({ shellOnly: true });
   const topbar = shell.querySelector<HTMLElement>('.main-topbar');
-  const list = shell.querySelector<HTMLElement>('#message-list');
-  if (!topbar || !list) return false;
+  const listShell = shell.querySelector<HTMLElement>('.message-list-shell');
+  if (!topbar || !listShell?.querySelector('#message-list')) return false;
 
   const composer = main.querySelector('.input-area');
   const empty = main.querySelector('.empty-chat');
@@ -65,13 +108,13 @@ export function ensureChatMessageShell(): boolean {
   main.querySelector('.main-topbar')?.remove();
 
   if (empty) {
-    empty.replaceWith(topbar, list);
+    empty.replaceWith(topbar, listShell);
   } else if (composer) {
     main.insertBefore(topbar, composer);
-    main.insertBefore(list, composer);
+    main.insertBefore(listShell, composer);
   } else {
     main.appendChild(topbar);
-    main.appendChild(list);
+    main.appendChild(listShell);
   }
   return true;
 }
@@ -98,12 +141,8 @@ function finishSelectUi(id: string): void {
   // active 高亮已由 syncConversationActiveHighlight 单独处理；运行态同步由 session-events 驱动。
   syncInteractionPanelForConversation(id);
 
-  // 聊天刷新已改走中央调度器（RAF 合并）：置底放到 flush 之后执行，
-  // 避免 setTimeout(0) 先于重建运行导致滚动到旧 DOM。
-  afterUiRefresh(() => {
-    if (appState.activeConversationId !== id) return;
-    appState.answerScroller?.scrollToBottom();
-  });
+  // 会话滚动状态由 ChatScrollCoordinator 按 conversation instance 独立恢复；
+  // 切换会话不再无条件置底覆盖用户的阅读位置。
 }
 
 /** 用当前缓存立刻画出选中会话（Win 上避免整页 render） */

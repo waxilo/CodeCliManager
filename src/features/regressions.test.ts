@@ -296,7 +296,80 @@ describe('新建会话后侧边栏刷新', () => {
     const errors = conv.messages.filter((m) => m.role === 'error');
     expect(errors).toHaveLength(1);
     expect(errors[0].content).toContain('API Error: 502');
-    expect(errors[0].content).toContain('[ede_diagnostic]');
+    expect(errors[0].content).not.toContain('[ede_diagnostic]');
+    expect(errors[0].errorDetail).not.toContain('[ede_diagnostic]');
+  });
+
+  it('可恢复的 single-flight 等待只更新状态条，不清运行态或写错误卡', () => {
+    appState.activeConversationId = 'conv-recover';
+    appState.conversations = [
+      {
+        id: 'conv-recover',
+        title: 't',
+        messages: [],
+        platform: 'claude',
+        created_at: 1,
+        updated_at: 1,
+      },
+    ];
+    appState.runningSessions.add('conv-recover');
+
+    handleSessionError({
+      conversationId: 'conv-recover',
+      error: 'duplicate request is waiting',
+      code: 'singleflight_wait_timeout',
+      recoverable: true,
+    });
+
+    expect(appState.runningSessions.has('conv-recover')).toBe(true);
+    expect(appState.conversations[0].messages).toHaveLength(0);
+    expect(appState.runStatusOverride.get('conv-recover')).toContain('等待上一请求');
+  });
+
+  it('结构化 technical diagnostic 不落永久错误卡', () => {
+    appState.activeConversationId = 'conv-tech';
+    appState.conversations = [
+      {
+        id: 'conv-tech',
+        title: 't',
+        messages: [],
+        platform: 'claude',
+        created_at: 1,
+        updated_at: 1,
+      },
+    ];
+
+    handleSessionError({
+      conversationId: 'conv-tech',
+      error: '[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use',
+      code: 'claude_derived_diagnostic',
+      technical: true,
+    });
+
+    expect(appState.conversations[0].messages).toHaveLength(0);
+  });
+
+  it('单独出现的 legacy tool_use diagnostic 映射为一张结构化友好错误', () => {
+    appState.activeConversationId = 'conv-tool-diagnostic';
+    appState.conversations = [
+      {
+        id: 'conv-tool-diagnostic',
+        title: 't',
+        messages: [],
+        platform: 'claude',
+        created_at: 1,
+        updated_at: 1,
+      },
+    ];
+
+    handleSessionError({
+      conversationId: 'conv-tool-diagnostic',
+      error: '[ede_diagnostic] result_type=user last_content_type=n/a stop_reason=tool_use',
+    });
+
+    const errors = appState.conversations[0].messages.filter((message) => message.role === 'error');
+    expect(errors).toHaveLength(1);
+    expect(errors[0].errorCode).toBe('kiro_invalid_tool_stream');
   });
 
   it('同一回合相邻的多个真实错误同样合并为一张卡', () => {
@@ -327,7 +400,8 @@ describe('新建会话后侧边栏刷新', () => {
     const errors = conv.messages.filter((m) => m.role === 'error');
     expect(errors).toHaveLength(1);
     expect(errors[0].content).toContain('502 Improperly formed');
-    expect(errors[0].content).toContain('empty assistant response');
+    expect(errors[0].content).not.toContain('empty assistant response');
+    expect(errors[0].errorDetail).toContain('empty assistant response');
   });
 });
 

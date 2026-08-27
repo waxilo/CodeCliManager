@@ -9,7 +9,14 @@ function setupShell(): void {
   document.body.innerHTML = `
     <div class="main-content">
       <div class="main-topbar"><div class="main-topbar-main"></div></div>
-      <div id="message-list"></div>
+      <div class="message-list-shell">
+        <div id="message-list">
+          <div class="message-content-layer" data-chat-content>
+            <div class="chat-bottom-sentinel" data-chat-bottom></div>
+          </div>
+        </div>
+        <button class="scroll-to-bottom-btn" type="button"></button>
+      </div>
     </div>
   `;
   appState.conversations = [
@@ -141,7 +148,7 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     const block1 = list.querySelector('[data-stream-id="streaming-block-1"]')!;
     const card = list.querySelector('[data-stream-id="live-tool-t1"]')!;
     // 工具卡应位于 block0 与 block1 之间（思考-工具-思考按真实顺序穿插）
-    const children = [...list.children];
+    const children = [...document.querySelector<HTMLElement>('[data-chat-content]')!.children];
     expect(children.indexOf(block0)).toBeLessThan(children.indexOf(card));
     expect(children.indexOf(card)).toBeLessThan(children.indexOf(block1));
   });
@@ -168,7 +175,7 @@ describe('统一渲染管线：实时工具卡与流式块（同一 diff 挂载�
     const list = document.querySelector<HTMLElement>('#message-list')!;
     const card = list.querySelector('[data-stream-id="live-tool-t1"]')!;
     const block = list.querySelector('[data-stream-id="streaming-block-0"]')!;
-    const children = [...list.children];
+    const children = [...document.querySelector<HTMLElement>('[data-chat-content]')!.children];
     expect(children.indexOf(card)).toBeLessThan(children.indexOf(block));
   });
 

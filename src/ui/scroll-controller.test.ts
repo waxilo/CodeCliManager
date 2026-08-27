@@ -38,20 +38,48 @@ describe('ScrollController 用户滚动与自动跟随', () => {
     expect(onUserScroll).toHaveBeenCalledTimes(1);
   });
 
-  it('scroll 上移（拖动滚动条/PageUp）：任何幅度都关闭跟随（无死区）', () => {
+  it('无输入的布局 scroll 上移不关闭跟随，已排队的下一帧仍置底', () => {
+    const { el, onUserScroll } = setup();
+    const callbacks: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      callbacks.push(cb);
+      return callbacks.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+    Object.defineProperty(el, 'scrollHeight', { value: 2000, configurable: true });
+    Object.defineProperty(el, 'clientHeight', { value: 200, configurable: true });
+    Object.defineProperty(el, 'scrollTop', { value: 1800, configurable: true, writable: true });
+
+    const sc = new ScrollController(el, { resumePx: 20, onUserScroll });
+    sc.onNewContent();
+    el.scrollTop = 1600;
+    el.dispatchEvent(new Event('scroll'));
+
+    expect(sc.autoScroll).toBe(true);
+    expect(onUserScroll).not.toHaveBeenCalled();
+    callbacks[0](0);
+    expect(el.scrollTop).toBe(2000);
+    sc.destroy();
+  });
+
+  it('pointer 拖动与键盘滚动会明确关闭跟随', () => {
     const { el, onUserScroll } = setup();
     const sc = new ScrollController(el, { resumePx: 20, onUserScroll });
     Object.defineProperty(el, 'scrollHeight', { value: 2000, configurable: true });
     Object.defineProperty(el, 'clientHeight', { value: 200, configurable: true });
-    // 先滚到中间（lastScrollTop 记录）
-    Object.defineProperty(el, 'scrollTop', { value: 500, configurable: true });
+    Object.defineProperty(el, 'scrollTop', { value: 500, configurable: true, writable: true });
+
+    el.dispatchEvent(new Event('pointerdown', { bubbles: true }));
+    el.scrollTop = 470;
     el.dispatchEvent(new Event('scroll'));
-    expect(onUserScroll).not.toHaveBeenCalled(); // 向下/保持不关
-    // 上移 30px（落在旧 20-80px 死区内）→ 必须关闭
-    Object.defineProperty(el, 'scrollTop', { value: 470, configurable: true });
-    el.dispatchEvent(new Event('scroll'));
-    expect(onUserScroll).toHaveBeenCalledTimes(1);
     expect(sc.autoScroll).toBe(false);
+    expect(onUserScroll).toHaveBeenCalledTimes(1);
+
+    sc.scrollToBottom();
+    el.scrollTop = 500;
+    el.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', bubbles: true }));
+    expect(sc.autoScroll).toBe(false);
+    expect(onUserScroll).toHaveBeenCalledTimes(2);
     sc.destroy();
   });
 
@@ -66,6 +94,67 @@ describe('ScrollController 用户滚动与自动跟随', () => {
     wheel(el, 100);
     expect(sc.autoScroll).toBe(true);
     expect(onUserScroll).not.toHaveBeenCalled();
+  });
+
+  it('底部阈值内明确上滑也保持暂停并显示按钮', () => {
+    const { el } = setup();
+    Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(el, 'clientHeight', { value: 200, configurable: true });
+    Object.defineProperty(el, 'scrollTop', { value: 785, configurable: true, writable: true });
+    const sc = new ScrollController(el, { resumePx: 20, createButton: true });
+    // 控制器创建后的第一次滚动就是 1px 上滑，且仍属于 near-bottom。
+    wheel(el, -1);
+    el.scrollTop = 784;
+    el.dispatchEvent(new Event('scroll'));
+
+    expect(sc.autoScroll).toBe(false);
+    expect(el.querySelector('.scroll-to-bottom-btn')?.classList.contains('visible')).toBe(true);
+    sc.destroy();
+  });
+
+  it('暂停态的布局下移进入底部阈值也不恢复，明确向下输入才恢复', () => {
+    const { el } = setup();
+    Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(el, 'clientHeight', { value: 200, configurable: true });
+    Object.defineProperty(el, 'scrollTop', { value: 700, configurable: true, writable: true });
+    const sc = new ScrollController(el, { resumePx: 20, createButton: true });
+    sc.pauseFollow();
+
+    // 模拟 Markdown 重排/浏览器锚定把视口向下推到离底部 15px。
+    el.scrollTop = 785;
+    el.dispatchEvent(new Event('scroll'));
+    expect(sc.autoScroll).toBe(false);
+    expect(el.querySelector('.scroll-to-bottom-btn')?.classList.contains('visible')).toBe(true);
+
+    wheel(el, 1);
+    expect(sc.autoScroll).toBe(true);
+    sc.destroy();
+  });
+
+  it('暂停态即使仍在底部阈值内也显示外层按钮，点击后恢复跟随', () => {
+    document.body.innerHTML = '<div id="host"><div id="sc"></div></div>';
+    const host = document.querySelector<HTMLElement>('#host')!;
+    const el = document.querySelector<HTMLElement>('#sc')!;
+    Object.defineProperty(el, 'scrollHeight', { value: 1000, configurable: true });
+    Object.defineProperty(el, 'clientHeight', { value: 200, configurable: true });
+    Object.defineProperty(el, 'scrollTop', { value: 785, configurable: true, writable: true });
+    const scrollTo = vi.fn();
+    el.scrollTo = scrollTo as unknown as typeof el.scrollTo;
+
+    const sc = new ScrollController(el, { resumePx: 20, createButton: true, buttonHost: host });
+    sc.pauseFollow();
+    const btn = host.querySelector<HTMLButtonElement>(':scope > .scroll-to-bottom-btn')!;
+
+    expect(btn).not.toBeNull();
+    expect(el.querySelector('.scroll-to-bottom-btn')).toBeNull();
+    expect(btn.classList.contains('visible')).toBe(true);
+    btn.click();
+    expect(sc.autoScroll).toBe(true);
+    expect(el.scrollTo).toHaveBeenCalledWith({ top: 1000, behavior: 'smooth' });
+
+    sc.destroy();
+    expect(host.querySelector('.scroll-to-bottom-btn')).toBeNull();
+    expect(el.hasAttribute('tabindex')).toBe(false);
   });
 
   it('用户在已排队置底前上滑时，下一帧不会抢回到底部', () => {

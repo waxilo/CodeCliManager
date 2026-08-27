@@ -12,6 +12,7 @@ import { closePermissionDialogs } from '../permissions';
 import { groupConversationsByWorkspace } from '../sidebar';
 import { findConversationById } from '../conversations/normalize';
 import { clearStreamingState, commitStreamingAssistantToConversation } from './streaming';
+import { requestMainChatFollow } from './chat-scroll';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshModelInfo } from './model-picker';
 import { hideSendingState } from './session-context';
@@ -331,6 +332,8 @@ export async function executePreparedCommand(
     // 后端确认已实际发送后，才把用户消息加入正式会话气泡。
     appState.pendingUserMessage = command.messageContent;
     appState.pendingUserMessageConvId = conversationId;
+    // 成功发送是明确的 tail policy：用户期望看到新一轮输出。
+    requestMainChatFollow();
 
     const nextModelKey = normalizeModelKey(command.model);
     if (conversationId) {

@@ -751,8 +751,22 @@ export function renderToolMessageHtml(msg: Message, msgIdAttr = ''): string {
  *  - isKnown=true：命中已知模式，前端展示友好 hint + 折叠原始报文；
  *  - isKnown=false：无法识别，直接展示原始内容，不额外做友好化。
  */
-export function parseErrorHint(content: string): { hint: string; isKnown: boolean } {
+export function parseErrorHint(
+  content: string,
+  code?: string,
+): { hint: string; isKnown: boolean } {
   const raw = (content || '').trim();
+  const structuredHints: Record<string, string> = {
+    kiro_invalid_tool_stream: '模型返回的工具调用不完整，本轮已安全终止。请重试；若反复出现，请切换模型。',
+    kiro_empty_response: '模型没有返回有效内容，请重试；若反复出现，请切换模型。',
+    singleflight_wait_timeout: '上一条相同请求仍在处理中，请等待其完成后再试。',
+    proxy_concurrency_limit: 'Kiro 代理当前请求较多，请稍后再试。',
+    upstream_busy: 'Kiro 服务暂时繁忙，自动重试未成功，请稍后再试。',
+    upstream_rate_limit: 'Kiro 服务当前请求过多，请稍后再试。',
+  };
+  if (code && structuredHints[code]) {
+    return { hint: structuredHints[code], isKnown: true };
+  }
   if (!raw) return { hint: '模型调用失败，请重试。', isKnown: true };
 
   // 上游推理网关 502（Improperly formed request / schema 不识别）——优先级最高
@@ -766,6 +780,10 @@ export function parseErrorHint(content: string): { hint: string; isKnown: boolea
       hint: `推理网关（${gateway}）拒绝了请求（502）：通常是当前模型不可用，或请求参数不被该模型支持。请切换模型，或稍后重试。`,
       isKnown: true,
     };
+  }
+
+  if (/same body is already in progress/i.test(raw)) {
+    return { hint: '上一条相同请求仍在处理中，请等待其完成后再试。', isKnown: true };
   }
 
   if (/\bempty assistant response\b/i.test(raw)) {
@@ -828,8 +846,9 @@ export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = fa
   }
 
   if (msg.role === 'error') {
-    const { hint, isKnown } = parseErrorHint(msg.content);
-    const rawHtml = `<div class="markdown-body">${renderMarkdown(msg.content)}</div>`;
+    const { hint, isKnown } = parseErrorHint(msg.content, msg.errorCode);
+    const rawDetail = msg.errorDetail || msg.content;
+    const rawHtml = `<div class="markdown-body">${renderMarkdown(rawDetail)}</div>`;
     const body = isKnown
       ? `<div class="message-error-hint">${escapeHtml(hint)}</div>` +
         `<details class="message-error-detail"><summary>查看原始错误</summary>${rawHtml}</details>`
@@ -963,6 +982,9 @@ export function messageRenderKey(
     msg.content.length,
     msg.content.slice(-64),
     msg.thinking?.length ?? 0,
+    msg.errorCode ?? '',
+    msg.errorDetail?.length ?? 0,
+    msg.errorDetail?.slice(-64) ?? '',
     thinkingExpanded ? 'e' : 'c',
     showUndo ? 'u' : '',
     prevRole || '',
