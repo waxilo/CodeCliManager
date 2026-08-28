@@ -572,9 +572,13 @@
 
 .global-config-md {
   margin-top: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.global-config-md-content {
+.global-config-md-editor {
+  width: 100%;
   margin: 0;
   padding: 10px 12px;
   border: 1px solid var(--color-border);
@@ -584,10 +588,72 @@
   font-size: 12px;
   line-height: 1.6;
   color: var(--color-text-secondary);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 320px;
-  overflow-y: auto;
+  resize: vertical;
+  min-height: 180px;
+  box-sizing: border-box;
+}
+
+.global-config-md-editor:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
+}
+
+.global-config-editor-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.global-config-md-path {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.global-config-save {
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+  font-size: 12px;
+  font-family: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.global-config-save:hover:not(:disabled) {
+  background: var(--color-bg-surface-hover);
+}
+
+.global-config-save:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.global-config-save:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-accent-ring);
+}
+
+.global-config-save-status {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
+.global-config-save-status.is-success {
+  color: var(--color-success);
+}
+
+.global-config-save-status.is-error {
+  color: var(--color-danger);
 }
 
 .global-config-empty {

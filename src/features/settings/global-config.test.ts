@@ -5,10 +5,12 @@ import { renderSettingsViewHtml, renderSettingsSidebarHtml } from './view';
 
 const skillsMock = vi.fn();
 const promptsMock = vi.fn();
+const writeMock = vi.fn();
 
 vi.mock('../../api', () => ({
   getGlobalSkills: (...args: unknown[]) => skillsMock(...args),
   getGlobalPrompts: (...args: unknown[]) => promptsMock(...args),
+  writeGlobalPrompt: (...args: unknown[]) => writeMock(...args),
 }));
 
 describe('设置页「全局 Skills 与提示词」分区', () => {
@@ -17,6 +19,7 @@ describe('设置页「全局 Skills 与提示词」分区', () => {
     appState.settingsSection = 'global-config';
     skillsMock.mockReset();
     promptsMock.mockReset();
+    writeMock.mockReset();
   });
 
   it('侧栏包含分区入口且激活态正确；全局 Skills 位于分隔线之后', () => {
@@ -158,15 +161,82 @@ describe('设置页「全局 Skills 与提示词」分区', () => {
 
     await mountGlobalConfigSection();
 
-    const pre = document.querySelector('.global-config-md-content')!;
-    expect(pre.innerHTML).not.toContain('<script>');
-    expect(pre.textContent).toContain('<script>alert(1)</script>');
-    // path 进入 title 属性上下文同样被转义
+    // 编辑器 textarea：value 还原原始文本，innerHTML 不出现未转义标签
+    const editor = document.querySelector<HTMLTextAreaElement>('.global-config-md-editor')!;
+    expect(editor.innerHTML).not.toContain('<script>');
+    expect(editor.value).toContain('<script>alert(1)</script>');
+    expect(editor.value).toContain('& 内容');
+    // 文件路径 hint 进入 title 属性上下文同样被转义
+    const mdPathEl = document.querySelector('.global-config-md-path')!;
+    expect(mdPathEl.getAttribute('title')).toContain('/u/.claude/CLAUDE.md');
+    // 技能卡片路径（首张卡片）经转义后由浏览器还原为原始字符
     const pathEl = document.querySelector('.global-config-card-path')!;
-    // title 属性经转义后由浏览器还原为原始字符
     expect(pathEl.getAttribute('title')).toContain('/>&<path');
     expect(pathEl.getAttribute('title')).not.toContain('"><img');
     expect(pathEl.innerHTML).not.toContain('<img');
+  });
+
+  it('保存按钮把编辑器内容写入后端并提示成功', async () => {
+    document.body.innerHTML = renderGlobalConfigSectionHtml();
+    skillsMock.mockResolvedValue([]);
+    promptsMock.mockResolvedValue({
+      global_md: '# 旧',
+      global_md_path: '/u/.claude/CLAUDE.md',
+      commands: [],
+    });
+    writeMock.mockResolvedValue('/u/.claude/CLAUDE.md');
+    await mountGlobalConfigSection();
+
+    const editor = document.querySelector<HTMLTextAreaElement>('#global-config-md-editor')!;
+    editor.value = '# 新的全局提示词\n- 规则';
+    const save = document.querySelector<HTMLButtonElement>('#global-config-save')!;
+    const status = document.querySelector<HTMLParagraphElement>('#global-config-save-status')!;
+
+    save.click();
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(writeMock).toHaveBeenCalledWith('# 新的全局提示词\n- 规则');
+    expect(status.textContent).toContain('已保存到');
+    expect(status.textContent).toContain('/u/.claude/CLAUDE.md');
+    expect(status.classList.contains('is-success')).toBe(true);
+    expect(save.disabled).toBe(false);
+  });
+
+  it('Cmd/Ctrl+Enter 触发保存', async () => {
+    document.body.innerHTML = renderGlobalConfigSectionHtml();
+    skillsMock.mockResolvedValue([]);
+    promptsMock.mockResolvedValue({ global_md: null, global_md_path: null, commands: [] });
+    writeMock.mockResolvedValue('/u/.claude/CLAUDE.md');
+    await mountGlobalConfigSection();
+
+    const editor = document.querySelector<HTMLTextAreaElement>('#global-config-md-editor')!;
+    editor.value = '新增内容';
+    editor.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true }),
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(writeMock).toHaveBeenCalledWith('新增内容');
+  });
+
+  it('保存失败时展示错误状态并恢复按钮', async () => {
+    document.body.innerHTML = renderGlobalConfigSectionHtml();
+    skillsMock.mockResolvedValue([]);
+    promptsMock.mockResolvedValue({
+      global_md: '# 旧',
+      global_md_path: '/u/.claude/CLAUDE.md',
+      commands: [],
+    });
+    writeMock.mockRejectedValue(new Error('write-fail'));
+    await mountGlobalConfigSection();
+
+    const save = document.querySelector<HTMLButtonElement>('#global-config-save')!;
+    const status = document.querySelector<HTMLParagraphElement>('#global-config-save-status')!;
+    save.click();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(status.textContent).toContain('保存失败');
+    expect(status.textContent).toContain('write-fail');
+    expect(status.classList.contains('is-error')).toBe(true);
+    expect(save.disabled).toBe(false);
   });
 
   it('部分失败：skills 成功 + prompts 失败，各自独立呈现', async () => {

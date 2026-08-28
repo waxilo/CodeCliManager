@@ -34,6 +34,8 @@ pub(crate) struct GlobalPromptsState {
 const CLAUDE_MD_MAX: usize = 100_000;
 /// SKILL.md / commands 单文件上限（超过视为异常跳过，避免整读超大文件）
 const MARKDOWN_MAX: u64 = 512 * 1024;
+/// CLAUDE.md 写入上限（1 MiB），防止前端误提交超大内容撑爆配置
+const CLAUDE_MD_WRITE_MAX: usize = 1_048_576;
 
 /// Claude Code 全局配置目录：优先 CLAUDE_CONFIG_DIR 环境变量，缺省 ~/.claude
 fn claude_home() -> PathBuf {
@@ -263,6 +265,27 @@ pub fn get_global_prompts() -> Result<GlobalPromptsState, String> {
         global_md_path: global_md_path_str,
         commands,
     })
+}
+
+/// 写入全局 CLAUDE.md（~/.claude/CLAUDE.md）。确保父目录存在；目标若是符号链接则拒绝，
+/// 避免把内容写进意外位置；返回写入后的路径供前端展示。
+#[tauri::command]
+pub fn write_global_claude_md(content: String) -> Result<String, String> {
+    if content.len() > CLAUDE_MD_WRITE_MAX {
+        return Err(format!(
+            "内容过长（{} 字节），仅支持 {} 字节以内",
+            content.len(),
+            CLAUDE_MD_WRITE_MAX
+        ));
+    }
+    let claude = claude_home();
+    fs::create_dir_all(&claude).map_err(|e| format!("创建 ~/.claude 目录失败: {e}"))?;
+    let path = claude.join("CLAUDE.md");
+    if path.is_symlink() {
+        return Err("~/.claude/CLAUDE.md 是符号链接，已拒绝写入".to_string());
+    }
+    fs::write(&path, content).map_err(|e| format!("写入 CLAUDE.md 失败: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 #[cfg(test)]

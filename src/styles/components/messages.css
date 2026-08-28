@@ -216,7 +216,7 @@
 .message.assistant {
   flex-direction: column;
   gap: 4px;
-  padding: 0 12px;
+  padding: 0;
 }
 
 .message.assistant .message-content {

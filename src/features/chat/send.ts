@@ -258,7 +258,7 @@ export async function sendMessage() {
     promptForResolve = promptForResolve.trim();
 
     const { prompt: resolvedFromAtPaths, displayPrompt, refs: fileRefs } =
-      await resolveFileReferences(promptForResolve, projectDir);
+      resolveFileReferences(promptForResolve);
     for (const ref of fileRefs) {
       if (!allRefs.some((existing) => existing.path === ref.path)) allRefs.push(ref);
     }

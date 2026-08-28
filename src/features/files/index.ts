@@ -238,8 +238,6 @@ interface FileReferenceToken {
   start: number;
   end: number;
   path: string;
-  /** `@File[]` 或绝对路径是已确认的附件；相对 @path 仅保留兼容性解析。 */
-  confirmed: boolean;
 }
 
 function isAbsoluteFileReference(path: string): boolean {
@@ -248,7 +246,8 @@ function isAbsoluteFileReference(path: string): boolean {
 
 /**
  * 统一扫描消息中的文件引用。历史由 Claude CLI 回写为 `@/absolute/path`，
- * 本地乐观消息是 `@File[/absolute/path]`；两种形式必须走同一解析规则。
+ * 本地乐观消息是 `@File[/absolute/path]`；所有引用统一为绝对路径。
+ * 相对形式的 `@src/a.ts`、邮箱与普通 @mention 不视为文件引用，保留为纯文本。
  */
 function scanFileReferenceTokens(text: string): FileReferenceToken[] {
   const tokens: FileReferenceToken[] = [];
@@ -257,16 +256,16 @@ function scanFileReferenceTokens(text: string): FileReferenceToken[] {
   let match: RegExpExecArray | null;
 
   while ((match = tagPattern.exec(text)) !== null) {
-    const path = match[1].replace(/\/$/, '');
+    const path = match[1];
     if (!path) continue;
     const start = match.index;
     const end = start + match[0].length;
-    tokens.push({ start, end, path, confirmed: true });
+    tokens.push({ start, end, path });
     occupied.push([start, end]);
   }
 
-  // 保留原有对相对 @path 的兼容解析（可生成芯片），但只有绝对路径才会
-  // 从用户正文删除，避免误伤 @not/a/file、邮箱与普通 @mention。
+  // 只有绝对路径才生成文件引用 token；相对 @path、邮箱、普通 @mention 不动。
+  // 保留尾随 `/`，让目录引用能在展示时被识别为目录（endsWith('/')）。
   const pathPattern = /@([^\s@]+[/\\][^\s@]*)/g;
   while ((match = pathPattern.exec(text)) !== null) {
     const start = match.index;
@@ -274,9 +273,10 @@ function scanFileReferenceTokens(text: string): FileReferenceToken[] {
     if (occupied.some(([from, to]) => start < to && end > from)) continue;
     const raw = match[1];
     if (raw.startsWith('File[')) continue;
-    const path = raw.replace(/\/$/, '');
+    if (!isAbsoluteFileReference(raw)) continue;
+    const path = raw;
     if (!path) continue;
-    tokens.push({ start, end, path, confirmed: isAbsoluteFileReference(path) });
+    tokens.push({ start, end, path });
   }
 
   return tokens.sort((a, b) => a.start - b.start);
@@ -588,12 +588,12 @@ export function hideFileSuggestions() {
 }
 
 /**
- * 剥离用户消息中已确认的文件引用用于展示。
- * `@File[...]` 一律是前端生成的附件；裸 `@path` 只剥离绝对路径，
- * 保留未确认的相对 @path、邮箱和普通 @mention，避免误删正常正文。
+ * 剥离用户消息中的文件引用用于展示。
+ * `@File[...]` 与绝对 `@path` 均由前端确认；相对 @path、邮箱和普通 @mention
+ * 不是文件引用，保持原文，避免误删正常正文。
  */
 export function stripFileRefsFromDisplay(text: string): string {
-  const tokens = scanFileReferenceTokens(text).filter((token) => token.confirmed);
+  const tokens = scanFileReferenceTokens(text);
   if (tokens.length === 0) return text.replace(/\s{2,}/g, ' ').trim();
 
   let out = '';
@@ -611,7 +611,7 @@ export function stripFileRefsFromDisplay(text: string): string {
 /**
  * 去重比较用归一化：剥离 @File[] 标签与 @path 文件引用，得到纯文本。
  * 发送时展示内容（command.messageContent）与会话文件回传内容（command.prompt）
- * 在引用形式上不一致（@File[] vs @相对路径），直接比较会误判为两条消息，
+ * 在引用形式上不一致（@File[] vs @绝对路径），直接比较会误判为两条消息，
  * 归一化后可正确识别为同一条用户消息，避免“发送两遍”的重复气泡。
  */
 export function normalizeMessageForCompare(content: string | null | undefined): string {
@@ -663,13 +663,15 @@ export function getImageMime(filePath: string): string {
 
 /** 消息中文件引用芯片的双击预览（与导入卡片复用同一套预览逻辑） */
 export async function previewFileByPath(rawPath: string): Promise<void> {
-  const fullPath = resolveFilePath(rawPath);
+  // 目录引用（尾随 /）不支持内嵌预览，直接忽略。
+  if (rawPath.endsWith('/')) return;
+  // 引用已是绝对路径，直接读取
   const fileName = rawPath.replace(/\/$/, '').split(/[/\\]/).pop() || rawPath;
 
   if (isImageFile(rawPath)) {
     try {
       const mime = getImageMime(rawPath);
-      const b64 = await api.readFileBase64(fullPath );
+      const b64 = await api.readFileBase64(rawPath);
       openImageLightbox(`data:${mime};base64,${b64}`);
     } catch (e) {
       console.error('加载图片预览失败:', e);
@@ -681,7 +683,7 @@ export async function previewFileByPath(rawPath: string): Promise<void> {
 
   if (ext === 'pdf') {
     try {
-      await openPdfPreview(fullPath, fileName);
+      await openPdfPreview(rawPath, fileName);
     } catch (e) {
       console.error('预览 PDF 失败:', e);
     }
@@ -691,7 +693,7 @@ export async function previewFileByPath(rawPath: string): Promise<void> {
   if (isOtherBinaryFile(rawPath)) return;
 
   try {
-    const content = await api.readFileContent(fullPath );
+    const content = await api.readFileContent(rawPath);
     openTextPreview(content, fileName);
   } catch (e) {
     console.error('读取文件失败:', e);
@@ -957,19 +959,6 @@ export async function handleImportExternalFolder(): Promise<void> {
 
 // ── 拖拽文件自动引用 ────────────────────────────────────────────────
 
-export function projectRelativePath(projectDir: string, fullPath: string): string | null {
-  const normalize = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '');
-  const root = normalize(projectDir);
-  const path = normalize(fullPath);
-  const windowsPath = /^[A-Za-z]:\//.test(root);
-  const comparableRoot = windowsPath ? root.toLowerCase() : root;
-  const comparablePath = windowsPath ? path.toLowerCase() : path;
-  const prefix = `${comparableRoot}/`;
-  if (!comparablePath.startsWith(prefix)) return null;
-  const relative = path.slice(root.length + 1);
-  return relative || null;
-}
-
 export async function bindDragDropFileRefs() {
   // 避免重复注册监听器
   if (appState._unlistenDragDrop) appState._unlistenDragDrop();
@@ -1004,13 +993,8 @@ export async function bindDragDropFileRefs() {
 
       const refs: string[] = [];
 
+      // 统一使用规范化绝对路径引用，不再转相对路径。
       for (const fullPath of paths) {
-        const relativePath = projectRelativePath(projectDir, fullPath);
-        if (relativePath) {
-          if (!refs.includes(relativePath)) refs.push(relativePath);
-          continue;
-        }
-
         try {
           const result = await api.importExternalPath({ source: fullPath, projectDir });
           const absRef = result.is_dir ? `${result.absolute_path}/` : result.absolute_path;
@@ -1041,139 +1025,26 @@ export async function bindDragDropFileRefs() {
 }
 
 /**
- * 解析 prompt 中的 @file 引用。
- * - 文本文件：尝试读取内容拼入 prompt
- * - 图片/二进制/目录：保留 @path 引用让 CLI 处理
+ * 解析 prompt 中的 @file 引用。所有引用统一为绝对路径：
+ * 文本、图片、二进制或目录均保留 @path 引用由 Claude CLI 自行读取。
  * 返回 { prompt, displayPrompt, refs }：
- *   prompt        — 发给 CLI 的最终内容（含嵌入的文件文本和 @引用）
- *   displayPrompt — 用于消息气泡展示的干净文本（已剥离已解析的 @path 引用）
+ *   prompt        — 发给 CLI 的最终内容（保留 @绝对路径 引用）
+ *   displayPrompt — 用于消息气泡展示的干净文本（已剥离 @引用）
  *   refs          — 匹配到的文件引用列表
  */
-export async function resolveFileReferences(
+export function resolveFileReferences(
   prompt: string,
-  projectDir = getEffectiveProjectDir(),
-): Promise<{ prompt: string; displayPrompt: string; refs: FileRef[] }> {
-  const atPattern = /@([^\s@]+)/g;
-  const rawRefs: string[] = [];
-  let match: RegExpExecArray | null;
-  const files = await loadProjectFiles(projectDir);
+): { prompt: string; displayPrompt: string; refs: FileRef[] } {
+  const tokens = scanFileReferenceTokens(prompt);
+  if (tokens.length === 0) return { prompt, displayPrompt: prompt, refs: [] };
 
-  while ((match = atPattern.exec(prompt)) !== null) {
-    rawRefs.push(match[1]);
+  const refs: FileRef[] = [];
+  const seen = new Set<string>();
+  for (const token of tokens) {
+    if (seen.has(token.path)) continue;
+    seen.add(token.path);
+    refs.push({ path: token.path, isImage: isImageFile(token.path) });
   }
 
-  if (rawRefs.length === 0) return { prompt, displayPrompt: prompt, refs: [] };
-
-  // 分离：项目索引文件 vs 绝对路径 vs 其他（可能是未索引的项目内文件）
-  const projectRefs = rawRefs.filter((ref) => files.some((f) => f === ref));
-  const absoluteRefs = rawRefs.filter((ref) => isAbsolutePath(ref) && !projectRefs.includes(ref));
-  const remainingRefs = rawRefs.filter((ref) => !projectRefs.includes(ref) && !absoluteRefs.includes(ref));
-
-  // 没有任何匹配的引用，直接返回
-  if (projectRefs.length === 0 && absoluteRefs.length === 0 && remainingRefs.length === 0) return { prompt, displayPrompt: prompt, refs: [] };
-  if (projectRefs.length > 0 && !projectDir) return { prompt, displayPrompt: prompt, refs: [] };
-
-  const fileRefs: FileRef[] = [];
-  const embeddedContents: string[] = [];
-  const unresolvedRefs: string[] = [];
-
-  // ── 处理项目相对路径引用（嵌入文本文件内容） ──
-  if (projectRefs.length > 0) {
-    const dir = projectDir!.endsWith('/') ? projectDir! : projectDir! + '/';
-    for (const ref of projectRefs) {
-      const isDir = ref.endsWith('/');
-      const isImg = isImageFile(ref);
-      fileRefs.push({ path: ref, isImage: isImg || isDir });
-
-      if (isDir) {
-        unresolvedRefs.push(ref);
-        continue;
-      }
-      if (isImg || isOtherBinaryFile(ref)) {
-        unresolvedRefs.push(ref);
-        continue;
-      }
-
-      try {
-        const fullPath = dir + ref;
-        const content = await api.readFileContent(fullPath );
-        embeddedContents.push(`--- File: ${ref} ---\n${content}\n---\n`);
-      } catch {
-        unresolvedRefs.push(ref);
-      }
-    }
-  }
-
-  // ── 处理绝对路径引用（直接保留 @引用，由 CLI 自行读取文件） ──
-  for (const ref of absoluteRefs) {
-    const isDir = ref.endsWith('/');
-    const isImg = isImageFile(ref);
-    fileRefs.push({ path: ref, isImage: isImg || isDir });
-    unresolvedRefs.push(ref);
-  }
-
-  // ── 处理未索引的项目相对路径（如 target/ 内的文件） ──
-  for (const ref of remainingRefs) {
-    if (projectDir) {
-      const dir = projectDir.endsWith('/') ? projectDir : projectDir + '/';
-      const fullPath = dir + ref;
-      // 尝试读取验证文件是否存在
-      try {
-        await api.readFileContent(fullPath );
-        // 文件存在 → 显示芯片，保留 @引用让 CLI 读取
-        fileRefs.push({ path: ref, isImage: false });
-        unresolvedRefs.push(ref);
-      } catch {
-        // 文件不存在，忽略（可能是其他 @ 语法如 @mention）
-      }
-    }
-  }
-
-  // ── 组装最终 prompt ──
-  let cleanedPrompt = prompt;
-  // 去掉项目相对路径的 @file 引用标签（内容已嵌入）
-  for (const ref of projectRefs) {
-    cleanedPrompt = cleanedPrompt.replace(new RegExp(`@${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*`, 'g'), '');
-  }
-  // 绝对路径不剥离 @引用，留给 CLI 处理
-  cleanedPrompt = cleanedPrompt.trim();
-
-  let finalPrompt = embeddedContents.join('\n');
-  if (finalPrompt) finalPrompt += '\n';
-  if (unresolvedRefs.length > 0) {
-    finalPrompt += unresolvedRefs.map((r) => `@${r}`).join(' ') + '\n';
-  }
-  finalPrompt += cleanedPrompt;
-
-  // ── 生成展示用文本：剥离所有已解析的 @path 引用（芯片已展示文件信息） ──
-  let displayContent = prompt;
-  const resolvedRemainingRefs = remainingRefs.filter((ref) =>
-    fileRefs.some((fr) => fr.path === ref)
-  );
-  for (const ref of [...projectRefs, ...absoluteRefs, ...resolvedRemainingRefs]) {
-    const escaped = ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    displayContent = displayContent.replace(new RegExp(`@${escaped}\\s*`, 'g'), '');
-  }
-  displayContent = displayContent.trim();
-
-  return { prompt: finalPrompt, displayPrompt: displayContent, refs: fileRefs };
-}
-
-/** 检测字符串是否为绝对路径（Unix: 以 / 开头；Windows: 以盘符开头如 C:\ 或 C:/） */
-export function isAbsolutePath(p: string): boolean {
-  // Unix 绝对路径
-  if (p.startsWith('/')) return true;
-  // Windows 绝对路径: 盘符 + :\ 或 :/
-  if (/^[A-Za-z]:[\\/]/.test(p)) return true;
-  // Windows UNC 路径: \\
-  if (p.startsWith('\\\\')) return true;
-  return false;
-}
-
-/** 将文件路径解析为可读取的绝对路径（相对路径自动拼接项目目录） */
-export function resolveFilePath(filePath: string): string {
-  if (isAbsolutePath(filePath)) return filePath;
-  const dir = getEffectiveProjectDir();
-  if (!dir) return filePath;
-  return (dir.endsWith('/') ? dir : dir + '/') + filePath;
+  return { prompt, displayPrompt: stripFileRefsFromDisplay(prompt), refs };
 }

@@ -1,7 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
 import {
   parseFileRefs,
-  projectRelativePath,
   stripFileRefsFromDisplay,
   normalizeMessageForCompare,
 } from './files';
@@ -49,14 +48,20 @@ function resetSessionState() {
 }
 
 describe('file reference boundaries', () => {
-  it('requires a path component boundary', () => {
-    expect(projectRelativePath('/tmp/app', '/tmp/app/src/a.ts')).toBe('src/a.ts');
-    expect(projectRelativePath('/tmp/app', '/tmp/application/a.ts')).toBeNull();
-  });
-
   it('preserves unresolved at-path text', () => {
     expect(stripFileRefsFromDisplay('contact user@example.com/path')).toBe('contact user@example.com/path');
     expect(stripFileRefsFromDisplay('check @not/a/file')).toBe('check @not/a/file');
+  });
+
+  it('does not treat relative at-path as a file reference', () => {
+    expect(parseFileRefs('@src/a.ts')).toEqual([]);
+    expect(stripFileRefsFromDisplay('@src/a.ts')).toBe('@src/a.ts');
+  });
+
+  it('preserves a trailing slash on directory references', () => {
+    expect(parseFileRefs('@/proj/docs/')).toEqual([{ path: '/proj/docs/', isImage: false }]);
+    expect(parseFileRefs('@File[/proj/docs/]')).toEqual([{ path: '/proj/docs/', isImage: false }]);
+    expect(parseFileRefs('@/proj/docs')).toEqual([{ path: '/proj/docs', isImage: false }]);
   });
 
   it('renders local @File and persisted absolute @path references identically', () => {

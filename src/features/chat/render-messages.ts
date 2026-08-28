@@ -7,7 +7,7 @@ import { parseAskUserQuestionInput } from '../permissions/ask-question';
 import { formatSubagentUsage } from './subagent-usage';
 import * as api from '../../api';
 import { dedupeAdjacentDuplicateMessages } from '../conversations/normalize';
-import { getFileSuggestionIcon, getImageMime, resolveFilePath, stripFileRefTags, stripFileRefsFromDisplay } from '../files/index';
+import { getFileSuggestionIcon, getImageMime, stripFileRefTags, stripFileRefsFromDisplay } from '../files/index';
 export interface ToolConfig {
   displayMode: 'one-line' | 'collapsible';
   icon: string;
@@ -1049,10 +1049,9 @@ export function renderFileRefChipsHtml(refs: FileRef[]): string {
       const filePath = ((img as HTMLElement).parentElement as HTMLElement)?.dataset.filePath;
       if (!filePath || img.getAttribute('src') !== '') return;
       try {
-        // 绝对路径直接使用，相对路径拼接项目目录
-        const fullPath = resolveFilePath(filePath);
+        // 引用已是绝对路径，直接读取
         const mime = getImageMime(filePath);
-        const b64 = await api.readFileBase64(fullPath );
+        const b64 = await api.readFileBase64(filePath);
         (img as HTMLImageElement).src = `data:${mime};base64,${b64}`;
       } catch { /* 加载缩略图失败，保持空状态 */ }
     });

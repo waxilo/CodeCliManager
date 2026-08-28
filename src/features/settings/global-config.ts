@@ -10,7 +10,7 @@ export function renderGlobalConfigSectionHtml(): string {
   return `
     <div class="settings-update-view" id="settings-global-config-view">
       <div class="global-config-toolbar">
-        <span class="global-config-subtitle">查询 ~/.claude 下的全局 Skills、CLAUDE.md 与斜杠命令（只读）</span>
+        <span class="global-config-subtitle">查询 ~/.claude 下的全局 Skills、CLAUDE.md 与斜杠命令；CLAUDE.md 可直接编辑</span>
         <button type="button" class="global-config-refresh" id="global-config-refresh">刷新</button>
       </div>
       <div class="global-config-section">
@@ -56,6 +56,41 @@ export async function mountGlobalConfigSection(): Promise<void> {
     ?.addEventListener('click', () => {
       void mountGlobalConfigSection();
     });
+  bindGlobalClaudeEditor();
+}
+
+/** 绑定全局 CLAUDE.md 编辑器：保存按钮 + Cmd/Ctrl+Enter 保存 + 状态回显 */
+function bindGlobalClaudeEditor(): void {
+  const editor = document.querySelector<HTMLTextAreaElement>('#global-config-md-editor');
+  const saveBtn = document.querySelector<HTMLButtonElement>('#global-config-save');
+  const status = document.querySelector<HTMLParagraphElement>('#global-config-save-status');
+  if (!editor || !saveBtn || !status) return;
+
+  const save = async (): Promise<void> => {
+    saveBtn.disabled = true;
+    status.textContent = '正在保存…';
+    status.classList.remove('is-success', 'is-error');
+    try {
+      const savedPath = await api.writeGlobalPrompt(editor.value);
+      status.textContent = `已保存到 ${savedPath}（新会话生效）`;
+      status.classList.add('is-success');
+    } catch (e) {
+      status.textContent = `保存失败：${String(e)}`;
+      status.classList.add('is-error');
+    } finally {
+      saveBtn.disabled = false;
+    }
+  };
+
+  saveBtn.addEventListener('click', () => {
+    void save();
+  });
+  editor.addEventListener('keydown', (event) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+      event.preventDefault();
+      void save();
+    }
+  });
 }
 
 function renderSkillsBlock(skills: GlobalSkillEntry[], error: string): string {
@@ -88,16 +123,25 @@ function renderSkillsBlock(skills: GlobalSkillEntry[], error: string): string {
 }
 
 function renderPromptsBlock(prompts: GlobalPromptsState | null, error: string): string {
-  const mdHtml = prompts?.global_md
-    ? `
+  // CLAUDE.md 可编辑：始终渲染 textarea（无内容时为空 + 占位提示），仅在快速失败时不渲染以免误导。
+  const mdPathHint = prompts?.global_md_path || '~/.claude/CLAUDE.md（尚未创建）';
+  const mdHtml = error
+    ? ''
+    : `
       <div class="global-config-md">
-        <pre class="global-config-md-content">${escapeHtml(prompts.global_md)}</pre>
-        <p class="global-config-card-path" title="${escapeHtml(prompts.global_md_path || '')}">${escapeHtml(prompts.global_md_path || '')}</p>
+        <textarea
+          class="global-config-md-editor"
+          id="global-config-md-editor"
+          rows="10"
+          placeholder="未配置全局提示词（~/.claude/CLAUDE.md 不存在），可在此撰写内容"
+        >${escapeHtml(prompts?.global_md || '')}</textarea>
+        <div class="global-config-editor-actions">
+          <span class="global-config-md-path" title="${escapeHtml(mdPathHint)}">${escapeHtml(mdPathHint)}</span>
+          <button type="button" class="global-config-save" id="global-config-save">保存</button>
+        </div>
+        <p class="global-config-save-status" id="global-config-save-status" role="status">内容将写入 ~/.claude/CLAUDE.md，新会话生效</p>
       </div>
-    `
-    : error
-      ? ''
-      : '<div class="global-config-empty">未配置全局提示词（~/.claude/CLAUDE.md 不存在）</div>';
+    `;
 
   const commands = prompts?.commands ?? [];
   const commandsHtml =
@@ -125,7 +169,7 @@ function renderPromptsBlock(prompts: GlobalPromptsState | null, error: string): 
   return `
     <section class="global-config-block">
       <h3 class="global-config-title">全局提示词</h3>
-      <p class="global-config-subtitle">CLAUDE.md 与斜杠命令对 Claude Code 全局生效</p>
+      <p class="global-config-subtitle">CLAUDE.md 与斜杠命令对 Claude Code 全局生效；编辑并保存后将写入 ~/.claude/CLAUDE.md</p>
       ${error ? `<p class="global-config-error" role="alert">加载失败：${escapeHtml(error)}</p>` : ''}
       <h4 class="global-config-sub-title">CLAUDE.md（全局记忆 / 提示词）</h4>
       ${mdHtml}

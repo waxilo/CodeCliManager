@@ -57,11 +57,11 @@ pub(crate) fn collect_files(root: &Path, dir: &Path, out: &mut Vec<String>) {
                 continue;
             }
             if let Ok(rel) = path.strip_prefix(root) {
-                let mut rel_str = rel.to_string_lossy().to_string();
+                let mut abs_str = root.join(rel).to_string_lossy().to_string();
                 if file_type.is_dir() {
-                    rel_str.push('/');
+                    abs_str.push('/');
                 }
-                out.push(rel_str);
+                out.push(abs_str);
                 if file_type.is_dir() {
                     collect_files(root, &path, out);
                 }
@@ -78,8 +78,12 @@ pub fn list_project_files(project_dir: String) -> Result<Vec<String>, String> {
     if !root.is_dir() {
         return Err(format!("目录不存在: {}", project_dir));
     }
+    // 统一为规范化绝对路径，保证前端收到的文件引用是可读取的绝对路径。
+    let root = root
+        .canonicalize()
+        .map_err(|e| format!("无法解析目录: {project_dir} ({e})"))?;
     let mut files = Vec::new();
-    collect_files(root, root, &mut files);
+    collect_files(&root, &root, &mut files);
     // 排序：目录在前，文件在后，各自按字母序
     files.sort_by(|a, b| {
         let a_is_dir = a.ends_with('/');
