@@ -57,6 +57,7 @@ pub fn run() {
             respond_tool_permission,
             set_permission_mode,
             retry_message,
+            reload_session,
             get_claude_api_config,
             get_api_profiles_state,
             get_api_profile_config,

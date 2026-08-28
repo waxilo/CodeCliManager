@@ -26,6 +26,7 @@ export {
   removeQueuedPrompt,
   clearQueuedPrompts,
   retryMessage,
+  reloadSession,
   abortSession,
   respondToolPermission,
   setPermissionMode as setPermissionModeApi,

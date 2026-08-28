@@ -29,14 +29,61 @@
 
 .chat-header-meta {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-end;
   gap: 4px;
   flex-shrink: 0;
   max-width: 55%;
   font-size: 11px;
   color: var(--color-text-muted);
   text-align: right;
+}
+
+/* 右上角操作组：Session ID 与「刷新 / 重连」按钮并排 */
+.chat-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* 重连 / 刷新会话 按钮 */
+.session-reload-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.session-reload-btn:hover {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+  border-color: var(--color-accent-soft);
+}
+
+.session-reload-btn svg {
+  width: 13px;
+  height: 13px;
+}
+
+.session-reload-btn.is-loading svg {
+  animation: conv-spin 0.7s linear infinite;
+}
+
+.session-reload-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .session-id,

@@ -727,3 +727,96 @@ pub async fn retry_message(
 
     Ok(())
 }
+
+/// 重连 / 刷新会话：
+/// 1. 强制失效缓存并从磁盘重读该会话，推送 messages-updated 让前端同步最新内容；
+/// 2. 校准运行态，并在必要时重启常驻进程，让下次发送 `--resume` 时重新读到会话启动配置
+///    （全局/项目 CLAUDE.md、skills、模型等）——这决定了「重新编辑全局提示词后能否生效」。
+///
+/// **为什么刷新必须重启进程**：全局提示词（`~/.claude/CLAUDE.md`）只在 Claude Code 进程
+/// 启动/恢复时被读取，一个仍存活的常驻进程不会重读它。所以重编全局提示词后，若不重启该
+/// 常驻进程，下次同进程 followup 仍用旧上下文；只有让进程退出，下次 `execute_prompt` 才会
+/// 走 `--resume` 重新 spawn 并读到新提示词。
+///
+/// **只重启空闲进程**：若正在执行一轮（`is_turn_active`），不打断，保留进程；此时重编的
+/// 提示词要到本轮结束、进程回落为空闲后再刷新才生效。
+///
+/// **aborted 标记清空**：`session_stop_graceful` 优雅停机会在会话键上留下 aborted 标记，
+/// 该标记本意是「用户取消 → 杀掉 next spawn」；刷新是要让它重连，因此停下后必须
+/// `clear_session_aborted`，否则下次 spawn 会被 `should_kill_new_spawn` 误杀。
+#[tauri::command]
+pub async fn reload_session(
+    app: AppHandle,
+    conversation_id: String,
+    source_path: Option<String>,
+) -> Result<(), String> {
+    let explicit_source = source_path.filter(|path| !path.trim().is_empty());
+    let resolved_path = match explicit_source.as_deref() {
+        Some(path) => validate_claude_source_path(std::path::Path::new(path)).ok(),
+        None => find_claude_session_file(&conversation_id),
+    };
+
+    // 强制失效缓存：紧接着的 parse_claude_session 是无缓存重读，保证拿到磁盘最新内容
+    if let Some(ref path) = resolved_path {
+        invalidate_session_cache(path);
+    }
+
+    // 重读会话并推送 messages-updated（幂等语义同 retry_message）
+    let mut emitted = false;
+    if let Some(path) = resolved_path.as_ref() {
+        if session_id_matches_path(&conversation_id, path) {
+            if let Some(conv) = parse_claude_session(path) {
+                let payload = conversation_to_payload(&conv);
+                let _ = app.emit("messages-updated", &payload);
+                emitted = true;
+            }
+        }
+    }
+    if !emitted {
+        // 无会话文件或解析失败：退回到持久化状态重读，保证前端仍能同步
+        if let Some(conv) = load_claude_history()
+            .into_iter()
+            .find(|c| c.id == conversation_id)
+        {
+            let payload = conversation_to_payload(&conv);
+            let _ = app.emit("messages-updated", &payload);
+        } else {
+            let source_path_str = resolved_path.map(|p| p.to_string_lossy().to_string());
+            let _ = app.emit(
+                "messages-updated",
+                SessionEventPayload {
+                    conversation_id: conversation_id.clone(),
+                    title: "Untitled".to_string(),
+                    messages: Vec::new(),
+                    project_dir: None,
+                    source_path: source_path_str,
+                    updated_at: chrono::Utc::now().timestamp(),
+                    context_tokens: None,
+                    last_model: None,
+                    usage: None,
+                },
+            );
+        }
+    }
+
+    // 校准运行态 + 按需重启常驻进程以重读会话启动配置（见函数注释）
+    if is_process_registered(&conversation_id) {
+        if is_turn_active(&conversation_id) {
+            // 正在执行一轮：不打断，保留进程。重编的提示词本轮无法生效，等回落空闲再刷新。
+        } else {
+            // 空闲常驻进程：优雅停下 → 下次发送走 --resume 重新读全局提示词；
+            // 停下后清掉 aborted 标记，以免 next spawn 被误判为用户取消而强杀。
+            let _ = session_stop_graceful_async(conversation_id.clone(), "刷新重连").await;
+            clear_session_aborted(&conversation_id);
+            let _ = app.emit("session-ended", Some(conversation_id.clone()));
+        }
+    } else if pending_process_keys().is_empty() {
+        // 无常驻进程，且当前没有正在初始化（pending-key）的会话 → 会话已断开：
+        // 推送 session-ended 让前端清掉残留的运行态，下次发送将 --resume 重连。
+        // 一并清掉可能残留的 aborted 标记，保证重连 spawn 不被误杀。
+        clear_session_aborted(&conversation_id);
+        let _ = app.emit("session-ended", Some(conversation_id));
+    }
+
+    Ok(())
+}

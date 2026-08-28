@@ -29,6 +29,11 @@ export function retryMessage(args: {
   return invoke('retry_message', args);
 }
 
+/** 重连 / 刷新会话：强制从磁盘重读该会话并校准运行态，后端会推送 messages-updated / session-ended */
+export function reloadSession(conversationId: string, sourcePath?: string | null): Promise<void> {
+  return invoke('reload_session', { conversationId, sourcePath });
+}
+
 export function abortSession(args?: {
   conversationId?: string;
   runId?: string;

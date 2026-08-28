@@ -109,17 +109,31 @@ export function renderChatHeaderHtml(conversation: Conversation | undefined): st
       ${
         canCopySessionId
           ? `
-        <button
-          type="button"
-          class="session-id session-id-copy"
-          id="session-id-copy"
-          data-session-id="${escapeHtml(sessionId)}"
-          title="${escapeHtml(sessionTitle)}"
-          aria-label="${escapeHtml(sessionTitle)}"
-        >
-          <span class="session-id-text">${escapeHtml(sessionId)}</span>
-          ${terminalIconSvg}
-        </button>
+        <div class="chat-header-actions">
+          <button
+            type="button"
+            class="session-id session-id-copy"
+            id="session-id-copy"
+            data-session-id="${escapeHtml(sessionId)}"
+            title="${escapeHtml(sessionTitle)}"
+            aria-label="${escapeHtml(sessionTitle)}"
+          >
+            <span class="session-id-text">${escapeHtml(sessionId)}</span>
+            ${terminalIconSvg}
+          </button>
+          <button
+            type="button"
+            class="session-reload-btn"
+            id="session-reload-btn"
+            title="重连 / 刷新会话"
+            aria-label="重连 / 刷新会话"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21 12a9 9 0 1 1-2.64-6.36"></path>
+              <polyline points="21 3 21 9 15 9"></polyline>
+            </svg>
+          </button>
+        </div>
       `
           : `<span class="session-id">${escapeHtml(sessionId)}</span>`
       }

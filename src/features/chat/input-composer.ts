@@ -67,11 +67,42 @@ export async function handleSessionIdClick() {
 
 export function bindSessionIdCopyEvents() {
   const control = document.querySelector('#session-id-copy');
-  if (!control) {
-    return;
+  if (control) {
+    control.removeEventListener('click', handleSessionIdClick);
+    control.addEventListener('click', handleSessionIdClick);
   }
-  control.removeEventListener('click', handleSessionIdClick);
-  control.addEventListener('click', handleSessionIdClick);
+  bindSessionReloadEvents();
+}
+
+/** 点击「刷新 / 重连会话」：强制后端重读会话并校准运行态（后端会回推 messages-updated）。
+ *  若常驻进程空闲，后端会优雅停止它，使下次发送走 --resume 重连并重读全局提示词
+ *  （`reload_session` 在 execute.rs）。正在执行一轮时不打断进程。 */
+export async function handleSessionReloadClick() {
+  const cid = appState.activeConversationId;
+  if (!cid) return;
+  const btn = document.querySelector<HTMLButtonElement>('#session-reload-btn');
+  if (btn) {
+    btn.classList.add('is-loading');
+    btn.setAttribute('disabled', 'true');
+  }
+  try {
+    await api.reloadSession(cid, appState.activeConversationSourcePath);
+  } catch (e) {
+    console.error('重连会话失败:', e);
+    showCopyToastMsg('重连失败');
+  } finally {
+    if (btn) {
+      btn.classList.remove('is-loading');
+      btn.removeAttribute('disabled');
+    }
+  }
+}
+
+export function bindSessionReloadEvents() {
+  const btn = document.querySelector<HTMLButtonElement>('#session-reload-btn');
+  if (!btn) return;
+  btn.removeEventListener('click', handleSessionReloadClick);
+  btn.addEventListener('click', handleSessionReloadClick);
 }
 
 export function renderSendButtonHtml(): string {
