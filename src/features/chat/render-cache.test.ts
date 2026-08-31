@@ -116,4 +116,18 @@ describe('renderCacheKey（按会话渲染缓存键）', () => {
     appState.activeConversationId = 'c1';
     expect(renderCacheKey(c1)).toBe(k1Expanded);
   });
+
+  it('新会话 pending 态下不同问题内容的 key 不同（防止串会话缓存命中）', () => {
+    // 会话1：新会话尚未落盘，activeConversationId 为空，走 pending 缓存
+    appState.activeConversationId = '';
+    appState.pendingUserMessage = '问题A';
+    appState.pendingUserMessageConvId = null;
+    const k1 = renderCacheKey(undefined);
+
+    // 会话1结束后重置，会话2同样处于新会话 pending 态但内容不同
+    appState.pendingUserMessage = '问题B';
+    const k2 = renderCacheKey(undefined);
+
+    expect(k1).not.toBe(k2);
+  });
 });

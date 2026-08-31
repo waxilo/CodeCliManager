@@ -222,7 +222,8 @@ function chatRenderKey(conversation: Conversation | undefined): string {
     last?.timestamp ?? '',
     getActiveMessageWindowSize(),
     appState.runningSessions.has(appState.activeConversationId) ? 'r' : '',
-    appState.pendingUserMessage ? 'p' : '',
+    appState.pendingUserMessage ?? '',
+    appState.pendingUserMessageConvId ?? '',
     appState.transientSessionError ? 'e' : '',
     pendingAskSignature(sid),
     streamingSignature(),
@@ -249,7 +250,8 @@ function committedChatRenderKey(conversation: Conversation | undefined): string 
     last?.id ?? '',
     last?.timestamp ?? '',
     getActiveMessageWindowSize(),
-    appState.pendingUserMessage ? 'p' : '',
+    appState.pendingUserMessage ?? '',
+    appState.pendingUserMessageConvId ?? '',
     appState.transientSessionError ? 'e' : '',
   ].join('|');
 }
