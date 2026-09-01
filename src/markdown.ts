@@ -39,7 +39,26 @@ renderer.link = function (linkObj: { href: string; title?: string | null; text: 
   return `<a href="${href}"${title} target="_blank" rel="noopener noreferrer">${linkObj.text}</a>`;
 };
 
-marked.use({ renderer });
+marked.use({
+  renderer,
+  tokenizer: {
+    // marked 内置 del 规则允许单个 `~` 触发删除线（非标准 GFM，标准要求 `~~`）。
+    // 文本中两处互不相关的单个 `~`（例如用波浪线表示行号区间 "1695~1696"）会被错误配对，
+    // 把中间所有内容（包括反引号行内代码）整体包进 <del>。这里强制要求双波浪线才算删除线。
+    del(src: string) {
+      const match = /^~~(?=[^\s~])([\s\S]*?[^\s~])~~/.exec(src);
+      if (match) {
+        return {
+          type: 'del',
+          raw: match[0],
+          text: match[1],
+          tokens: this.lexer.inlineTokens(match[1]),
+        };
+      }
+      return undefined;
+    },
+  },
+});
 
 /**
  * 复制文本到剪贴板（自动降级：navigator.clipboard → execCommand）

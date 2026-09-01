@@ -196,7 +196,24 @@ export function buildDisplayMessages(conversation: Conversation | undefined): Me
   // 进行中的 Task（Subagent）同样不注入消息流：运行中子代理由侧边栏「子代理」标签页
   // 承载，主输出页面只保留用户/助手正文。
 
-  return dedupeAdjacentDuplicateMessages(messages);
+  return dedupeAdjacentDuplicateMessages(dropStaleErrors(messages));
+}
+
+/**
+ * 报错卡不保留历史：只展示「最新一条非错误消息」之后（或同时）产生的错误。
+ * 一旦有更新的用户/助手/工具消息出现（不管是新一轮，还是同一条消息重新生成后
+ * 成功产出），更早的报错就不再展示——比按位置精确插回原位更简单，且天然兼容
+ * 合并逻辑把报错卡排到错误位置的情况（用时间戳而非数组顺序判断新旧）。
+ */
+function dropStaleErrors(messages: Message[]): Message[] {
+  let latestNonErrorTs = -Infinity;
+  for (const m of messages) {
+    if (m.role !== 'error' && m.timestamp > latestNonErrorTs) {
+      latestNonErrorTs = m.timestamp;
+    }
+  }
+  if (latestNonErrorTs === -Infinity) return messages;
+  return messages.filter((m) => m.role !== 'error' || m.timestamp >= latestNonErrorTs);
 }
 
 export function renderConversationMessagesInnerHtml(messages: Message[]): string {

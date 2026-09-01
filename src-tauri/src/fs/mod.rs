@@ -158,7 +158,12 @@ fn validate_readable_path(file_path: &str) -> Result<PathBuf, String> {
         ));
     }
     if let Some(home) = dirs::home_dir() {
-        if !canonical.starts_with(&home) {
+        // Windows 上 canonicalize() 会加上 `\\?\` 扩展长度前缀，而 dirs::home_dir()
+        // 从不带这个前缀，导致 canonical.starts_with(&home) 在 Windows 上永远为 false
+        // （所有文件预览请求都被误判为「不在用户目录内」而拒绝）。把 home 也 canonicalize
+        // 一次，让两边前缀口径一致；home 目录本身不存在/无法解析时才回退用原始 home 比较。
+        let canonical_home = home.canonicalize().unwrap_or(home);
+        if !canonical.starts_with(&canonical_home) {
             return Err(format!("仅允许读取用户目录内的文件: {}", file_path));
         }
     }
@@ -355,6 +360,21 @@ mod tests {
     #[test]
     fn rejects_nonexistent_read_paths() {
         assert!(validate_readable_path("/nonexistent/definitely-missing.txt").is_err());
+    }
+
+    #[test]
+    fn accepts_normal_files_inside_home() {
+        // 回归用例：Windows 上 canonicalize() 会给路径加 `\\?\` 扩展长度前缀，
+        // 而 dirs::home_dir() 不带这个前缀。曾经的实现直接用未 canonicalize 的
+        // home 去比较，导致用户目录内的正常文件全部被误判为「不在用户目录内」
+        // 而拒绝（例如粘贴图片后再次打开预览失败）。
+        let Some(home) = dirs::home_dir() else { return; };
+        let path = home.join(".codecli-manager-test-normal.txt");
+        let _ = std::fs::remove_file(&path);
+        std::fs::write(&path, b"hello").expect("create test file");
+        let result = validate_readable_path(path.to_str().expect("path is utf-8"));
+        let _ = std::fs::remove_file(&path);
+        assert!(result.is_ok(), "normal file inside home should be accepted: {result:?}");
     }
 
     #[test]

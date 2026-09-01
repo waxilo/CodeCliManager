@@ -183,3 +183,62 @@ describe('buildDisplayMessages：主视图过滤子代理（Task）卡，保留 
     expect(out.map((m) => m.role)).toEqual(['assistant']);
   });
 });
+
+describe('buildDisplayMessages：过滤掉旧于最新非错误消息的报错卡', () => {
+  beforeEach(() => {
+    appState.activeConversationId = 'c1';
+    appState.pendingUserMessage = null;
+    appState.pendingUserMessageConvId = null;
+    appState.transientSessionError = null;
+  });
+
+  function messageAt(id: string, role: Message['role'], content: string, timestamp: number): Message {
+    return { id, role, content, timestamp };
+  }
+
+  it('旧报错在新一轮成功回复之后不再展示', () => {
+    const msgs: Message[] = [
+      messageAt('u1', 'user', '第一次提问', 100),
+      messageAt('err1', 'error', '上游服务繁忙', 105),
+      messageAt('u2', 'user', '第二次提问', 200),
+      messageAt('a2', 'assistant', '第二次提问的正常回复', 210),
+    ];
+    const out = buildDisplayMessages({ id: 'c1', messages: msgs } as never);
+    expect(out.some((m) => m.role === 'error')).toBe(false);
+    expect(out.map((m) => m.id)).toEqual(['u1', 'u2', 'a2']);
+  });
+
+  it('同一条用户消息重新生成成功后，重新生成之前的报错同样被过滤（不产生新用户时间戳）', () => {
+    const msgs: Message[] = [
+      messageAt('u1', 'user', '提问', 100),
+      messageAt('err1', 'error', '上游服务繁忙', 105),
+      // retry 场景：没有新的 user 消息，只有更新时间戳的 assistant 回复
+      messageAt('a1', 'assistant', '重新生成后的正常回复', 300),
+    ];
+    const out = buildDisplayMessages({ id: 'c1', messages: msgs } as never);
+    expect(out.some((m) => m.role === 'error')).toBe(false);
+    expect(out.map((m) => m.id)).toEqual(['u1', 'a1']);
+  });
+
+  it('最新一条消息就是报错卡时，正常展示（当前失败、尚未恢复）', () => {
+    const msgs: Message[] = [
+      messageAt('u1', 'user', '提问', 100),
+      messageAt('a1', 'assistant', '第一次回复', 110),
+      messageAt('err1', 'error', '这次调用失败', 200),
+    ];
+    const out = buildDisplayMessages({ id: 'c1', messages: msgs } as never);
+    expect(out.map((m) => m.id)).toEqual(['u1', 'a1', 'err1']);
+  });
+
+  it('多条报错同时早于最新消息时，全部过滤，不只是过滤最早一条', () => {
+    const msgs: Message[] = [
+      messageAt('u1', 'user', '提问', 100),
+      messageAt('err1', 'error', '第一次失败', 105),
+      messageAt('err2', 'error', '第二次失败', 106),
+      messageAt('a1', 'assistant', '重试成功', 300),
+    ];
+    const out = buildDisplayMessages({ id: 'c1', messages: msgs } as never);
+    expect(out.some((m) => m.role === 'error')).toBe(false);
+    expect(out.map((m) => m.id)).toEqual(['u1', 'a1']);
+  });
+});
