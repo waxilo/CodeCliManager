@@ -1,26 +1,7 @@
-/* ── MCP 服务器管理页 ──────────────────────────────────────────────── */
-.app-container.is-mcp .sidebar,
-.app-container.is-mcp .sidebar-resizer {
-  width: 0;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.main-content.is-mcp {
-  overflow: hidden;
-}
-
-.mcp-view {
-  flex: 1;
-  min-height: 0;
+/* ── 「技能」页 MCP 分区 ──────────────────────────────────────────────── */
+.mcp-section.settings-update-view {
   display: flex;
   flex-direction: column;
-  padding: 20px 24px 16px;
-  overflow: hidden;
-}
-
-.mcp-view-header {
-  flex-shrink: 0;
 }
 
 .mcp-toolbar {

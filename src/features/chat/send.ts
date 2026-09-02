@@ -18,7 +18,7 @@ import { refreshModelInfo } from './model-picker';
 import { hideSendingState } from './session-context';
 import { markSessionRunStart, setTransientStatus } from './run-status';
 import { isImageFile, unwrapFileRef } from '../files/index';
-import { dismissMcpViewState } from '../mcp/mount';
+import { dismissSkillsViewState } from '../skills/mount';
 import { normalizeModelKey } from '../permissions/permission-mode';
 import { dismissSettingsViewState } from '../settings/mount';
 import { dismissKiroViewState } from '../kiro/mount';
@@ -156,7 +156,7 @@ export async function pickNewWorkspaceDirectory(): Promise<void> {
   // 完成选目录后执行创建新会话
   dismissApiConfigViewState();
   dismissSettingsViewState();
-  dismissMcpViewState();
+  dismissSkillsViewState();
   dismissKiroViewState();
   stashComposerDraft();
   appState.activeConversationId = '';

@@ -10,8 +10,8 @@ import { startMainBalanceBarAutoRefresh } from '../status-bar';
 export function openApiConfigView() {
   if (appState.isApiConfigViewActive) return;
   // 全屏管理页互斥
-  if (appState.isMcpViewActive) {
-    shellApi.dismissMcpViewState();
+  if (appState.isSkillsViewActive) {
+    shellApi.dismissSkillsViewState();
   }
   if (appState.isKiroViewActive) {
     shellApi.dismissKiroViewState();

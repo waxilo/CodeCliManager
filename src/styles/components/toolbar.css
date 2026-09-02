@@ -432,8 +432,8 @@ a.claude-update-action {
   fill: currentColor;
 }
 
-/* MCP 图标采用描边风格，覆盖默认填充 */
-.toolbar-settings-btn.mcp-btn .toolbar-settings-btn-icon svg {
+/* 技能图标采用描边风格，覆盖默认填充 */
+.toolbar-settings-btn.skills-btn .toolbar-settings-btn-icon svg {
   fill: none;
   stroke: currentColor;
 }

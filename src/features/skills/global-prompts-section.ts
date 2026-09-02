@@ -1,61 +1,54 @@
 import * as api from '../../api';
 import { escapeHtml } from '../../utils';
-import type { GlobalSkillEntry, GlobalPromptEntry, GlobalPromptsState } from '../../types';
+import type { GlobalPromptEntry, GlobalPromptsState } from '../../types';
 
 /** 挂载令牌：快速切换分区时旧请求不得覆盖新渲染 */
-let globalConfigMountToken = 0;
+let mountToken = 0;
 
-/** 设置页「全局 Skills 与提示词」分区：只读查询 ~/.claude 全局配置 */
-export function renderGlobalConfigSectionHtml(): string {
+/** 「技能」页全局提示词分区：CLAUDE.md（可编辑）+ 斜杠命令（只读） */
+export function renderGlobalPromptsSectionHtml(): string {
   return `
-    <div class="settings-update-view" id="settings-global-config-view">
+    <div class="settings-update-view" id="skills-global-prompts-view">
       <div class="global-config-toolbar">
-        <span class="global-config-subtitle">查询 ~/.claude 下的全局 Skills、CLAUDE.md 与斜杠命令；CLAUDE.md 可直接编辑</span>
-        <button type="button" class="global-config-refresh" id="global-config-refresh">刷新</button>
+        <span class="global-config-subtitle">查询 ~/.claude 下的 CLAUDE.md 与斜杠命令；CLAUDE.md 可直接编辑</span>
+        <button type="button" class="global-config-refresh" id="global-prompts-refresh">刷新</button>
       </div>
-      <div class="global-config-section">
+      <div class="global-config-section" id="global-prompts-section">
         <div class="global-config-loading">加载中…</div>
       </div>
     </div>
   `;
 }
 
-/** 挂载分区：拉取全局 Skills 与提示词并渲染（token 防竞态，双请求并行） */
-export async function mountGlobalConfigSection(): Promise<void> {
-  const token = ++globalConfigMountToken;
-  const section = document.querySelector('.global-config-section');
+/** 挂载分区：拉取全局提示词并渲染（token 防竞态） */
+export async function mountGlobalPromptsSection(): Promise<void> {
+  const token = ++mountToken;
+  const section = document.querySelector('#global-prompts-section');
   if (!section) return;
   section.innerHTML = '<div class="global-config-loading">加载中…</div>';
 
-  const [skillsRes, promptsRes] = await Promise.all([
-    api
-      .getGlobalSkills()
-      .then((v): { value: GlobalSkillEntry[]; error?: string } => ({ value: v }))
-      .catch((e): { value: GlobalSkillEntry[]; error?: string } => ({
-        value: [],
-        error: String(e),
-      })),
-    api
-      .getGlobalPrompts()
-      .then((v): { value: GlobalPromptsState | null; error?: string } => ({ value: v }))
-      .catch((e): { value: GlobalPromptsState | null; error?: string } => ({
-        value: null,
-        error: String(e),
-      })),
-  ]);
+  let prompts: GlobalPromptsState | null = null;
+  let error = '';
+  try {
+    prompts = await api.getGlobalPrompts();
+  } catch (e) {
+    error = String(e);
+  }
 
   // 竞态防护：期间已切走/重挂载则丢弃本次结果
-  if (token !== globalConfigMountToken || !section.isConnected) return;
+  if (token !== mountToken || !section.isConnected) return;
 
-  section.innerHTML = `
-    ${renderSkillsBlock(skillsRes.value, skillsRes.error || '')}
-    ${renderPromptsBlock(promptsRes.value, promptsRes.error || '')}
-  `;
-  document
-    .querySelector<HTMLButtonElement>('#global-config-refresh')
-    ?.addEventListener('click', () => {
-      void mountGlobalConfigSection();
-    });
+  section.innerHTML = renderPromptsBlock(prompts, error);
+
+  const view = document.querySelector('#skills-global-prompts-view');
+  if (view && (view as HTMLElement).dataset.bound !== '1') {
+    (view as HTMLElement).dataset.bound = '1';
+    view
+      .querySelector<HTMLButtonElement>('#global-prompts-refresh')
+      ?.addEventListener('click', () => {
+        void mountGlobalPromptsSection();
+      });
+  }
   bindGlobalClaudeEditor();
 }
 
@@ -91,35 +84,6 @@ function bindGlobalClaudeEditor(): void {
       void save();
     }
   });
-}
-
-function renderSkillsBlock(skills: GlobalSkillEntry[], error: string): string {
-  const cards = skills
-    .map(
-      (s) => `
-      <div class="global-config-card">
-        <div class="global-config-card-title-row">
-          <span class="global-config-card-title">${escapeHtml(s.display_name)}</span>
-          <span class="global-config-card-badge">skill</span>
-        </div>
-        ${s.description
-          ? `<p class="global-config-card-desc">${escapeHtml(s.description)}</p>`
-          : '<p class="global-config-card-desc global-config-muted">（无描述）</p>'}
-        <p class="global-config-card-path" title="${escapeHtml(s.path)}">${escapeHtml(s.path)}</p>
-      </div>
-    `,
-    )
-    .join('');
-  return `
-    <section class="global-config-block">
-      <h3 class="global-config-title">全局 Skills</h3>
-      <p class="global-config-subtitle">位于 ~/.claude/skills/ 下，对 Claude Code 全局生效</p>
-      ${error ? `<p class="global-config-error" role="alert">加载失败：${escapeHtml(error)}</p>` : ''}
-      ${skills.length > 0 ? `<div class="global-config-cards">${cards}</div>` : error ? '' : `
-        <div class="global-config-empty">尚未安装全局 Skills（~/.claude/skills/ 不存在或为空）</div>
-      `}
-    </section>
-  `;
 }
 
 function renderPromptsBlock(prompts: GlobalPromptsState | null, error: string): string {
@@ -168,8 +132,6 @@ function renderPromptsBlock(prompts: GlobalPromptsState | null, error: string): 
 
   return `
     <section class="global-config-block">
-      <h3 class="global-config-title">全局提示词</h3>
-      <p class="global-config-subtitle">CLAUDE.md 与斜杠命令对 Claude Code 全局生效；编辑并保存后将写入 ~/.claude/CLAUDE.md</p>
       ${error ? `<p class="global-config-error" role="alert">加载失败：${escapeHtml(error)}</p>` : ''}
       <h4 class="global-config-sub-title">CLAUDE.md（全局记忆 / 提示词）</h4>
       ${mdHtml}

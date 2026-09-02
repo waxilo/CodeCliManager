@@ -32,23 +32,23 @@ export const shellApi: {
   ensureChatViewVisible: VoidFn;
   openApiConfigView: VoidFn;
   openSettingsView: VoidFn;
-  openMcpView: VoidFn;
+  openSkillsView: VoidFn;
   openKiroView: VoidFn;
   closeApiConfigView: VoidFn;
   closeSettingsView: VoidFn;
-  closeMcpView: VoidFn;
+  closeSkillsView: VoidFn;
   closeKiroView: VoidFn;
   /** 增量进入管理页（摘取保存主视图 DOM，不整页重绘） */
-  enterManagementView: (kind: 'api-config' | 'settings' | 'mcp') => void;
+  enterManagementView: (kind: 'api-config' | 'settings' | 'skills') => void;
   /** 增量退出管理页；返回是否走增量恢复（false = 已回退全量 render） */
   exitManagementView: () => boolean;
   dismissApiConfigViewState: VoidFn;
   dismissSettingsViewState: VoidFn;
-  dismissMcpViewState: VoidFn;
+  dismissSkillsViewState: VoidFn;
   dismissKiroViewState: VoidFn;
   mountApiConfigView: AsyncVoidFn;
   mountSettingsView: VoidFn;
-  mountMcpView: AsyncVoidFn;
+  mountSkillsView: VoidFn;
   mountKiroView: AsyncVoidFn;
   newChat: VoidFn;
   renderKiroCard: (status: unknown) => void;
@@ -84,21 +84,21 @@ export const shellApi: {
   ensureChatViewVisible: () => {},
   openApiConfigView: () => {},
   openSettingsView: () => {},
-  openMcpView: () => {},
+  openSkillsView: () => {},
   openKiroView: () => {},
   closeApiConfigView: () => {},
   closeSettingsView: () => {},
-  closeMcpView: () => {},
+  closeSkillsView: () => {},
   closeKiroView: () => {},
   enterManagementView: () => {},
   exitManagementView: () => false,
   dismissApiConfigViewState: () => {},
   dismissSettingsViewState: () => {},
-  dismissMcpViewState: () => {},
+  dismissSkillsViewState: () => {},
   dismissKiroViewState: () => {},
   mountApiConfigView: async () => {},
   mountSettingsView: () => {},
-  mountMcpView: async () => {},
+  mountSkillsView: () => {},
   mountKiroView: async () => {},
   newChat: () => {},
   renderKiroCard: () => {},

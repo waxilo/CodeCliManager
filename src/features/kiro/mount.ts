@@ -43,15 +43,15 @@ export function openKiroView() {
   }
   if (!appState.kiroStatus?.available) return;
   const leavingFullPageView =
-    appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive;
+    appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isSkillsViewActive;
   if (appState.isApiConfigViewActive) {
     shellApi.dismissApiConfigViewState();
   }
   if (appState.isSettingsViewActive) {
     shellApi.dismissSettingsViewState();
   }
-  if (appState.isMcpViewActive) {
-    shellApi.dismissMcpViewState();
+  if (appState.isSkillsViewActive) {
+    shellApi.dismissSkillsViewState();
   }
   if (leavingFullPageView) {
     shellApi.exitManagementView();

@@ -53,7 +53,7 @@ describe('侧边栏多视图页签', () => {
     appState.pendingProjectDir = '';
     appState.isApiConfigViewActive = false;
     appState.isSettingsViewActive = false;
-    appState.isMcpViewActive = false;
+    appState.isSkillsViewActive = false;
     appState.isKiroViewActive = false;
   });
 
@@ -120,7 +120,7 @@ describe('活跃 / 归档会话拆分', () => {
     appState.pendingProjectDir = '';
     appState.isApiConfigViewActive = false;
     appState.isSettingsViewActive = false;
-    appState.isMcpViewActive = false;
+    appState.isSkillsViewActive = false;
     appState.isKiroViewActive = false;
   });
   afterEach(() => {

@@ -1,15 +1,10 @@
 import { appState } from '../../state';
 import { escapeHtml } from '../../utils';
-export function renderMcpViewHtml(): string {
+
+/** 「技能」页 MCP 分区：服务器列表 + 添加/导入入口 */
+export function renderMcpSectionHtml(): string {
   return `
-    <div class="mcp-view" id="mcp-view">
-      <div class="settings-header mcp-view-header">
-        <div>
-          <h3 class="settings-title">MCP 服务器管理</h3>
-          <p class="settings-subtitle">管理 Claude Code 用户级 MCP 服务器，配置写入 ~/.claude.json</p>
-        </div>
-        <button type="button" class="settings-close-btn" aria-label="返回聊天">✕</button>
-      </div>
+    <div class="settings-update-view mcp-section" id="skills-mcp-section">
       <div class="mcp-toolbar">
         <div class="mcp-toolbar-actions">
           <button type="button" class="settings-btn-primary mcp-add-btn" id="mcp-add-btn">+ 添加服务器</button>
@@ -23,4 +18,3 @@ export function renderMcpViewHtml(): string {
     </div>
   `;
 }
-

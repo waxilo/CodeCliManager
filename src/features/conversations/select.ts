@@ -6,7 +6,7 @@ import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshConversationFromBackend } from './load';
 import { scheduleUiRefresh } from '../../ui';
 import { conversationInstanceKey } from './normalize';
-import { dismissMcpViewState } from '../mcp/mount';
+import { dismissSkillsViewState } from '../skills/mount';
 import { dismissSettingsViewState } from '../settings/mount';
 import { dismissKiroViewState } from '../kiro/mount';
 import { renderChatAreaHtml, renderMessageListShellHtml } from '../chat/render-chat';
@@ -18,7 +18,7 @@ let selectGeneration = 0;
 const conversationRequests = new Map<string, Promise<void>>();
 
 function isManagementDomVisible(): boolean {
-  return Boolean(document.querySelector('#api-config-view, #settings-view, #mcp-view'));
+  return Boolean(document.querySelector('#api-config-view, #settings-view, #skills-mcp-section, #skills-global-skills-view, #skills-global-prompts-view'));
 }
 
 /** 仅切换侧栏高亮，避免整表 innerHTML 重建 */
@@ -199,11 +199,11 @@ function refreshConversationOnce(id: string, sourcePath: string | null): Promise
 
 export function selectConversation(id: string, sourcePath: string | null = null) {
   const wasFullPageManagement =
-    appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive;
+    appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isSkillsViewActive;
 
   dismissApiConfigViewState();
   dismissSettingsViewState();
-  dismissMcpViewState();
+  dismissSkillsViewState();
   dismissKiroViewState();
 
   const generation = ++selectGeneration;

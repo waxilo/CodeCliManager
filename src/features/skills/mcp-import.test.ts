@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { appState } from '../../state';
-import { parseMcpServersJson, openMcpImportDialog } from './import-dialog';
+import { parseMcpServersJson, openMcpImportDialog } from './mcp-import-dialog';
 
 const upsertMock = vi.fn();
 

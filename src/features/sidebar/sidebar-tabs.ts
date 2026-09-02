@@ -123,7 +123,7 @@ export function refreshActiveTabContent(): void {
   if (
     appState.isApiConfigViewActive ||
     appState.isSettingsViewActive ||
-    appState.isMcpViewActive ||
+    appState.isSkillsViewActive ||
     appState.isKiroViewActive
   ) {
     return;

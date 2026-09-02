@@ -62,6 +62,7 @@ export type {
   AppUpdateCheckStatus,
   AppUpdateInfo,
   SettingsSection,
+  SkillsSection,
   ThemeMode,
 } from './updates';
 export type { GlobalSkillEntry, GlobalPromptEntry, GlobalPromptsState } from './global-config';

@@ -6,7 +6,7 @@ import { showConfirmDialog } from '../../ui';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshModelInfo } from '../chat/model-picker';
 import { invalidateFileCache, stashComposerDraft } from '../files/index';
-import { dismissMcpViewState } from '../mcp/mount';
+import { dismissSkillsViewState } from '../skills/mount';
 import { dismissSettingsViewState } from '../settings/mount';
 import { dismissKiroViewState } from '../kiro/mount';
 export function getWorkspaceDisplayName(path: string): string {
@@ -99,7 +99,7 @@ export async function newChatInWorkspace(workspacePath: string): Promise<void> {
   }
   dismissApiConfigViewState();
   dismissSettingsViewState();
-  dismissMcpViewState();
+  dismissSkillsViewState();
   dismissKiroViewState();
   // 清除会话状态前保存当前输入草稿（对齐 pickNewWorkspaceDirectory）
   stashComposerDraft();

@@ -224,6 +224,49 @@ pub fn get_global_skills() -> Result<Vec<GlobalSkillEntry>, String> {
     Ok(entries)
 }
 
+/// 校验 Skill 名称只允许纯目录名，避免路径穿越到 skills 目录之外。
+/// 拒绝路径分隔符、`..`/`.`，以及 `:`（Windows 下 "C:foo"/"C:\Windows" 这类
+/// drive-relative/drive-absolute 名称会让 `PathBuf::join` 完全脱离 base 路径）。
+fn validate_skill_name(trimmed: &str) -> Result<(), String> {
+    if trimmed.is_empty() {
+        return Err("Skill 名称不能为空".to_string());
+    }
+    if trimmed.contains('/')
+        || trimmed.contains('\\')
+        || trimmed.contains(':')
+        || trimmed == ".."
+        || trimmed == "."
+    {
+        return Err("非法的 Skill 名称".to_string());
+    }
+    Ok(())
+}
+
+/// 删除全局 Skill：整目录移除 <skills_dir>/<name>/
+fn delete_skill_dir(skills_dir: &Path, name: &str) -> Result<(), String> {
+    let trimmed = name.trim();
+    validate_skill_name(trimmed)?;
+    let dir = skills_dir.join(trimmed);
+    // 纵深防御：即便上面的名称校验被绕过，也拒绝任何跳出 skills_dir 的结果路径
+    if dir.parent() != Some(skills_dir) {
+        return Err("非法的 Skill 名称".to_string());
+    }
+    if dir.is_symlink() {
+        return Err("该 Skill 目录是符号链接，已拒绝删除".to_string());
+    }
+    if !dir.is_dir() {
+        return Err(format!("Skill 「{trimmed}」不存在"));
+    }
+    fs::remove_dir_all(&dir).map_err(|e| format!("删除失败: {e}"))?;
+    Ok(())
+}
+
+/// 删除全局 Skill：整目录移除 ~/.claude/skills/<name>/
+#[tauri::command]
+pub fn delete_global_skill(name: String) -> Result<(), String> {
+    delete_skill_dir(&claude_home().join("skills"), &name)
+}
+
 /// 查询全局生效的提示词：~/.claude/CLAUDE.md 与 ~/.claude/commands/*.md
 #[tauri::command]
 pub fn get_global_prompts() -> Result<GlobalPromptsState, String> {
@@ -399,5 +442,42 @@ mod tests {
         // 全 ASCII 不受影响（省略号 … 为 3 字节，连同换行计入追加长度）
         let a = truncate_utf8_safe("a".repeat(200), 100);
         assert_eq!(a.len(), 100 + "…（内容过长已截断）".len() + 1);
+    }
+
+    #[test]
+    fn delete_skill_dir_rejects_traversal_names() {
+        let dir = std::env::temp_dir().join(format!("ccm-skill-del-test-{}", std::process::id()));
+        assert!(delete_skill_dir(&dir, "").is_err());
+        assert!(delete_skill_dir(&dir, "  ").is_err());
+        assert!(delete_skill_dir(&dir, "..").is_err());
+        assert!(delete_skill_dir(&dir, ".").is_err());
+        assert!(delete_skill_dir(&dir, "../escape").is_err());
+        assert!(delete_skill_dir(&dir, "a/b").is_err());
+        assert!(delete_skill_dir(&dir, "a\\b").is_err());
+        // Windows drive-relative/drive-absolute 名称：PathBuf::join 会完全脱离 base，
+        // 必须被 validate_skill_name 的 `:` 校验 + parent() 纵深防御双重拦截
+        assert!(delete_skill_dir(&dir, "C:secrets").is_err());
+        assert!(delete_skill_dir(&dir, r"C:\Windows\System32").is_err());
+    }
+
+    #[test]
+    fn delete_skill_dir_errors_when_missing() {
+        let dir = std::env::temp_dir().join(format!("ccm-skill-del-test-missing-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let err = delete_skill_dir(&dir, "not-there").unwrap_err();
+        assert!(err.contains("不存在"), "err: {err}");
+    }
+
+    #[test]
+    fn delete_skill_dir_removes_existing_directory() {
+        let dir = std::env::temp_dir().join(format!("ccm-skill-del-test-ok-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let target = dir.join("my-skill");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("SKILL.md"), "---\nname: my-skill\n---\n").unwrap();
+        assert!(target.is_dir());
+        delete_skill_dir(&dir, "my-skill").unwrap();
+        assert!(!target.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

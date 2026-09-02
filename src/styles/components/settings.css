@@ -467,7 +467,7 @@
 }
 
 
-/* 设置页「全局 Skills 与提示词」分区 */
+/* 「技能」页全局 Skills / 全局提示词分区（复用同一套卡片样式） */
 .global-config-section {
   display: flex;
   flex-direction: column;
@@ -528,6 +528,8 @@
 }
 
 .global-config-card-title {
+  flex: 1;
+  min-width: 0;
   font-size: 13px;
   font-weight: 650;
   color: var(--color-text);
@@ -544,6 +546,27 @@
   font-weight: 650;
   color: var(--color-accent);
   background: var(--color-accent-ring);
+}
+
+.global-config-card-delete {
+  flex-shrink: 0;
+  margin-left: auto;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.global-config-card-delete:hover {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border-color: var(--color-danger);
 }
 
 .global-config-card-desc {

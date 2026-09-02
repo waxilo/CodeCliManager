@@ -34,6 +34,9 @@ export interface AppUpdateInfo {
   error: string | null;
 }
 
-export type SettingsSection = 'app-update' | 'claude-update' | 'global-config' | 'dsh';
+export type SettingsSection = 'app-update' | 'claude-update' | 'dsh';
+
+/** 「技能」页三个横向分区：MCP 服务器 / 全局 Skills / 全局提示词 */
+export type SkillsSection = 'mcp' | 'skill' | 'prompts';
 
 export type ThemeMode = 'light' | 'dark';

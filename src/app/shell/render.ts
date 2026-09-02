@@ -15,6 +15,7 @@ import { patchTitlebarActions, renderTitlebarActions } from './titlebar';
 import {
   clearStashedMainDom,
   bindSettingsSectionNav,
+  bindSkillsSectionNav,
   mountActiveManagementView,
 } from './management-view';
 import {
@@ -45,7 +46,7 @@ import {
   renderSettingsViewHtml,
   renderSettingsSidebarHtml,
 } from '../../features/settings';
-import { openMcpView, closeMcpView, renderMcpViewHtml } from '../../features/mcp';
+import { openSkillsView, closeSkillsView, renderSkillsViewHtml, renderSkillsSidebarHtml } from '../../features/skills';
 import { openKiroView, closeKiroView } from '../../features/kiro';
 import { startMainBalanceBarAutoRefresh } from '../../features/status-bar';
 import { loadData } from '../../features/conversations';
@@ -107,9 +108,9 @@ function performRender() {
         </div>
       </header>
       ${appState.dshModeActive ? renderDshEmbedHtml() : `
-      <div class="app-container${getIsSidebarCollapsed() ? ' is-sidebar-collapsed' : ''}${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
-      <div class="sidebar${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : ''}${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? ` is-${getActiveSidebarTab()}` : ''}">
-        ${appState.isApiConfigViewActive ? renderApiConfigSidebarHtml() : appState.isSettingsViewActive ? renderSettingsSidebarHtml() : appState.isMcpViewActive ? '' : `
+      <div class="app-container${getIsSidebarCollapsed() ? ' is-sidebar-collapsed' : ''}${appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isSkillsViewActive ? ' is-api-config' : ''}">
+      <div class="sidebar${appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isSkillsViewActive ? ' is-api-config' : ''}${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isSkillsViewActive ? ` is-${getActiveSidebarTab()}` : ''}">
+        ${appState.isApiConfigViewActive ? renderApiConfigSidebarHtml() : appState.isSettingsViewActive ? renderSettingsSidebarHtml() : appState.isSkillsViewActive ? renderSkillsSidebarHtml() : `
         <div class="sidebar-header">
           <div class="sidebar-header-actions">
             <div class="new-chat-btn-wrapper">
@@ -131,18 +132,18 @@ function performRender() {
         aria-orientation="vertical"
         aria-label="调整侧边栏宽度"
       ></div>
-      <div class="main-content${appState.isApiConfigViewActive || appState.isSettingsViewActive ? ' is-api-config' : appState.isMcpViewActive ? ' is-mcp' : ''}">
-        ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isMcpViewActive ? renderMcpViewHtml() : renderChatAreaHtml({ shellOnly: true })}
+      <div class="main-content${appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isSkillsViewActive ? ' is-api-config' : ''}">
+        ${appState.isApiConfigViewActive ? renderApiConfigViewHtml() : appState.isSettingsViewActive ? renderSettingsViewHtml() : appState.isSkillsViewActive ? renderSkillsViewHtml() : renderChatAreaHtml({ shellOnly: true })}
       </div>
       </div>
-      ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive ? renderBalanceStatusBarHtml() : ''}
+      ${!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isSkillsViewActive ? renderBalanceStatusBarHtml() : ''}
     </div>
       `}
   `;
-  
+
   attachEventListeners();
   // render 重建了发送按钮 DOM，按 appState.runningSessions（与左侧同一逻辑）恢复 loading
-  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive) {
+  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isSkillsViewActive) {
     // 聊天区只渲染了壳：重置指纹后从渲染缓存 / 内容指纹填充，
     // 避免全量重建时把当前会话全部消息再序列化一遍（连点回切/删除后渲染命中缓存）。
     resetChatRenderKey();
@@ -191,11 +192,11 @@ function bindTitlebarActionEvents(): void {
       openSettingsView();
     }
   });
-  document.querySelector('#mcp-btn')?.addEventListener('click', () => {
-    if (appState.isMcpViewActive) {
-      closeMcpView();
+  document.querySelector('#skills-btn')?.addEventListener('click', () => {
+    if (appState.isSkillsViewActive) {
+      closeSkillsView();
     } else {
-      openMcpView();
+      openSkillsView();
     }
   });
 }
@@ -277,11 +278,12 @@ export function attachEventListeners() {
   syncSidebarResponsiveState();
   syncSidebarCollapsedUI();
   bindSettingsSectionNav();
+  bindSkillsSectionNav();
   bindTitlebarActionEvents();
   mountActiveManagementView();
 
   // 拖拽文件自动引用（全屏管理页无输入区，跳过）
-  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isMcpViewActive) {
+  if (!appState.isApiConfigViewActive && !appState.isSettingsViewActive && !appState.isSkillsViewActive) {
     bindDragDropFileRefs();
     bindPermissionModeBarEvents();
     startMainBalanceBarAutoRefresh();

@@ -147,7 +147,7 @@ export function scheduleMainBalanceBar(): void {
   if (pendingBalanceRefresh !== null) return;
   pendingBalanceRefresh = window.setTimeout(() => {
     pendingBalanceRefresh = null;
-    if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isMcpViewActive || appState.isKiroViewActive) return;
+    if (appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isSkillsViewActive || appState.isKiroViewActive) return;
     void refreshGitBranch();
     void refreshMainBalanceBar();
   }, 0);

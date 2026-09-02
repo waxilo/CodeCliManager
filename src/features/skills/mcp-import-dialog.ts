@@ -3,7 +3,7 @@ import * as api from '../../api';
 import { escapeHtml } from '../../utils';
 import { showCopyToastMsg } from '../../ui';
 import type { McpServerConfig } from '../../types';
-import { renderMcpList } from './editor-dialog';
+import { renderMcpList } from './mcp-editor-dialog';
 
 export interface ImportedMcpServer {
   name: string;

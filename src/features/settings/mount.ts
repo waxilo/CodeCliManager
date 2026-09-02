@@ -13,8 +13,8 @@ export function openSettingsView() {
   if (appState.isApiConfigViewActive) {
     shellApi.dismissApiConfigViewState();
   }
-  if (appState.isMcpViewActive) {
-    shellApi.dismissMcpViewState();
+  if (appState.isSkillsViewActive) {
+    shellApi.dismissSkillsViewState();
   }
   if (appState.isKiroViewActive) {
     shellApi.dismissKiroViewState();

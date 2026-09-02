@@ -12,15 +12,15 @@
  *    跳过 sidebar/main-content 的 innerHTML 重建，表单值 / MCP 弹窗 / 滚动位置全部保留；
  *    挂载函数仅在首次构建时做完整绑定，二次挂载只重绑 Escape（见 dataset 守卫）。
  */
-import type { SettingsSection } from '../../types';
+import type { SettingsSection, SkillsSection } from '../../types';
 import { appState } from '../../state';
 import { shellApi } from './api';
 import { scheduleUiRefresh } from '../../ui';
 import { renderApiConfigSidebarHtml, renderSettingsSidebarHtml } from '../../features/settings/view';
 import { renderApiConfigViewHtml, mountApiConfigView } from '../../features/api-config';
-import { renderSettingsViewHtml, mountSettingsView, mountGlobalConfigSection } from '../../features/settings';
+import { renderSettingsViewHtml, mountSettingsView } from '../../features/settings';
 import { mountDshSection } from '../../features/dsh/settings-section';
-import { renderMcpViewHtml, mountMcpView } from '../../features/mcp';
+import { renderSkillsViewHtml, renderSkillsSidebarHtml, mountSkillsView, mountActiveSkillsSection } from '../../features/skills';
 import { bindAppUpdatePopoverEvents, checkAppUpdate } from '../../features/updates/app-update';
 import { bindClaudeUpdatePopoverEvents } from '../../features/updates/claude-update';
 import { syncRunningSubagentsUI } from '../../features/chat/subagent-progress';
@@ -32,7 +32,7 @@ import {
   getCurrentCommittedChatRenderKey,
 } from '../../features/chat/refresh';
 
-export type ManagementViewKind = 'api-config' | 'settings' | 'mcp';
+export type ManagementViewKind = 'api-config' | 'settings' | 'skills';
 
 interface StashedMainDom {
   sidebar: HTMLElement | null;
@@ -66,17 +66,41 @@ export function clearStashedMainDom(): void {
 
 function isManagementShellPresent(appContainer: Element): boolean {
   const main = appContainer.querySelector('.main-content');
-  return Boolean(
-    main?.classList.contains('is-api-config') || main?.classList.contains('is-mcp'),
-  );
+  return Boolean(main?.classList.contains('is-api-config'));
 }
 
 /** 从当前 DOM 反推管理页类型（退出时 flags 已被 dismiss 清空，不能依赖 appState） */
 function detectManagementKind(): ManagementViewKind {
-  const main = document.querySelector('.main-content');
-  if (main?.classList.contains('is-mcp')) return 'mcp';
   if (document.querySelector('#api-config-view')) return 'api-config';
+  if (document.querySelector('#skills-mcp-section, #skills-global-skills-view, #skills-global-prompts-view')) return 'skills';
   return 'settings';
+}
+
+/** 「技能」页侧栏分类导航：点击切换 MCP / Skill / 提示词分区（增量换 main-content，不整页重绘） */
+export function bindSkillsSectionNav(): void {
+  document.querySelectorAll<HTMLButtonElement>('[data-skills-section]').forEach((btn) => {
+    if ((btn as HTMLElement).dataset.bound === '1') return;
+    (btn as HTMLElement).dataset.bound = '1';
+    btn.addEventListener('click', () => {
+      const section = btn.dataset.skillsSection as SkillsSection | undefined;
+      if (!section || section === appState.skillsSection) return;
+      appState.skillsSection = section;
+
+      if (appState.isSkillsViewActive) {
+        // 增量路径：只换主区分区内容 + 同步侧栏激活态，保留已 stash 的主视图
+        document.querySelectorAll<HTMLElement>('[data-skills-section]').forEach((el) => {
+          el.classList.toggle('is-active', el.dataset.skillsSection === section);
+        });
+        const main = document.querySelector('.main-content');
+        if (main) {
+          main.innerHTML = renderSkillsViewHtml();
+          void mountActiveSkillsSection();
+          return;
+        }
+      }
+      shellApi.render();
+    });
+  });
 }
 
 /** 设置侧栏分类导航：点击切换设置页内容（增量换 main-content，不整页重绘） */
@@ -138,51 +162,50 @@ export function mountActiveManagementView(): void {
       }
     } else if (updatePanel && appState.settingsSection === 'claude-update') {
       bindClaudeUpdatePopoverEvents(updatePanel);
-    } else if (appState.settingsSection === 'global-config') {
-      void mountGlobalConfigSection();
     } else if (appState.settingsSection === 'dsh') {
       mountDshSection();
     }
     mountSettingsView();
-  } else if (appState.isMcpViewActive) {
-    void mountMcpView();
+  } else if (appState.isSkillsViewActive) {
+    mountSkillsView();
   }
 }
 
 function renderManagementSidebarHtml(kind: ManagementViewKind): string {
   if (kind === 'api-config') return renderApiConfigSidebarHtml();
   if (kind === 'settings') return renderSettingsSidebarHtml();
-  return '';
+  return renderSkillsSidebarHtml();
 }
 
 function renderManagementViewHtml(kind: ManagementViewKind): string {
   if (kind === 'api-config') return renderApiConfigViewHtml();
   if (kind === 'settings') return renderSettingsViewHtml();
-  return renderMcpViewHtml();
+  return renderSkillsViewHtml();
 }
 
-function applyManagementShellState(kind: ManagementViewKind, appContainer: Element): void {
-  appContainer.classList.toggle('is-api-config', kind !== 'mcp');
-  appContainer.classList.toggle('is-mcp', kind === 'mcp');
+function applyManagementShellState(_kind: ManagementViewKind, appContainer: Element): void {
+  // 三种管理页（api-config / settings / skills）共用同一套「左侧竖排导航」壳样式
+  appContainer.classList.add('is-api-config');
 }
 
 function buildManagementShell(kind: ManagementViewKind, appContainer: Element): void {
   const resizer = appContainer.querySelector('.sidebar-resizer');
 
   const sidebar = document.createElement('div');
-  sidebar.className = `sidebar${kind === 'mcp' ? '' : ' is-api-config'}`;
+  sidebar.className = 'sidebar is-api-config';
   sidebar.innerHTML = renderManagementSidebarHtml(kind);
   if (resizer) resizer.before(sidebar);
   else appContainer.appendChild(sidebar);
 
   const mainContent = document.createElement('div');
-  mainContent.className = `main-content${kind === 'mcp' ? ' is-mcp' : ' is-api-config'}`;
+  mainContent.className = 'main-content is-api-config';
   mainContent.innerHTML = renderManagementViewHtml(kind);
   if (resizer) resizer.after(mainContent);
   else appContainer.appendChild(mainContent);
 
   applyManagementShellState(kind, appContainer);
   bindSettingsSectionNav();
+  bindSkillsSectionNav();
   mountActiveManagementView();
   shellApi.syncTitlebarActions();
 }
@@ -197,15 +220,16 @@ function swapManagementShell(kind: ManagementViewKind): void {
   const sidebar = appContainer.querySelector<HTMLElement>('.sidebar');
   const mainContent = appContainer.querySelector<HTMLElement>('.main-content');
   if (sidebar) {
-    sidebar.className = `sidebar${kind === 'mcp' ? '' : ' is-api-config'}`;
+    sidebar.className = 'sidebar is-api-config';
     sidebar.innerHTML = renderManagementSidebarHtml(kind);
   }
   if (mainContent) {
-    mainContent.className = `main-content${kind === 'mcp' ? ' is-mcp' : ' is-api-config'}`;
+    mainContent.className = 'main-content is-api-config';
     mainContent.innerHTML = renderManagementViewHtml(kind);
   }
   applyManagementShellState(kind, appContainer);
   bindSettingsSectionNav();
+  bindSkillsSectionNav();
   mountActiveManagementView();
   shellApi.syncTitlebarActions();
 }
@@ -301,7 +325,7 @@ export function exitManagementView(): boolean {
   if (stashedMainDom.mainContent && resizer) resizer.after(stashedMainDom.mainContent);
   if (stashedMainDom.statusBar) shell.appendChild(stashedMainDom.statusBar);
 
-  appContainer.classList.remove('is-api-config', 'is-mcp');
+  appContainer.classList.remove('is-api-config');
   stashedMainDom = null;
 
   // 管理页期间会话可能推进。只有「已提交内容」指纹真变了才强制重建聊天区——

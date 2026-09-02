@@ -7,6 +7,7 @@ export {
 
 export {
   getGlobalSkills,
+  deleteGlobalSkill,
   getGlobalPrompts,
   writeGlobalPrompt,
 } from './global-config';

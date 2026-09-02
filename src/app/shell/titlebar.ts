@@ -10,7 +10,7 @@ export function renderApiConfigIcon(): string {
   `;
 }
 
-export function renderMcpIcon(): string {
+export function renderSkillsIcon(): string {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <rect x="2" y="3" width="20" height="14" rx="2"/>
@@ -83,9 +83,9 @@ export function renderTitlebarActions(): string {
       <span class="toolbar-settings-btn-label">设置</span>
       ${shouldShowSettingsUpdateBadge() ? '<span class="toolbar-settings-update-dot" aria-hidden="true"></span>' : ''}
     </button>
-    <button type="button" class="toolbar-settings-btn settings-btn mcp-btn${appState.isMcpViewActive ? ' is-active' : ''}" id="mcp-btn" title="管理 Claude Code MCP 服务器" aria-label="MCP 管理" aria-pressed="${appState.isMcpViewActive}">
-      <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderMcpIcon()}</span>
-      <span class="toolbar-settings-btn-label">MCP</span>
+    <button type="button" class="toolbar-settings-btn settings-btn skills-btn${appState.isSkillsViewActive ? ' is-active' : ''}" id="skills-btn" title="管理 MCP / Skill / 提示词" aria-label="技能" aria-pressed="${appState.isSkillsViewActive}">
+      <span class="toolbar-settings-btn-icon" aria-hidden="true">${renderSkillsIcon()}</span>
+      <span class="toolbar-settings-btn-label">技能</span>
     </button>
     <button type="button" class="toolbar-icon-btn theme-toggle-btn" id="theme-toggle-btn" title="${escapeHtml(getThemeToggleTitle())}" aria-label="${escapeHtml(getThemeToggleTitle())}">
       ${getThemeToggleIcon()}

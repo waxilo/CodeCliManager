@@ -19,7 +19,9 @@ mod updater_manifest;
 mod usage;
 mod window;
 
-use claude_global_config::{get_global_prompts, get_global_skills, write_global_claude_md};
+use claude_global_config::{
+    delete_global_skill, get_global_prompts, get_global_skills, write_global_claude_md,
+};
 use dsh::{dsh_install, dsh_start, dsh_status, dsh_stop};
 use commands::*;
 use kiro::KiroProxyState;
@@ -97,6 +99,7 @@ pub fn run() {
             run_claude_code_install,
             run_claude_code_update_silent,
             get_global_skills,
+            delete_global_skill,
             get_global_prompts,
             write_global_claude_md,
             dsh_status,

@@ -15,10 +15,10 @@ vi.mock('../../features/status-bar', async (importOriginal) => {
   return { ...actual, startMainBalanceBarAutoRefresh: vi.fn() };
 });
 
-// 避免 mcp 挂载触发的 loadMcpServers() 在 jsdom 下 Tauri invoke 未处理拒绝
-vi.mock('../../features/mcp', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../../features/mcp')>();
-  return { ...actual, mountMcpView: vi.fn(async () => {}) };
+// 避免 skills 页 MCP 分区挂载触发的 loadMcpServers() 在 jsdom 下 Tauri invoke 未处理拒绝
+vi.mock('../../features/skills', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../features/skills')>();
+  return { ...actual, mountSkillsView: vi.fn() };
 });
 
 // 控制内容指纹与指纹重置调用，验证退出时的「内容未变跳过重建 / 内容变化强制重建」
@@ -66,7 +66,7 @@ describe('management-view 增量进出', () => {
     document.body.innerHTML = '';
     appState.isSettingsViewActive = false;
     appState.isApiConfigViewActive = false;
-    appState.isMcpViewActive = false;
+    appState.isSkillsViewActive = false;
     appState.activeConversationId = '';
     appState.activeToolsBySession.clear();
     clearStashedMainDom();
@@ -101,7 +101,6 @@ describe('management-view 增量进出', () => {
     expect(document.querySelector('.main-content')).toBe(mainContent);
     expect(document.querySelector('.balance-status-bar')).toBe(mainStatusBar);
     expect(document.querySelector('.app-container')?.classList.contains('is-api-config')).toBe(false);
-    expect(document.querySelector('.app-container')?.classList.contains('is-mcp')).toBe(false);
     expect(document.querySelector('.settings-update-view')).toBeNull();
   });
 
@@ -201,29 +200,28 @@ describe('management-view 增量进出', () => {
     expect(document.querySelector('.main-content')).toBe(mainContent);
 
     // 进入不同页面：缓存 kind 不匹配 → 重建
-    appState.isMcpViewActive = true;
-    enterManagementView('mcp');
-    expect(document.querySelector('.settings-update-view')).toBeNull();
+    appState.isSkillsViewActive = true;
+    enterManagementView('skills');
+    expect(document.querySelector('.settings-update-view.mcp-section')).not.toBeNull();
     const mgmtMain = document.querySelector('.main-content') as HTMLElement;
-    expect(mgmtMain.classList.contains('is-mcp')).toBe(true);
+    expect(mgmtMain.classList.contains('is-api-config')).toBe(true);
     expect(mgmtMain).not.toBe(mainContent);
-    expect(mgmtMain.querySelector('#mcp-view')).not.toBeNull();
+    expect(mgmtMain.querySelector('#skills-mcp-section')).not.toBeNull();
   });
 
-  it('管理页互斥切换：settings → mcp 只换管理内容，主视图 stash 保留', () => {
+  it('管理页互斥切换：settings → skills 只换管理内容，主视图 stash 保留', () => {
     buildMainShell();
     const mainContent = document.querySelector('.main-content') as HTMLElement;
 
     enterManagementView('settings');
     expect(document.querySelector('.app-container')?.classList.contains('is-api-config')).toBe(true);
 
-    // settings → mcp 互斥切换（进入 mcp 时 settings 已被 dismiss，flag 仅 mcp）
-    appState.isMcpViewActive = true;
-    enterManagementView('mcp');
+    // settings → skills 互斥切换（进入 skills 时 settings 已被 dismiss，flag 仅 skills）
+    appState.isSkillsViewActive = true;
+    enterManagementView('skills');
     const mgmtMain = document.querySelector('.main-content') as HTMLElement;
-    expect(mgmtMain.classList.contains('is-mcp')).toBe(true);
-    expect(document.querySelector('.app-container')?.classList.contains('is-mcp')).toBe(true);
-    expect(document.querySelector('.app-container')?.classList.contains('is-api-config')).toBe(false);
+    expect(mgmtMain.classList.contains('is-api-config')).toBe(true);
+    expect(document.querySelector('.app-container')?.classList.contains('is-api-config')).toBe(true);
     // 主视图仍未挂回
     expect(document.body.contains(mainContent)).toBe(false);
 

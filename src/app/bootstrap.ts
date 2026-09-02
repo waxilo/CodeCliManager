@@ -56,7 +56,7 @@ import {
   dismissSettingsViewState,
   mountSettingsView,
 } from '../features/settings';
-import { openMcpView, closeMcpView, dismissMcpViewState, mountMcpView } from '../features/mcp';
+import { openSkillsView, closeSkillsView, dismissSkillsViewState, mountSkillsView } from '../features/skills';
 import {
   openKiroView,
   closeKiroView,
@@ -102,21 +102,21 @@ function wireShellApi(): void {
   shellApi.ensureChatViewVisible = ensureChatViewVisible;
   shellApi.openApiConfigView = openApiConfigView;
   shellApi.openSettingsView = openSettingsView;
-  shellApi.openMcpView = openMcpView;
+  shellApi.openSkillsView = openSkillsView;
   shellApi.openKiroView = openKiroView;
   shellApi.closeApiConfigView = closeApiConfigView;
   shellApi.closeSettingsView = closeSettingsView;
-  shellApi.closeMcpView = closeMcpView;
+  shellApi.closeSkillsView = closeSkillsView;
   shellApi.closeKiroView = closeKiroView;
   shellApi.enterManagementView = enterManagementView;
   shellApi.exitManagementView = exitManagementView;
   shellApi.dismissApiConfigViewState = dismissApiConfigViewState;
   shellApi.dismissSettingsViewState = dismissSettingsViewState;
-  shellApi.dismissMcpViewState = dismissMcpViewState;
+  shellApi.dismissSkillsViewState = dismissSkillsViewState;
   shellApi.dismissKiroViewState = dismissKiroViewState;
   shellApi.mountApiConfigView = mountApiConfigView;
   shellApi.mountSettingsView = mountSettingsView;
-  shellApi.mountMcpView = mountMcpView;
+  shellApi.mountSkillsView = mountSkillsView;
   shellApi.mountKiroView = mountKiroView;
   shellApi.newChat = newChat;
   shellApi.renderKiroCard = renderKiroCard as (status: unknown) => void;
