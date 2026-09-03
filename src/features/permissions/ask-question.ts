@@ -1,7 +1,7 @@
 import { appState } from '../../state';
 import { scheduleUiRefresh, afterUiRefresh } from '../../ui';
 import type { PermissionRequestPayload, AskUserQuestionOption, AskUserQuestionItem, AskUserQuestionInput, QuestionDialogResult, PendingAskQuestionState } from '../../types';
-import { syncMessageInputPlaceholder } from '../chat/session-context';
+import { getActiveSessionKey, syncMessageInputPlaceholder } from '../chat/session-context';
 import { renderAskUserQuestionCardHtml } from '../chat/render-messages';
 import { getInteractionHost } from './interaction-panel';
 import { getPermissionMode } from './permission-mode';
@@ -57,21 +57,27 @@ export function showQuestionDialog(
   }
 
   return new Promise((resolve) => {
-    const askKey = payload.conversationId || 'pending';
+    const askKey = payload.conversationId;
     let settled = false;
+
+    const findCurrentAskKey = (): string => {
+      for (const [key, state] of appState.pendingAskQuestions) {
+        if (state.requestId === payload.requestId) return key;
+      }
+      return askKey;
+    };
 
     const finish = (result: QuestionDialogResult) => {
       if (settled) return;
       settled = true;
       document.removeEventListener('keydown', onKey);
-      appState.activeQuestionEnterHandlers.delete(askKey);
+      const currentAskKey = findCurrentAskKey();
+      appState.activeQuestionEnterHandlers.delete(currentAskKey);
       syncMessageInputPlaceholder();
 
-      // 清掉临时可点选卡；已选结果等会话历史回写后展示
-      appState.pendingAskQuestions.delete(askKey);
-      // 立即移除输入框上方的问卡（不依赖后续重建；幂等，无 host / 有权限面板时 no-op）
+      appState.pendingAskQuestions.delete(currentAskKey);
       syncPendingAskToInteractionHost();
-      if (!appState.activeConversationId || askKey === appState.activeConversationId || askKey === 'pending') {
+      if (currentAskKey === getActiveSessionKey()) {
         scheduleUiRefresh({ chat: true });
       }
       resolve(result);
@@ -135,6 +141,7 @@ export function showQuestionDialog(
 
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      if (getActiveSessionKey() !== findCurrentAskKey()) return;
       event.preventDefault();
       finish({ action: 'deny' });
     };
@@ -171,9 +178,8 @@ export function showQuestionDialog(
     // 立即挂卡（不依赖聊天重建；若 refreshChatContent 因无会话对象提前返回，卡也已就位）。
     // 后续 rebuild 的 setupMessageListPostRender 会再次同步，但同 requestId 已绑定卡会被保留。
     syncPendingAskToInteractionHost();
-    if (!appState.activeConversationId || askKey === appState.activeConversationId || askKey === 'pending') {
+    if (askKey === getActiveSessionKey()) {
       scheduleUiRefresh({ chat: true });
-      // 滚到选择卡，便于直接点选（卡已挂在输入框上方，scrollIntoView 幂等）
       afterUiRefresh(() => {
         Array.from(document.querySelectorAll<HTMLElement>('.ask-card.is-interactive'))
           .find((el) => el.dataset.askRequestId === payload.requestId)
@@ -365,22 +371,16 @@ export function syncPendingAskToInteractionHost(): void {
   const host = getInteractionHost();
   if (!host) return;
 
-  const askKey = appState.activeConversationId || 'pending';
-  const pendingAsk =
-    appState.pendingAskQuestions.get(askKey) ||
-    (appState.activeConversationId
-      ? appState.pendingAskQuestions.get('pending')
-      : undefined) ||
-    // 子代理等非当前会话 id 的问卡：无当前会话问卡时兜底展示任意未答完的卡片
-    [...appState.pendingAskQuestions.values()].find((s) => s.finish && !isAskFullyAnswered(s));
+  const askKey = getActiveSessionKey();
+  const pendingAsk = askKey ? appState.pendingAskQuestions.get(askKey) : undefined;
+  const interactionPanel = askKey
+    ? appState.interactionPanelsBySession.get(askKey)
+    : undefined;
 
-  // 同会话工具权限面板正在展示时不抢占（AskUserQuestion 与工具权限互斥，防御性分支）；
-  // 其他会话的残留面板不属于当前问卡，不阻断挂载。
   if (
     pendingAsk?.finish &&
     !isAskFullyAnswered(pendingAsk) &&
-    appState.activeInteractionPanel &&
-    appState.activeInteractionPanel.conversationId === pendingAsk.conversationId
+    interactionPanel
   ) {
     return;
   }

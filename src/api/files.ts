@@ -25,6 +25,14 @@ export function writeClipboardImage(
   return invoke<string>('write_clipboard_image', { projectDir, fileName, data });
 }
 
+export function writeClipboardText(
+  projectDir: string,
+  fileName: string,
+  content: string,
+): Promise<string> {
+  return invoke<string>('write_clipboard_text', { projectDir, fileName, content });
+}
+
 export function importExternalPath(args: {
   source: string;
   projectDir: string;

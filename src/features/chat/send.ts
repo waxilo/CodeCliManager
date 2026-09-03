@@ -6,7 +6,7 @@ import { escapeHtml } from '../../utils';
 import { showCopyToastMsg, showToast, scheduleUiRefresh } from '../../ui';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getActiveChatModel } from './model-picker';
-import { getEffectiveProjectDir, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading } from './session-context';
+import { getActiveSessionKey, getEffectiveProjectDir, isActiveSessionAborting, pendingSessionKey, setSendButtonLoading, setAbortingUi, updateSendButtonState, isSendButtonLoading } from './session-context';
 import { resolveFileReferences, disposePasteAttachments, invalidateFileCache, restoreComposerDraftSnapshot, stashComposerDraft, takeComposerDraftSnapshot } from '../files';
 import { closePermissionDialogs } from '../permissions';
 import { groupConversationsByWorkspace } from '../sidebar';
@@ -26,6 +26,10 @@ import { updateConversationListSpinner } from '../sidebar/render-list';
 import { newChatInWorkspace } from '../sidebar/workspace-grouping';
 
 let isPreparingKiroSend = false;
+
+function createRunId(): string {
+  return `run-${crypto.randomUUID()}`;
+}
 
 /** 发送前 Kiro 预检的可见反馈：状态并入输入框下方状态条，不再单独展示提示/改占位符 */
 function setKiroPrepareUi(active: boolean, sendBtn: HTMLButtonElement | null): void {
@@ -147,6 +151,7 @@ export async function pickNewWorkspaceDirectory(): Promise<void> {
       return;
     }
     const trimmed = selected.trim();
+    stashComposerDraft();
     appState.pendingProjectDir = trimmed;
     invalidateFileCache();
   } catch (e) {
@@ -158,13 +163,10 @@ export async function pickNewWorkspaceDirectory(): Promise<void> {
   dismissSettingsViewState();
   dismissSkillsViewState();
   dismissKiroViewState();
-  stashComposerDraft();
   appState.activeConversationId = '';
   appState.activeConversationSourcePath = null;
+  appState.activePendingSessionKey = '';
   invalidateFileCache();
-  appState.pendingUserMessage = null;
-  appState.pendingUserMessageConvId = null;
-  appState.transientSessionError = null;
   shellApi.render();
   void refreshModelInfo();
 
@@ -293,29 +295,36 @@ export async function executePreparedCommand(
   command: PreparedCommand,
   projectDir = '',
 ): Promise<boolean> {
-  const alreadyBusy = !!(
-    conversationId && appState.runningSessions.has(conversationId)
-  );
+  const alreadyBusy = Boolean(conversationId && appState.runningSessions.has(conversationId));
+  const requestedRunId = conversationId ? undefined : createRunId();
+  const sessionKey = conversationId || pendingSessionKey(requestedRunId!);
+  const nextModelKey = normalizeModelKey(command.model);
+
+  if (!conversationId) {
+    appState.activePendingSessionKey = sessionKey;
+    appState.runIdsBySession.set(sessionKey, requestedRunId!);
+    appState.pendingUserMessagesBySession.set(sessionKey, {
+      content: command.messageContent,
+      refs: command.refs,
+    });
+    appState.sessionProcessModels.set(sessionKey, nextModelKey);
+    appState.runningSessions.add(sessionKey);
+    markSessionRunStart(sessionKey);
+  }
 
   try {
     const args: api.ExecutePromptArgs = {
       prompt: command.prompt,
       messageContent: command.messageContent,
     };
-    if (conversationId) {
-      args.conversationId = conversationId;
-    }
-    if (command.model) {
-      args.model = command.model;
-    }
-    if (!conversationId && projectDir) {
-      args.projectDir = projectDir;
-    }
+    if (conversationId) args.conversationId = conversationId;
+    if (command.model) args.model = command.model;
+    if (!conversationId && projectDir) args.projectDir = projectDir;
+    if (requestedRunId) args.runId = requestedRunId;
 
     const result = await api.executePrompt(args);
-    const runKey = conversationId || `new:${projectDir}`;
-    if (result.runId) {
-      appState.runIdsBySession.set(runKey, result.runId);
+    if (result.runId && conversationId) {
+      appState.runIdsBySession.set(sessionKey, result.runId);
     }
     if (result.status === 'queued') {
       if (conversationId && result.item) {
@@ -329,14 +338,13 @@ export async function executePreparedCommand(
       return true;
     }
 
-    // 后端确认已实际发送后，才把用户消息加入正式会话气泡。
-    appState.pendingUserMessage = command.messageContent;
-    appState.pendingUserMessageConvId = conversationId;
-    // 成功发送是明确的 tail policy：用户期望看到新一轮输出。
     requestMainChatFollow();
 
-    const nextModelKey = normalizeModelKey(command.model);
     if (conversationId) {
+      appState.pendingUserMessagesBySession.set(conversationId, {
+        content: command.messageContent,
+        refs: command.refs,
+      });
       const prevModelKey = appState.sessionProcessModels.get(conversationId);
       if (prevModelKey !== undefined && prevModelKey !== nextModelKey) {
         showCopyToastMsg('已切换模型，正在重启会话');
@@ -359,32 +367,25 @@ export async function executePreparedCommand(
         });
         conv.updated_at = Math.floor(Date.now() / 1000);
       }
-      if (!alreadyBusy) {
-        clearStreamingState(conversationId);
-      }
-      if (appState.activeConversationId === conversationId) {
-        // 调度器执行器在聊天重建后自动恢复流式块，无需在此显式调用 refreshStreamingUI
-        scheduleUiRefresh({ chat: true });
-      }
-    } else {
-      appState.sessionProcessModels.set('pending', nextModelKey);
-      appState.runningSessions.add('pending');
-      markSessionRunStart('pending');
+      if (!alreadyBusy) clearStreamingState(conversationId);
+      if (appState.activeConversationId === conversationId) scheduleUiRefresh({ chat: true });
+    } else if (appState.activePendingSessionKey === sessionKey) {
       shellApi.render();
     }
 
-    if (!conversationId || conversationId === appState.activeConversationId) {
-      setSendButtonLoading(true);
-    }
+    if (getActiveSessionKey() === sessionKey) setSendButtonLoading(true);
     updateConversationListSpinner();
     return true;
   } catch (e) {
     console.error('Failed to send message:', e);
     showToast('Failed to send message: ' + String(e));
-    appState.pendingUserMessage = null;
-    appState.pendingUserMessageConvId = null;
-    appState.runningSessions.delete(conversationId || 'pending');
-    if (!conversationId || conversationId === appState.activeConversationId) {
+    appState.pendingUserMessagesBySession.delete(sessionKey);
+    appState.runningSessions.delete(sessionKey);
+    appState.runIdsBySession.delete(sessionKey);
+    appState.sessionProcessModels.delete(sessionKey);
+    appState.sessionRunStartedAt.delete(sessionKey);
+    if (appState.activePendingSessionKey === sessionKey) appState.activePendingSessionKey = '';
+    if (getActiveSessionKey() === sessionKey || (!conversationId && !getActiveSessionKey())) {
       hideSendingState();
     }
     updateConversationListSpinner();
@@ -393,26 +394,25 @@ export async function executePreparedCommand(
 }
 
 export async function abortSession() {
-  if (!isSendButtonLoading() || appState.isAbortingActiveSession) return;
+  if (!isSendButtonLoading() || isActiveSessionAborting()) return;
+
+  const abortSessionId = getActiveSessionKey();
+  if (!abortSessionId || !appState.runningSessions.has(abortSessionId)) return;
 
   try {
     const args: { conversationId?: string; runId?: string } = {};
     const activeConversationId = appState.activeConversationId;
-    const newRunKey = `new:${getEffectiveProjectDir()}`;
 
-    if (activeConversationId && appState.runningSessions.has(activeConversationId)) {
+    if (activeConversationId) {
       args.conversationId = activeConversationId;
       const runId = appState.runIdsBySession.get(activeConversationId);
       if (runId) args.runId = runId;
-    } else if (!activeConversationId && appState.runningSessions.has('pending')) {
-      const runId = appState.runIdsBySession.get(newRunKey);
+    } else {
+      const runId = appState.runIdsBySession.get(abortSessionId);
       if (!runId) return;
       args.runId = runId;
-    } else {
-      return;
     }
 
-    const abortSessionId = activeConversationId || 'pending';
     appState.abortingSessions.add(abortSessionId);
     setAbortingUi(true);
     closePermissionDialogs(abortSessionId);
@@ -422,28 +422,29 @@ export async function abortSession() {
     // 点击停止后立即从运行集合中移除转圈，并清掉本地队列快照；后端也会同步空队列事件。
     appState.queuedPromptsBySession.delete(abortSessionId);
     appState.runningSessions.delete(abortSessionId);
-    if (activeConversationId) appState.runIdsBySession.delete(activeConversationId);
-    else appState.runIdsBySession.delete(newRunKey);
+    appState.runIdsBySession.delete(abortSessionId);
     updateConversationListSpinner();
 
     // 安全回退：如果 session-ended 在 5 秒内未到达，强制清理 UI（interrupt 友好停止可能稍慢）
     setTimeout(() => {
-      if (!appState.abortingSessions.has(abortSessionId) && !appState.isAbortingActiveSession) {
-        return;
-      }
+      if (!appState.abortingSessions.has(abortSessionId)) return;
       console.warn('[abort] session-ended 未及时到达，强制清理 UI 状态');
       appState.abortingSessions.delete(abortSessionId);
       appState.runningSessions.delete(abortSessionId);
       clearStreamingState(abortSessionId);
-      setAbortingUi(false);
-      hideSendingState();
+      if (getActiveSessionKey() === abortSessionId) {
+        setAbortingUi(false);
+        hideSendingState();
+      }
       updateConversationListSpinner();
-      // 用户主动停止：不自动 drain 队列
     }, 5000);
   } catch (e) {
     console.error('Failed to abort session:', e);
-    setAbortingUi(false);
-    hideSendingState();
+    appState.abortingSessions.delete(abortSessionId);
+    if (getActiveSessionKey() === abortSessionId) {
+      setAbortingUi(false);
+      hideSendingState();
+    }
     updateConversationListSpinner();
   }
 }

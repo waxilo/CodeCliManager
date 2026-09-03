@@ -29,6 +29,8 @@ pub(crate) struct MessageChunkPayload {
     pub(crate) conversation_id: String,
     pub(crate) kind: String,
     pub(crate) content: String,
+    #[serde(rename = "runId", skip_serializing_if = "Option::is_none")]
+    pub(crate) run_id: Option<String>,
 }
 
 /// 对 Claude stream-json 再做一层保护，避免异常协议文本直接灌入 WebView。
@@ -108,10 +110,21 @@ pub(crate) fn conversation_to_payload(conv: &Conversation) -> SessionEventPayloa
 }
 
 pub(crate) fn emit_message_chunk(app: &AppHandle, conversation_id: &str, kind: &str, content: &str) {
+    emit_message_chunk_for_run(app, conversation_id, kind, content, None);
+}
+
+fn emit_message_chunk_for_run(
+    app: &AppHandle,
+    conversation_id: &str,
+    kind: &str,
+    content: &str,
+    run_id: Option<&str>,
+) {
     let payload = MessageChunkPayload {
         conversation_id: conversation_id.to_string(),
         kind: kind.to_string(),
         content: content.to_string(),
+        run_id: run_id.map(str::to_string),
     };
     let _ = app.emit("message-chunk", &payload);
 }
@@ -628,6 +641,7 @@ fn system_event_field<'a>(value: &'a serde_json::Value, field: &str) -> Option<&
 pub(crate) fn process_claude_stream_line(
     line: &str,
     app: &AppHandle,
+    run_id: &str,
     captured_session_id: &mut Option<String>,
     block_types: &mut HashMap<usize, String>,
     tool_use_blocks: &mut HashMap<usize, ToolUseBlockState>,
@@ -660,7 +674,7 @@ pub(crate) fn process_claude_stream_line(
                             .get("cwd")
                             .and_then(|c| c.as_str())
                             .unwrap_or("");
-                        emit_message_chunk(app, sid, "session_created", cwd);
+                        emit_message_chunk_for_run(app, sid, "session_created", cwd, Some(run_id));
                     }
                 }
                 Some("api_retry") => {

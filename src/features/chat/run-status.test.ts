@@ -65,10 +65,14 @@ describe('getSessionRunStatus', () => {
     expect(getSessionRunStatus(SID)?.status).toBe('等待你的选择…');
   });
 
-  it('pending 槽的问答同样生效', () => {
-    appState.runningSessions.add(SID);
-    appState.pendingAskQuestions.set('pending', { requestId: 'q1', finish: null } as never);
-    expect(getSessionRunStatus(SID)?.status).toBe('等待你的选择…');
+  it('pending 运行只读取自己的问答状态', () => {
+    const pendingSid = 'pending-run-a';
+    appState.runningSessions.add(pendingSid);
+    appState.pendingAskQuestions.set('pending-run-b', { requestId: 'q-other', finish: null } as never);
+    expect(getSessionRunStatus(pendingSid)?.status).toBe('正在处理…');
+
+    appState.pendingAskQuestions.set(pendingSid, { requestId: 'q1', finish: null } as never);
+    expect(getSessionRunStatus(pendingSid)?.status).toBe('等待你的选择…');
   });
 
   it('子代理执行中优先于思考/输入，且带完成计数', () => {

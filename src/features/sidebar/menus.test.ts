@@ -4,6 +4,8 @@ import {
   closeConversationMenu,
   closeWorkspaceContextMenu,
 } from './menus';
+import { newChatInWorkspace } from './workspace-grouping';
+import { appState } from '../../state';
 
 /** rAF 同步执行，保证菜单定位在 dispatch 后立即可断言 */
 function stubRafSync(): void {
@@ -46,6 +48,12 @@ describe('侧边栏右键菜单', () => {
   afterEach(() => {
     closeConversationMenu();
     closeWorkspaceContextMenu();
+    appState.runningSessions.clear();
+    appState.streamingBySession.clear();
+    appState.activeConversationId = '';
+    appState.activeConversationSourcePath = null;
+    appState.activePendingSessionKey = '';
+    appState.pendingProjectDir = null;
     vi.unstubAllGlobals();
     document.body.innerHTML = '';
   });
@@ -84,6 +92,26 @@ describe('侧边栏右键菜单', () => {
     const dropdown = overlay!.querySelector<HTMLElement>('.ws-menu-dropdown')!;
     expect(dropdown.style.left).toBe('200px');
     expect(dropdown.style.top).toBe('150px');
+  });
+
+  it('运行中新建会话不会终止后台会话', async () => {
+    appState.activeConversationId = 'conv-running';
+    appState.activeConversationSourcePath = '/proj/running.jsonl';
+    appState.runningSessions.add('conv-running');
+    appState.streamingBySession.set('conv-running', {
+      blocks: [{ type: 'text', content: '仍在生成', finalized: false }],
+      thinkingDone: true,
+      currentBlockIdx: 0,
+    });
+
+    await newChatInWorkspace('/other-project');
+
+    expect(appState.runningSessions.has('conv-running')).toBe(true);
+    expect(appState.streamingBySession.get('conv-running')?.blocks[0].content).toBe('仍在生成');
+    expect(appState.activeConversationId).toBe('');
+    expect(appState.activePendingSessionKey).toBe('');
+    expect(appState.pendingProjectDir).toBe('/other-project');
+    expect(document.querySelector('.confirm-overlay')).toBeNull();
   });
 
   it('非会话条目 / 非 header 区域右键不弹菜单', () => {

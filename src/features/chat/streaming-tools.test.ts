@@ -31,8 +31,9 @@ function setupShell(): void {
   ];
   appState.activeConversationId = SID;
   appState.activeConversationSourcePath = null;
-  appState.pendingUserMessage = null;
-  appState.transientSessionError = null;
+  appState.activePendingSessionKey = '';
+  appState.pendingUserMessagesBySession.clear();
+  appState.transientSessionErrorsBySession.clear();
   appState.activeToolsBySession.clear();
   appState.runningSessions.clear();
   appState.streamingBySession.clear();

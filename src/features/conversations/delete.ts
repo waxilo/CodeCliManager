@@ -29,8 +29,8 @@ export async function deleteConversation(id: string, sourcePath: string | null =
     appState.runningSessions.delete(id);
     appState.abortingSessions.delete(id);
     void api.abortSession({ conversationId: id, force: true }).catch(() => {});
-    appState.pendingUserMessage = null;
-    appState.pendingUserMessageConvId = null;
+    appState.pendingUserMessagesBySession.delete(id);
+    appState.transientSessionErrorsBySession.delete(id);
     appState.conversations = appState.conversations.filter(
       (candidate) => candidate.id !== id || (candidate.source_path ?? null) !== deletedSourcePath,
     );
@@ -84,9 +84,7 @@ export async function deleteWorkspaceConversations(workspacePath: string) {
     if (appState.activeConversationId && deletedIds.has(appState.activeConversationId)) {
       appState.activeConversationId = '';
       appState.activeConversationSourcePath = null;
-      appState.pendingUserMessage = null;
-      appState.pendingUserMessageConvId = null;
-      appState.transientSessionError = null;
+      appState.activePendingSessionKey = '';
     }
 
     await loadData();

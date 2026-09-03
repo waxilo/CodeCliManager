@@ -8,6 +8,7 @@ export interface ExecutePromptArgs extends Record<string, unknown> {
   conversationId?: string;
   model?: string;
   projectDir?: string;
+  runId?: string;
 }
 
 export function executePrompt(args: ExecutePromptArgs): Promise<ExecutePromptResult> {

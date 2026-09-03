@@ -22,8 +22,9 @@ function setup(): void {
   appState.conversations = [{ id: SID, title: 't', platform: 'cli', messages: [], created_at: 0, updated_at: 0 }];
   appState.activeConversationId = SID;
   appState.activeConversationSourcePath = null;
-  appState.pendingUserMessage = null;
-  appState.transientSessionError = null;
+  appState.activePendingSessionKey = '';
+  appState.pendingUserMessagesBySession.clear();
+  appState.transientSessionErrorsBySession.clear();
   appState.activeToolsBySession.clear();
   appState.runningSessions.clear();
   appState.streamingBySession.clear();

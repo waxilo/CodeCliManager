@@ -14,7 +14,7 @@ import {
   extractToolUseId,
   extractToolResult,
 } from './render-messages';
-import { getEffectiveProjectDir } from './session-context';
+import { getActiveSessionKey, getEffectiveProjectDir } from './session-context';
 import { renderCopyIconHtml, renderInputComposerHtml } from './input-composer';
 import { dedupeAdjacentDuplicateMessages, getActiveConversation, conversationInstanceKey } from '../conversations/normalize';
 import { normalizeMessageForCompare } from '../files/index';
@@ -50,7 +50,7 @@ function renderLoadEarlierButtonHtml(hidden: number): string {
 /** 当前会话的消息窗口大小（「加载更早」按会话独立累计，切换会话不丢失） */
 export function getActiveMessageWindowSize(): number {
   const winKey = conversationInstanceKey(
-    appState.activeConversationId || 'pending',
+    getActiveSessionKey() || 'new',
     appState.activeConversationSourcePath,
   );
   return appState.messageWindowSizeByConversation.get(winKey) ?? MAX_VISIBLE_MESSAGES;
@@ -59,7 +59,7 @@ export function getActiveMessageWindowSize(): number {
 /** 确保当前会话有窗口记录（幂等），返回其窗口大小 */
 export function ensureMessageWindowForActiveConversation(): number {
   const winKey = conversationInstanceKey(
-    appState.activeConversationId || 'pending',
+    getActiveSessionKey() || 'new',
     appState.activeConversationSourcePath,
   );
   const existing = appState.messageWindowSizeByConversation.get(winKey);
@@ -71,7 +71,7 @@ export function ensureMessageWindowForActiveConversation(): number {
 /** 点击「加载更早」：扩大当前会话的消息窗口并返回新值 */
 export function incrementActiveMessageWindow(step: number): number {
   const winKey = conversationInstanceKey(
-    appState.activeConversationId || 'pending',
+    getActiveSessionKey() || 'new',
     appState.activeConversationSourcePath,
   );
   const size = getActiveMessageWindowSize() + step;
@@ -167,24 +167,34 @@ export function buildDisplayMessages(conversation: Conversation | undefined): Me
     }
     return true;
   });
-  // 只有当 appState.pendingUserMessage 属于当前会话时才显示（防止串会话）
-  const pendingBelongsToThisConv = appState.pendingUserMessage &&
-    (appState.pendingUserMessageConvId === appState.activeConversationId || (!appState.pendingUserMessageConvId && !appState.activeConversationId));
-  if (pendingBelongsToThisConv && appState.pendingUserMessage && !messages.some((m) => m.role === 'user' && normalizeMessageForCompare(m.content) === normalizeMessageForCompare(appState.pendingUserMessage))) {
+  const activeSessionKey = getActiveSessionKey();
+  const pending = activeSessionKey
+    ? appState.pendingUserMessagesBySession.get(activeSessionKey)
+    : undefined;
+  if (
+    pending &&
+    !messages.some(
+      (m) =>
+        m.role === 'user' &&
+        normalizeMessageForCompare(m.content) === normalizeMessageForCompare(pending.content),
+    )
+  ) {
     messages.push({
-      // 稳定 id：pending 期间多次重建 diff 复用同一节点（每次生成新 id 会导致
-      // 气泡闪烁且快路径永远失配）。内容变化由 messageRenderKey 驱动重建。
-      id: 'pending-user',
+      id: `pending-user-${activeSessionKey}`,
       role: 'user',
-      content: appState.pendingUserMessage,
+      content: pending.content,
+      refs: pending.refs,
       timestamp: Math.floor(Date.now() / 1000),
     });
   }
-  if (appState.transientSessionError) {
+  const transientSessionError = activeSessionKey
+    ? appState.transientSessionErrorsBySession.get(activeSessionKey)
+    : undefined;
+  if (transientSessionError) {
     messages.push({
-      id: `transient-error-${Date.now()}`,
+      id: `transient-error-${activeSessionKey}`,
       role: 'error',
-      content: appState.transientSessionError,
+      content: transientSessionError,
       timestamp: Math.floor(Date.now() / 1000),
     });
   }
@@ -491,7 +501,7 @@ function renderLiveSubagentMeta(tool: ActiveToolState): string {
  */
 export function renderChatAreaHtml(opts: { shellOnly?: boolean } = {}): string {
   const conversation = getActiveConversation();
-  const hasActive = Boolean(appState.activeConversationId || appState.pendingUserMessage);
+  const hasActive = Boolean(getActiveSessionKey());
   const messagesHtml =
     hasActive && !opts.shellOnly
       ? renderConversationMessagesInnerHtml(buildDisplayMessages(conversation))

@@ -1,17 +1,18 @@
 import { appState } from '../../state';
 import * as api from '../../api';
 import { escapeHtml } from '../../utils';
-import { showCopyToastMsg } from '../../ui';
+import { showCopyToastMsg, showToast } from '../../ui';
 import { open } from '@tauri-apps/plugin-dialog';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import type { FileRef } from '../../types';
-import { getEffectiveProjectDir } from '../chat/session-context';
+import { getActiveSessionKey, getEffectiveProjectDir } from '../chat/session-context';
 import { updateSendButtonState } from '../chat/session-context';
 import type { ComposerDraft, ImportedFileRef, PasteAttachment } from '../../state/app-state';
 // ── @file 引用功能 ──────────────────────────────────────────────────
 
 export function getComposerDraftKey(): string {
-  if (appState.activeConversationId) return appState.activeConversationId;
+  const sessionKey = getActiveSessionKey();
+  if (sessionKey) return sessionKey;
   return `new:${appState.pendingProjectDir?.trim() || ''}`;
 }
 
@@ -119,14 +120,118 @@ export function disposePasteAttachments(attachments: PasteAttachment[]): void {
 }
 
 
-// ── 粘贴图片附件 ────────────────────────────────────────────────────
+// ── 粘贴附件 ────────────────────────────────────────────────────────
+
+export const LARGE_PASTE_THRESHOLD_BYTES = 16 * 1024;
+export const MAX_PASTED_TEXT_BYTES = 25 * 1024 * 1024;
+
+function utf8ByteLength(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
+}
+
+function insertTextAtRange(value: string, text: string, start: number, end: number): string {
+  const safeStart = Math.max(0, Math.min(start, value.length));
+  const safeEnd = Math.max(safeStart, Math.min(end, value.length));
+  return value.slice(0, safeStart) + text + value.slice(safeEnd);
+}
+
+function createEmptyDraft(): ComposerDraft {
+  return { text: '', pasteAttachments: [], importedFileRefs: [] };
+}
+
+function addImportedFileRefToDraft(draftKey: string, entry: ImportedFileRef): void {
+  if (draftKey === getComposerDraftKey()) {
+    addImportedFileRef(entry);
+    updateSendButtonState();
+    return;
+  }
+  const draft = appState.composerDrafts.get(draftKey) || createEmptyDraft();
+  if (!draft.importedFileRefs.some((item) => item.ref === entry.ref)) {
+    draft.importedFileRefs.push(entry);
+  }
+  appState.composerDrafts.set(draftKey, draft);
+}
+
+function restorePastedText(
+  draftKey: string,
+  text: string,
+  start: number,
+  end: number,
+  originalValue: string,
+): void {
+  if (draftKey === getComposerDraftKey()) {
+    const input = document.querySelector<HTMLTextAreaElement>('#message-input');
+    if (input) {
+      input.value = insertTextAtRange(input.value, text, start, end);
+      const cursor = Math.min(start + text.length, input.value.length);
+      input.setSelectionRange(cursor, cursor);
+      input.focus();
+      updateSendButtonState();
+      return;
+    }
+  }
+  const draft = appState.composerDrafts.get(draftKey) || createEmptyDraft();
+  const source = draft.text || originalValue;
+  draft.text = insertTextAtRange(source, text, start, end);
+  appState.composerDrafts.set(draftKey, draft);
+}
+
+async function saveLargePastedText(
+  text: string,
+  projectDir: string,
+  draftKey: string,
+  selectionStart: number,
+  selectionEnd: number,
+  originalValue: string,
+): Promise<void> {
+  const fileName = `pasted-text-${Date.now()}-${crypto.randomUUID()}.txt`;
+  try {
+    const filePath = await api.writeClipboardText(projectDir, fileName, text);
+    addImportedFileRefToDraft(draftKey, {
+      ref: wrapFileRef(filePath),
+      fileName,
+      isImage: false,
+      isDir: false,
+    });
+    showCopyToastMsg('大段文本已转为文件附件');
+  } catch (error) {
+    console.error('Failed to save pasted text:', error);
+    restorePastedText(draftKey, text, selectionStart, selectionEnd, originalValue);
+    showToast(`大段文本保存失败，已恢复到输入框：${String(error)}`);
+  }
+}
 
 export async function handlePaste(e: ClipboardEvent) {
-  const items = e.clipboardData?.items;
-  if (!items) return;
+  const clipboard = e.clipboardData;
+  const items = clipboard?.items;
+  if (!clipboard || !items) return;
   const projectDir = getEffectiveProjectDir();
   if (!projectDir) return;
   const draftKey = getComposerDraftKey();
+  const input = e.currentTarget instanceof HTMLTextAreaElement
+    ? e.currentTarget
+    : document.querySelector<HTMLTextAreaElement>('#message-input');
+  const text = clipboard.getData('text/plain');
+  const textBytes = text ? utf8ByteLength(text) : 0;
+
+  if (text && textBytes > LARGE_PASTE_THRESHOLD_BYTES) {
+    e.preventDefault();
+    if (textBytes > MAX_PASTED_TEXT_BYTES) {
+      showToast('粘贴文本超过 25 MiB，请先保存为本地文件后再引用');
+    } else {
+      const selectionStart = input?.selectionStart ?? 0;
+      const selectionEnd = input?.selectionEnd ?? selectionStart;
+      const originalValue = input?.value ?? '';
+      void saveLargePastedText(
+        text,
+        projectDir,
+        draftKey,
+        selectionStart,
+        selectionEnd,
+        originalValue,
+      );
+    }
+  }
 
   for (let i = 0; i < items.length; i++) {
     const item = items[i];

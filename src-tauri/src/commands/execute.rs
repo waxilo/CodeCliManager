@@ -44,6 +44,7 @@ pub async fn execute_prompt(
     model: Option<String>,
     project_dir: Option<String>,
     message_content: Option<String>,
+    run_id: Option<String>,
 ) -> Result<ExecutePromptResult, String> {
     let active_cid = conversation_id.clone();
     let active_model = model.filter(|value| !value.trim().is_empty());
@@ -128,11 +129,27 @@ pub async fn execute_prompt(
         }
     }
 
-    let run_id = new_run_id();
+    let run_id = match run_id {
+        Some(value) => {
+            let trimmed = value.trim();
+            let valid = trimmed
+                .strip_prefix("run-")
+                .and_then(|value| uuid::Uuid::parse_str(value).ok())
+                .is_some();
+            if !valid {
+                return Err("runId 格式无效".to_string());
+            }
+            trimmed.to_string()
+        }
+        None => new_run_id(),
+    };
     let initial_run_key = active_cid
         .clone()
         .unwrap_or_else(|| pending_key_for_run(&run_id));
-    register_run_key(&run_id, &initial_run_key);
+    if !register_run_key_if_absent(&run_id, &initial_run_key) {
+        return Err("runId 已在使用中".to_string());
+    }
+    let fallback_session_key = initial_run_key.clone();
     let run_id_for_task = run_id.clone();
     tauri::async_runtime::spawn(async move {
         let before_conversations = tauri::async_runtime::spawn_blocking(load_claude_history)
@@ -200,14 +217,7 @@ pub async fn execute_prompt(
                         tauri::async_runtime::spawn_blocking(load_claude_history)
                             .await
                             .unwrap_or_default();
-                    let resolved_id = final_session_id
-                        .or(active_cid.clone())
-                        .or_else(|| {
-                            after_conversations
-                                .iter()
-                                .max_by_key(|c| c.updated_at)
-                                .map(|c| c.id.clone())
-                        });
+                    let resolved_id = final_session_id.or(active_cid.clone());
 
                     if let Some(sid) = resolved_id {
                         clear_turn_active(&sid);
@@ -248,7 +258,7 @@ pub async fn execute_prompt(
                     {
                         return;
                     }
-                    let _ = app.emit("session-ended", active_cid.clone());
+                    let _ = app.emit("session-ended", Some(fallback_session_key.clone()));
                 }
                 StreamOutcome::Cancelled(session_id) => {
                     if let Some(ref sid) = session_id {
@@ -280,7 +290,10 @@ pub async fn execute_prompt(
                         eprintln!("[execute_prompt] 模型重启导致旧进程退出，跳过失败 session-ended");
                         return;
                     }
-                    let _ = app.emit("session-ended", active_cid.clone());
+                    let _ = app.emit(
+                        "session-ended",
+                        Some(session_id.unwrap_or_else(|| fallback_session_key.clone())),
+                    );
                 }
             },
             Ok(Err(e)) => {
@@ -296,8 +309,8 @@ pub async fn execute_prompt(
                 }
                 let error = format!("Claude 执行失败: {e}");
                 eprintln!("[execute_prompt] {error}");
-                emit_session_error(&app, active_cid.as_deref(), &error);
-                let _ = app.emit("session-ended", active_cid.clone());
+                emit_session_error(&app, Some(&fallback_session_key), &error);
+                let _ = app.emit("session-ended", Some(fallback_session_key.clone()));
             }
             Err(e) => {
                 unregister_run_id(&run_id_for_task);
@@ -312,8 +325,8 @@ pub async fn execute_prompt(
                 }
                 let error = format!("启动 Claude 进程失败: {e}");
                 eprintln!("[execute_prompt] {error}");
-                emit_session_error(&app, active_cid.as_deref(), &error);
-                let _ = app.emit("session-ended", active_cid.clone());
+                emit_session_error(&app, Some(&fallback_session_key), &error);
+                let _ = app.emit("session-ended", Some(fallback_session_key.clone()));
             }
         }
     });

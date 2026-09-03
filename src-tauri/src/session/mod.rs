@@ -87,6 +87,16 @@ pub(crate) fn register_run_key(run_id: &str, key: &str) {
         .insert(run_id.to_string(), key.to_string());
 }
 
+pub(crate) fn register_run_key_if_absent(run_id: &str, key: &str) -> bool {
+    let mut runs = ACTIVE_RUN_KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let runs = runs.get_or_insert_with(HashMap::new);
+    if runs.contains_key(run_id) {
+        return false;
+    }
+    runs.insert(run_id.to_string(), key.to_string());
+    true
+}
+
 pub(crate) fn unregister_run_id(run_id: &str) {
     let mut runs = ACTIVE_RUN_KEYS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(map) = runs.as_mut() {
@@ -294,6 +304,18 @@ pub(crate) fn rekey_active_session(old_key: &str, new_key: &str, child: Arc<Mute
     }
     clear_active_session_model(old_key);
     rekey_run_key(old_key, new_key);
+    {
+        let mut permissions = PENDING_PERMISSIONS
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(map) = permissions.as_mut() {
+            for pending in map.values_mut() {
+                if pending.conversation_id == old_key {
+                    pending.conversation_id = new_key.to_string();
+                }
+            }
+        }
+    }
 
     register_active_process(new_key, child);
     if let Some(stdin) = stdin {

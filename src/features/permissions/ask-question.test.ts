@@ -4,10 +4,12 @@ import type { PendingAskQuestionState } from '../../types';
 import { syncPendingAskToInteractionHost } from './ask-question';
 import { renderAskUserQuestionCardHtml } from '../chat/render-messages';
 
+const SESSION_KEY = 'pending-run-test';
+
 function pendingAskState(): PendingAskQuestionState {
   return {
     requestId: 'req-1',
-    conversationId: 'pending',
+    conversationId: SESSION_KEY,
     input: {
       questions: [
         {
@@ -36,12 +38,13 @@ describe('syncPendingAskToInteractionHost（待问答卡片钉在输入框上方
     document.body.innerHTML = '';
     appState.pendingAskQuestions.clear();
     appState.activeConversationId = '';
-    appState.activeInteractionPanel = null;
+    appState.activePendingSessionKey = SESSION_KEY;
+    appState.interactionPanelsBySession.clear();
   });
 
   it('有待问答时把可点选卡片挂进 interaction-host 并取消隐藏', () => {
     const host = mountHost();
-    appState.pendingAskQuestions.set('pending', pendingAskState());
+    appState.pendingAskQuestions.set(SESSION_KEY, pendingAskState());
 
     syncPendingAskToInteractionHost();
 
@@ -54,11 +57,11 @@ describe('syncPendingAskToInteractionHost（待问答卡片钉在输入框上方
 
   it('问答完成后移除卡片并隐藏 host', () => {
     const host = mountHost();
-    appState.pendingAskQuestions.set('pending', pendingAskState());
+    appState.pendingAskQuestions.set(SESSION_KEY, pendingAskState());
     syncPendingAskToInteractionHost();
     expect(host.querySelector('.ask-card')).not.toBeNull();
 
-    appState.pendingAskQuestions.delete('pending');
+    appState.pendingAskQuestions.delete(SESSION_KEY);
     syncPendingAskToInteractionHost();
 
     expect(host.querySelector('.ask-card')).toBeNull();
@@ -88,13 +91,13 @@ describe('syncPendingAskToInteractionHost（待问答卡片钉在输入框上方
     permissionEl.id = 'perm-panel';
     host.replaceChildren(permissionEl);
     host.hidden = false;
-    appState.activeInteractionPanel = {
-      conversationId: 'pending',
+    appState.interactionPanelsBySession.set(SESSION_KEY, {
+      conversationId: SESSION_KEY,
       element: permissionEl,
       cleanup: () => {},
-    };
+    });
     // 权限面板与问卡属同一会话（互斥）：保留面板，不挂问卡
-    appState.pendingAskQuestions.set('pending', pendingAskState());
+    appState.pendingAskQuestions.set(SESSION_KEY, pendingAskState());
 
     syncPendingAskToInteractionHost();
 
@@ -109,12 +112,12 @@ describe('syncPendingAskToInteractionHost（待问答卡片钉在输入框上方
     permissionEl.id = 'perm-panel';
     host.replaceChildren(permissionEl);
     host.hidden = false;
-    appState.activeInteractionPanel = {
+    appState.interactionPanelsBySession.set('conv-other', {
       conversationId: 'conv-other',
       element: permissionEl,
       cleanup: () => {},
-    };
-    appState.pendingAskQuestions.set('pending', pendingAskState());
+    });
+    appState.pendingAskQuestions.set(SESSION_KEY, pendingAskState());
 
     syncPendingAskToInteractionHost();
 
@@ -126,7 +129,7 @@ describe('syncPendingAskToInteractionHost（待问答卡片钉在输入框上方
 
   it('重复同步不重建已绑定卡片（保留用户选择现场）', () => {
     const host = mountHost();
-    appState.pendingAskQuestions.set('pending', pendingAskState());
+    appState.pendingAskQuestions.set(SESSION_KEY, pendingAskState());
     syncPendingAskToInteractionHost();
     const card = host.querySelector('.ask-card')!;
 

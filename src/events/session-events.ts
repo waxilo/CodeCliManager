@@ -5,7 +5,7 @@ import type { Message, SessionErrorPayload, SessionEventPayload, MessageChunkPay
 import { handleMessageChunk, handleSessionError, clearStreamingState, commitStreamingAssistantToConversation, ensureAssistantPresent, refreshStreamingUI, reconcileActiveToolsWithHistory, purgeTerminalTools, clearSessionTools } from '../features/chat/streaming';
 import { updateOrAddConversation, normalizeSessionEventPayload, mergeRemoteAndLocalMessages, findConversationById, assistantTextCovers } from '../features/conversations';
 import { handlePermissionRequest, closePermissionDialogs } from '../features/permissions';
-import { setAbortingUi, setSendButtonLoading } from '../features/chat/session-context';
+import { getActiveSessionKey, isActiveSessionAborting, isPendingSessionKey, setAbortingUi, setSendButtonLoading } from '../features/chat/session-context';
 import { hideSendingState } from '../features/chat/session-context';
 import { updateConversationListSpinner, refreshActiveTabContent } from '../features/sidebar';
 import { updateContextIndicator } from '../features/chat/context-indicator';
@@ -59,6 +59,18 @@ function seedUsageAndTodos(payload: SessionEventPayload): void {
   }
 }
 
+function clearPersistedPendingUserMessage(payload: SessionEventPayload): void {
+  const pending = appState.pendingUserMessagesBySession.get(payload.conversation_id);
+  if (!pending) return;
+  const persisted = payload.messages.some(
+    (message: Message) =>
+      message.role === 'user' &&
+      normalizeMessageForCompare(message.content) ===
+        normalizeMessageForCompare(pending.content),
+  );
+  if (persisted) appState.pendingUserMessagesBySession.delete(payload.conversation_id);
+}
+
 export async function setupEventListeners() {
   if (eventListenersReady) return;
   eventListenersReady = true;
@@ -76,21 +88,18 @@ export async function setupEventListeners() {
   });
 
   await listen<string | null>('session-aborting', (event) => {
-    const sid = event.payload || appState.activeConversationId || '';
-    if (sid) {
-      appState.abortingSessions.add(sid);
-      closePermissionDialogs(sid);
-    }
-    if (!sid || sid === appState.activeConversationId || sid.startsWith('pending-')) {
-      setAbortingUi(true);
-    }
+    const sid = event.payload || getActiveSessionKey();
+    if (!sid) return;
+    appState.abortingSessions.add(sid);
+    closePermissionDialogs(sid);
+    if (sid === getActiveSessionKey()) setAbortingUi(true);
   });
 
   // 监听会话创建事件（后端在流完成后首次写入会话时触发）
   await listen<SessionEventPayload>('session-created', (event) => {
     const payload = normalizeSessionEventPayload(event.payload);
     appState.runningSessions.delete(payload.conversation_id);
-    appState.transientSessionError = null;
+    appState.transientSessionErrorsBySession.delete(payload.conversation_id);
 
     // 判断用户当前是否正在查看此会话（不要强制切换视图）
     const isViewingThis = appState.activeConversationId === payload.conversation_id;
@@ -118,14 +127,7 @@ export async function setupEventListeners() {
     // 新会话首落盘时重建侧边栏当前 tab，否则左侧列表不出现新条目
     if (added) refreshActiveTabContent();
 
-    // 只在会话数据已包含用户消息时才清空 appState.pendingUserMessage
-    // 同时确保只清除属于当前会话的 pending 消息（防止串会话）
-    if (appState.pendingUserMessage && appState.pendingUserMessageConvId === payload.conversation_id && payload.messages.some(
-      (m: Message) => m.role === 'user' && normalizeMessageForCompare(m.content) === normalizeMessageForCompare(appState.pendingUserMessage)
-    )) {
-      appState.pendingUserMessage = null;
-      appState.pendingUserMessageConvId = null;
-    }
+    clearPersistedPendingUserMessage(payload);
 
     clearStreamingState(payload.conversation_id);
 
@@ -147,29 +149,17 @@ export async function setupEventListeners() {
   // 监听消息更新事件
   await listen<SessionEventPayload>('messages-updated', (event) => {
     const payload = normalizeSessionEventPayload(event.payload);
-    // 只在会话数据已包含用户消息时才清空 appState.pendingUserMessage，
-    // 否则保留以便 refreshChatContent 补充显示
-    // （Claude CLI 仅在完成响应后才写入会话文件，首条用户消息可能不在其中）
-    // 同时确保只清除属于当前会话的 pending 消息（防止串会话）
-    if (appState.pendingUserMessage && appState.pendingUserMessageConvId === payload.conversation_id && payload.messages.some(
-      (m: Message) => m.role === 'user' && normalizeMessageForCompare(m.content) === normalizeMessageForCompare(appState.pendingUserMessage)
-    )) {
-      appState.pendingUserMessage = null;
-      appState.pendingUserMessageConvId = null;
-    }
-    appState.transientSessionError = null;
+    clearPersistedPendingUserMessage(payload);
+    appState.transientSessionErrorsBySession.delete(payload.conversation_id);
 
     const streamedText = getStreamingAssistantText(payload.conversation_id);
     commitStreamingAssistantToConversation(payload.conversation_id);
 
     // 进行中的问答保留；已结束的 pending 残留清掉
     {
-      const pending =
-        appState.pendingAskQuestions.get(payload.conversation_id) ||
-        appState.pendingAskQuestions.get('pending');
+      const pending = appState.pendingAskQuestions.get(payload.conversation_id);
       if (pending && !pending.finish) {
         appState.pendingAskQuestions.delete(payload.conversation_id);
-        appState.pendingAskQuestions.delete('pending');
       }
     }
 
@@ -291,13 +281,13 @@ export async function setupEventListeners() {
 
   await listen<string | null>('turn-continued', (event) => {
     const sid = event.payload;
-    if (!sid || sid !== appState.activeConversationId) return;
+    if (!sid) return;
     appState.runningSessions.add(sid);
     markSessionRunStart(sid);
-    appState.pendingUserMessage = null;
-    appState.pendingUserMessageConvId = null;
-    setSendButtonLoading(true);
+    appState.pendingUserMessagesBySession.delete(sid);
     updateConversationListSpinner();
+    if (sid !== getActiveSessionKey()) return;
+    setSendButtonLoading(true);
     // 自动续跑时仍有流式缓冲：保留 streaming UI，避免全量重建闪断
     if (appState.streamingBySession.has(sid)) {
       refreshStreamingUI(sid);
@@ -312,10 +302,11 @@ export async function setupEventListeners() {
       console.debug('[turn-complete] 忽略切模型重启期间的过期事件:', sid);
       return;
     }
-    const wasUserAbort =
-      (sid && appState.abortingSessions.has(sid)) ||
-      appState.abortingSessions.has('pending') ||
-      (sid === appState.activeConversationId && appState.isAbortingActiveSession);
+    const wasUserAbort = Boolean(
+      sid &&
+      (appState.abortingSessions.has(sid) ||
+        (sid === getActiveSessionKey() && isActiveSessionAborting())),
+    );
 
     if (sid) {
       // 轮次结束：先清掉上一轮已终态的 Task，让子代理面板随新一轮重新累计
@@ -336,32 +327,24 @@ export async function setupEventListeners() {
       ensureAssistantPresent(sid, streamedText);
       appState.runningSessions.delete(sid);
       appState.abortingSessions.delete(sid);
-      // 本轮彻底结束：清空全部 active tools（含运行中被中断/通知丢失而残留 running 的），
-      // 否则输入框状态条会一直显示「正在执行: … / 子代理执行中」。
+      appState.pendingUserMessagesBySession.delete(sid);
       clearSessionTools(sid);
+      clearStreamingState(sid);
     }
-    appState.runningSessions.delete('pending');
-    appState.abortingSessions.delete('pending');
-    clearStreamingState(sid || '');
 
-    const isCurrentSession = !sid || sid === appState.activeConversationId;
+    const isCurrentSession = Boolean(sid && sid === getActiveSessionKey());
     if (isCurrentSession) {
       setAbortingUi(false);
       hideSendingState();
-      appState.pendingUserMessage = null;
-      appState.pendingUserMessageConvId = null;
       updateConversationListSpinner();
-      const refreshSessionId = sid || appState.activeConversationId;
-      if (refreshSessionId) {
-        scheduleChatRefresh(refreshSessionId);
+      if (sid && !isPendingSessionKey(sid)) {
+        scheduleChatRefresh(sid);
       } else {
         updateContextIndicator();
         updateCostIndicator();
         scheduleUiRefresh({ chat: true, subagent: true, todo: true });
       }
-      if (wasUserAbort) {
-        showCopyToastMsg('已停止');
-      }
+      if (wasUserAbort) showCopyToastMsg('已停止');
     } else {
       updateConversationListSpinner();
     }
@@ -370,15 +353,17 @@ export async function setupEventListeners() {
   // 监听会话结束事件（进程真正退出：空闲超时 / 强杀 / 异常）
   await listen<string | null>('session-ended', (event) => {
     const endedSessionId = event.payload;
-    const wasUserAbort =
-      (endedSessionId && appState.abortingSessions.has(endedSessionId)) ||
-      appState.abortingSessions.has('pending') ||
-      (endedSessionId === appState.activeConversationId && appState.isAbortingActiveSession);
+    const wasUserAbort = Boolean(
+      endedSessionId &&
+      (appState.abortingSessions.has(endedSessionId) ||
+        (endedSessionId === getActiveSessionKey() && isActiveSessionAborting())),
+    );
 
     // 切模型后新进程已标记 running：旧进程的 session-ended 是过期事件，
     // 若再 loadData 会冲掉本地刚插入的用户消息和上一轮回复。
     if (
       endedSessionId &&
+      !isPendingSessionKey(endedSessionId) &&
       appState.runningSessions.has(endedSessionId) &&
       !wasUserAbort
     ) {
@@ -386,37 +371,43 @@ export async function setupEventListeners() {
       return;
     }
 
+    const isCurrentSession = Boolean(
+      endedSessionId && endedSessionId === getActiveSessionKey(),
+    );
+
     if (endedSessionId) {
       appState.queuedPromptsBySession.delete(endedSessionId);
       appState.runningSessions.delete(endedSessionId);
       appState.abortingSessions.delete(endedSessionId);
       appState.sessionProcessModels.delete(endedSessionId);
       appState.runIdsBySession.delete(endedSessionId);
-      // 进程退出：清空该会话全部 active tools
+      appState.pendingUserMessagesBySession.delete(endedSessionId);
+      if (!isPendingSessionKey(endedSessionId) || !isCurrentSession) {
+        appState.transientSessionErrorsBySession.delete(endedSessionId);
+      }
       clearSessionTools(endedSessionId);
+      clearStreamingState(endedSessionId);
+      closePermissionDialogs(endedSessionId);
     }
-    appState.runningSessions.delete('pending');
-    appState.abortingSessions.delete('pending');
-    appState.sessionProcessModels.delete('pending');
-    clearStreamingState(endedSessionId || '');
-
-    const isCurrentSession = !endedSessionId || endedSessionId === appState.activeConversationId;
 
     if (isCurrentSession) {
+      if (
+        endedSessionId &&
+        isPendingSessionKey(endedSessionId) &&
+        !appState.transientSessionErrorsBySession.has(endedSessionId)
+      ) {
+        appState.activePendingSessionKey = '';
+      }
       syncQueuedPromptsUI();
       setAbortingUi(false);
       hideSendingState();
-      appState.pendingUserMessage = null;
-      appState.pendingUserMessageConvId = null;
-      if (wasUserAbort) {
-        showCopyToastMsg('已停止');
-      }
+      if (wasUserAbort) showCopyToastMsg('已停止');
     }
 
-    const refreshSessionId = endedSessionId || appState.activeConversationId;
-    const refreshPromise = refreshSessionId
-      ? refreshConversationFromBackend(refreshSessionId)
-      : Promise.resolve();
+    const refreshPromise =
+      endedSessionId && !isPendingSessionKey(endedSessionId)
+        ? refreshConversationFromBackend(endedSessionId)
+        : Promise.resolve();
 
     void refreshPromise.then(() => {
       updateConversationListSpinner();
@@ -424,7 +415,7 @@ export async function setupEventListeners() {
       updateContextIndicator();
       updateCostIndicator();
       scheduleUiRefresh({
-        chat: Boolean(appState.activeConversationId || appState.transientSessionError),
+        chat: Boolean(getActiveSessionKey()),
         subagent: true,
         todo: true,
       });

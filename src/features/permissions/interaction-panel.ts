@@ -1,4 +1,5 @@
 import { appState } from '../../state';
+import { getActiveSessionKey } from '../chat/session-context';
 export function formatPermissionInput(input: unknown): string {
   try {
     return JSON.stringify(input ?? {}, null, 2);
@@ -27,29 +28,51 @@ export function mountInteractionPanel(
   conversationId: string,
   cleanup: (result: 'allow' | 'deny') => void,
 ): void {
-  appState.activeInteractionPanel = { conversationId, element, cleanup };
+  appState.interactionPanelsBySession.set(conversationId, { conversationId, element, cleanup });
+  if (getActiveSessionKey() !== conversationId) return;
   const host = getInteractionHost();
   if (!host) return;
   host.replaceChildren(element);
   host.hidden = false;
 }
 
-/** shellApi.render() 后把仍待处理的面板重新挂回新 host */
-export function remountActiveInteractionPanel(): void {
-  if (!appState.activeInteractionPanel) return;
+/** shellApi.render() 后把当前会话仍待处理的面板重新挂回新 host */
+export function remountActiveInteractionPanel(conversationId = getActiveSessionKey()): void {
+  const panel = appState.interactionPanelsBySession.get(conversationId);
   const host = getInteractionHost();
   if (!host) return;
-  if (host.contains(appState.activeInteractionPanel.element)) {
+  if (!panel) {
+    clearInteractionHostUi();
+    return;
+  }
+  if (host.contains(panel.element)) {
     host.hidden = false;
     return;
   }
-  host.replaceChildren(appState.activeInteractionPanel.element);
+  host.replaceChildren(panel.element);
   host.hidden = false;
 }
 
+export function transferInteractionPanel(from: string, to: string): void {
+  const panel = appState.interactionPanelsBySession.get(from);
+  if (!panel) return;
+  appState.interactionPanelsBySession.delete(from);
+  panel.conversationId = to;
+  panel.element.dataset.conversationId = to;
+  appState.interactionPanelsBySession.set(to, panel);
+}
+
 export function unmountActiveInteractionPanel(element?: HTMLElement): void {
-  if (appState.activeInteractionPanel && (!element || appState.activeInteractionPanel.element === element)) {
-    appState.activeInteractionPanel = null;
+  if (element) {
+    for (const [sessionId, panel] of appState.interactionPanelsBySession) {
+      if (panel.element === element) {
+        appState.interactionPanelsBySession.delete(sessionId);
+        break;
+      }
+    }
+  } else {
+    const activeSessionKey = getActiveSessionKey();
+    if (activeSessionKey) appState.interactionPanelsBySession.delete(activeSessionKey);
   }
   const host = getInteractionHost();
   if (!host) return;

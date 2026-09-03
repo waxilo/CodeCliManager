@@ -1,8 +1,6 @@
 import { appState, EXPANDED_WORKSPACES_KEY } from '../../state';
 import type { Conversation, WorkspaceGroup } from '../../types';
 import { shellApi } from '../../app/shell/api';
-import * as api from '../../api';
-import { showConfirmDialog } from '../../ui';
 import { dismissApiConfigViewState } from '../api-config/view-lifecycle';
 import { refreshModelInfo } from '../chat/model-picker';
 import { invalidateFileCache, stashComposerDraft } from '../files/index';
@@ -87,16 +85,6 @@ export function groupConversationsByWorkspace(
 
 /** 在指定工作区快速新建对话（预设工作目录，跳过选目录步骤） */
 export async function newChatInWorkspace(workspacePath: string): Promise<void> {
-  // 有正在运行的会话时先确认，避免静默强杀丢弃正在生成的回答
-  if (appState.runningSessions.size > 0) {
-    const confirmed = await showConfirmDialog({
-      title: '新建会话',
-      message: '当前有正在运行的会话，新建会话将终止它。是否继续？',
-      sub: `工作区：${workspacePath}`,
-      confirmLabel: '终止并新建',
-    });
-    if (!confirmed) return;
-  }
   dismissApiConfigViewState();
   dismissSettingsViewState();
   dismissSkillsViewState();
@@ -105,12 +93,9 @@ export async function newChatInWorkspace(workspacePath: string): Promise<void> {
   stashComposerDraft();
   appState.activeConversationId = '';
   appState.activeConversationSourcePath = null;
+  appState.activePendingSessionKey = '';
   invalidateFileCache();
-  appState.pendingUserMessage = null;
-  appState.pendingUserMessageConvId = null;
-  appState.transientSessionError = null;
   appState.pendingProjectDir = workspacePath;
-  void api.abortSession({ force: true }).catch(() => {});
   shellApi.render();
   void refreshModelInfo();
 

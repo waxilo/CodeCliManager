@@ -120,15 +120,9 @@ export function ensureChatMessageShell(): boolean {
 }
 
 function syncInteractionPanelForConversation(id: string): void {
-  const panel = appState.activeInteractionPanel;
-  if (!panel) {
-    clearInteractionHostUi();
-    return;
-  }
-  if (panel.conversationId === id) {
-    remountActiveInteractionPanel();
+  if (appState.interactionPanelsBySession.has(id)) {
+    remountActiveInteractionPanel(id);
   } else {
-    // 隐藏其他会话的权限/问答面板，保留状态以便切回
     clearInteractionHostUi();
   }
 }
@@ -217,6 +211,7 @@ export function selectConversation(id: string, sourcePath: string | null = null)
   }
   appState.activeConversationId = id;
   appState.activeConversationSourcePath = sourcePath;
+  appState.activePendingSessionKey = '';
   invalidateFileCache();
 
   if (!alreadyActive) {

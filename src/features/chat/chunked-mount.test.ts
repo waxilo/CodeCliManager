@@ -48,8 +48,9 @@ function seedConversation(count: number, id = 'c1', contentLen = 20): void {
   ];
   appState.activeConversationId = id;
   appState.activeConversationSourcePath = null;
-  appState.pendingUserMessage = null;
-  appState.transientSessionError = null;
+  appState.activePendingSessionKey = '';
+  appState.pendingUserMessagesBySession.clear();
+  appState.transientSessionErrorsBySession.clear();
   appState.messageWindowSizeByConversation.clear();
   appState.runningSessions.clear();
   appState.pendingAskQuestions.clear();

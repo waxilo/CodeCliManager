@@ -53,9 +53,9 @@ describe('renderConversationMessagesInnerHtml tail-N 窗口', () => {
     appState.activeConversationSourcePath = null;
     appState.messageWindowSizeByConversation.clear();
     appState.runningSessions.clear();
-    appState.pendingUserMessage = null;
-    appState.pendingUserMessageConvId = null;
-    appState.transientSessionError = null;
+    appState.activePendingSessionKey = '';
+    appState.pendingUserMessagesBySession.clear();
+    appState.transientSessionErrorsBySession.clear();
     appState.pendingAskQuestions.clear();
     appState.activeToolsBySession.clear();
   });
@@ -98,9 +98,9 @@ describe('renderChatAreaHtml shellOnly（全量渲染聊天壳不序列化消息
     appState.activeConversationSourcePath = null;
     appState.messageWindowSizeByConversation.clear();
     appState.runningSessions.clear();
-    appState.pendingUserMessage = null;
-    appState.pendingUserMessageConvId = null;
-    appState.transientSessionError = null;
+    appState.activePendingSessionKey = '';
+    appState.pendingUserMessagesBySession.clear();
+    appState.transientSessionErrorsBySession.clear();
     appState.pendingAskQuestions.clear();
     appState.activeToolsBySession.clear();
     appState.conversations = [{
@@ -187,9 +187,9 @@ describe('buildDisplayMessages：主视图过滤子代理（Task）卡，保留 
 describe('buildDisplayMessages：过滤掉旧于最新非错误消息的报错卡', () => {
   beforeEach(() => {
     appState.activeConversationId = 'c1';
-    appState.pendingUserMessage = null;
-    appState.pendingUserMessageConvId = null;
-    appState.transientSessionError = null;
+    appState.activePendingSessionKey = '';
+    appState.pendingUserMessagesBySession.clear();
+    appState.transientSessionErrorsBySession.clear();
   });
 
   function messageAt(id: string, role: Message['role'], content: string, timestamp: number): Message {

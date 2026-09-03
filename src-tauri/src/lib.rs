@@ -91,6 +91,7 @@ pub fn run() {
             read_file_content,
             export_markdown,
             write_clipboard_image,
+            write_clipboard_text,
             read_file_base64,
             import_external_path,
             open_terminal,

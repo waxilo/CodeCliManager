@@ -7,6 +7,7 @@ use std::process::Command;
 
 const MAX_PROJECT_FILE_ENTRIES: usize = 20_000;
 const MAX_CLIPBOARD_IMAGE_BYTES: usize = 25 * 1024 * 1024;
+const MAX_CLIPBOARD_TEXT_BYTES: usize = 25 * 1024 * 1024;
 /// 单次文件读取的大小上限：防止一次读入超大文件导致整个 Tauri 进程 OOM。
 const MAX_READABLE_FILE_BYTES: u64 = 25 * 1024 * 1024;
 
@@ -213,7 +214,11 @@ pub async fn export_markdown(
     Ok(true)
 }
 
-fn validate_clipboard_file_name(file_name: &str) -> Result<&str, String> {
+fn validate_clipboard_upload_name<'a>(
+    file_name: &'a str,
+    extensions: &[&str],
+    kind: &str,
+) -> Result<&'a str, String> {
     let trimmed = file_name.trim();
     if trimmed.is_empty() || trimmed != file_name {
         return Err("文件名无效".to_string());
@@ -225,32 +230,31 @@ fn validate_clipboard_file_name(file_name: &str) -> Result<&str, String> {
         return Err("文件名必须是单一安全路径组件".to_string());
     }
     let lower = trimmed.to_ascii_lowercase();
-    let valid_extension = [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+    let valid_extension = extensions
         .iter()
         .any(|extension| lower.ends_with(extension));
     let valid_chars = trimmed
         .chars()
         .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'));
     if !valid_extension || !valid_chars || trimmed.starts_with('.') {
-        return Err("仅允许安全的图片文件名".to_string());
+        return Err(format!("仅允许安全的{kind}文件名"));
     }
     Ok(trimmed)
 }
 
-/// 将粘贴图片严格写入项目根目录的 `.clipboard-uploads`。
-#[tauri::command]
-pub fn write_clipboard_image(
-    project_dir: String,
-    file_name: String,
-    data: Vec<u8>,
-) -> Result<String, String> {
-    if data.is_empty() || data.len() > MAX_CLIPBOARD_IMAGE_BYTES {
-        return Err(format!(
-            "图片大小必须在 1 到 {} 字节之间",
-            MAX_CLIPBOARD_IMAGE_BYTES
-        ));
-    }
-    let safe_name = validate_clipboard_file_name(&file_name)?;
+fn validate_clipboard_file_name(file_name: &str) -> Result<&str, String> {
+    validate_clipboard_upload_name(
+        file_name,
+        &[".png", ".jpg", ".jpeg", ".gif", ".webp"],
+        "图片",
+    )
+}
+
+fn validate_clipboard_text_file_name(file_name: &str) -> Result<&str, String> {
+    validate_clipboard_upload_name(file_name, &[".txt"], "文本")
+}
+
+fn resolve_clipboard_uploads(project_dir: &str) -> Result<PathBuf, String> {
     let root = Path::new(project_dir.trim())
         .canonicalize()
         .map_err(|e| format!("无法解析项目目录: {e}"))?;
@@ -276,19 +280,66 @@ pub fn write_clipboard_image(
     if canonical_uploads.parent() != Some(root.as_path()) {
         return Err("上传目录不在项目根目录内".to_string());
     }
+    Ok(canonical_uploads)
+}
 
-    let destination = canonical_uploads.join(safe_name);
-    // 粘贴文件名由前端生成且应唯一；create_new 同时拒绝已存在文件和 symlink，
-    // 避免“检查后替换”竞态把写入重定向到项目外。
+fn write_clipboard_upload(
+    uploads: &Path,
+    file_name: &str,
+    data: &[u8],
+    kind: &str,
+) -> Result<String, String> {
+    let destination = uploads.join(file_name);
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&destination)
-        .map_err(|e| format!("安全创建图片失败（文件名可能已存在）: {e}"))?;
-    file.write_all(&data)
+        .map_err(|e| format!("安全创建{kind}失败（文件名可能已存在）: {e}"))?;
+    file.write_all(data)
         .and_then(|_| file.flush())
-        .map_err(|e| format!("写入图片失败: {e}"))?;
+        .map_err(|e| format!("写入{kind}失败: {e}"))?;
     Ok(destination.to_string_lossy().into_owned())
+}
+
+/// 将粘贴图片严格写入项目根目录的 `.clipboard-uploads`。
+#[tauri::command]
+pub fn write_clipboard_image(
+    project_dir: String,
+    file_name: String,
+    data: Vec<u8>,
+) -> Result<String, String> {
+    if data.is_empty() || data.len() > MAX_CLIPBOARD_IMAGE_BYTES {
+        return Err(format!(
+            "图片大小必须在 1 到 {} 字节之间",
+            MAX_CLIPBOARD_IMAGE_BYTES
+        ));
+    }
+    let safe_name = validate_clipboard_file_name(&file_name)?;
+    let uploads = resolve_clipboard_uploads(&project_dir)?;
+    write_clipboard_upload(&uploads, safe_name, &data, "图片")
+}
+
+fn validate_clipboard_text_size(byte_len: usize) -> Result<(), String> {
+    if byte_len == 0 || byte_len > MAX_CLIPBOARD_TEXT_BYTES {
+        return Err(format!(
+            "文本大小必须在 1 到 {} 字节之间",
+            MAX_CLIPBOARD_TEXT_BYTES
+        ));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn write_clipboard_text(
+    project_dir: String,
+    file_name: String,
+    content: String,
+) -> Result<String, String> {
+    let data = content.as_bytes();
+    validate_clipboard_text_size(data.len())?;
+    let safe_name = validate_clipboard_text_file_name(&file_name)?;
+    let uploads = resolve_clipboard_uploads(&project_dir)?;
+    write_clipboard_upload(&uploads, safe_name, data, "文本")
 }
 
 /// 读取文件为 base64 字符串（用于图片预览）
@@ -331,7 +382,11 @@ pub fn import_external_path(source: String, _project_dir: String) -> Result<Impo
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_clipboard_file_name, validate_readable_path, MAX_READABLE_FILE_BYTES};
+    use super::{
+        validate_clipboard_file_name, validate_clipboard_text_file_name,
+        validate_clipboard_text_size, validate_readable_path, write_clipboard_text,
+        MAX_CLIPBOARD_TEXT_BYTES, MAX_READABLE_FILE_BYTES,
+    };
 
     #[test]
     fn accepts_safe_clipboard_image_names() {
@@ -355,6 +410,78 @@ mod tests {
         ] {
             assert!(validate_clipboard_file_name(name).is_err(), "accepted {name}");
         }
+    }
+
+    #[test]
+    fn validates_clipboard_text_names_and_size() {
+        assert_eq!(
+            validate_clipboard_text_file_name("pasted-text-123.txt").unwrap(),
+            "pasted-text-123.txt"
+        );
+        for name in ["../escape.txt", "nested/file.txt", ".hidden.txt", "paste.md"] {
+            assert!(
+                validate_clipboard_text_file_name(name).is_err(),
+                "accepted {name}"
+            );
+        }
+        assert!(validate_clipboard_text_size(0).is_err());
+        assert!(validate_clipboard_text_size(MAX_CLIPBOARD_TEXT_BYTES).is_ok());
+        assert!(validate_clipboard_text_size(MAX_CLIPBOARD_TEXT_BYTES + 1).is_err());
+    }
+
+    #[test]
+    fn writes_clipboard_text_verbatim_and_refuses_overwrite() {
+        let root = std::env::temp_dir().join(format!(
+            "codecli-manager-clipboard-text-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).expect("create project dir");
+        let content = "第一行\nsecond line\n";
+        let file_name = "pasted-text-test.txt";
+
+        let path = write_clipboard_text(
+            root.to_string_lossy().into_owned(),
+            file_name.to_string(),
+            content.to_string(),
+        )
+        .expect("write pasted text");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+        assert!(write_clipboard_text(
+            root.to_string_lossy().into_owned(),
+            file_name.to_string(),
+            content.to_string(),
+        )
+        .is_err());
+
+        std::fs::remove_dir_all(&root).expect("cleanup project dir");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlinked_clipboard_upload_directory_for_text() {
+        use std::os::unix::fs::symlink;
+
+        let root = std::env::temp_dir().join(format!(
+            "codecli-manager-clipboard-symlink-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "codecli-manager-clipboard-outside-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root).expect("create project dir");
+        std::fs::create_dir(&outside).expect("create outside dir");
+        symlink(&outside, root.join(".clipboard-uploads")).expect("create symlink");
+
+        let result = write_clipboard_text(
+            root.to_string_lossy().into_owned(),
+            "pasted-text-test.txt".to_string(),
+            "hello".to_string(),
+        );
+        assert!(result.is_err());
+
+        std::fs::remove_dir_all(&root).expect("cleanup project dir");
+        std::fs::remove_dir_all(&outside).expect("cleanup outside dir");
     }
 
     #[test]

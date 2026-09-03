@@ -26,13 +26,19 @@ import { showConfirmDialog } from '../ui/confirm-dialog';
 import { appState } from '../state';
 import { resetSidebarTabState } from './sidebar/sidebar-tabs';
 import type { Message, MessageChunkPayload } from '../types';
+import { getDefaultMessagePlaceholder, isActiveSessionAborting } from './chat/session-context';
 
 function message(id: string, role: Message['role'], content: string): Message {
   return { id, role, content, timestamp: 1 };
 }
 
-function chunk(conversation_id: string, kind: string, content = ''): MessageChunkPayload {
-  return { conversation_id, kind, content };
+function chunk(
+  conversation_id: string,
+  kind: string,
+  content = '',
+  runId?: string,
+): MessageChunkPayload {
+  return { conversation_id, kind, content, runId };
 }
 
 function resetSessionState() {
@@ -43,8 +49,10 @@ function resetSessionState() {
   appState.pendingTextDelta.clear();
   appState.streamRefreshBySession.clear();
   appState.activeConversationId = '';
-  appState.pendingUserMessage = null;
-  appState.pendingUserMessageConvId = null;
+  appState.activePendingSessionKey = '';
+  appState.pendingUserMessagesBySession.clear();
+  appState.transientSessionErrorsBySession.clear();
+  appState.runIdsBySession.clear();
 }
 
 describe('file reference boundaries', () => {
@@ -238,16 +246,49 @@ describe('新建会话后侧边栏刷新', () => {
     appState.newConversationIds.clear();
   });
 
-  it('session_created chunk 首落盘新会话时重建侧边栏，新会话立即出现', () => {
-    appState.pendingUserMessage = 'hello';
-    appState.pendingUserMessageConvId = null;
+  it('session_created 按 runId 迁移 pending 状态并立即加入侧边栏', () => {
+    const runId = 'run-a';
+    const pendingKey = 'pending-run-a';
+    appState.activePendingSessionKey = pendingKey;
+    appState.runningSessions.add(pendingKey);
+    appState.runIdsBySession.set(pendingKey, runId);
+    appState.pendingUserMessagesBySession.set(pendingKey, { content: 'hello' });
 
-    handleMessageChunk(chunk('conv-new', 'session_created', '/proj'));
+    handleMessageChunk(chunk('conv-new', 'session_created', '/proj', runId));
 
+    expect(appState.activePendingSessionKey).toBe('');
+    expect(appState.activeConversationId).toBe('conv-new');
+    expect(appState.runningSessions.has('conv-new')).toBe(true);
+    expect(appState.runningSessions.has(pendingKey)).toBe(false);
+    expect(appState.pendingUserMessagesBySession.get('conv-new')?.content).toBe('hello');
     expect(appState.conversations.some((c) => c.id === 'conv-new')).toBe(true);
     const listHtml = document.querySelector('#conversation-list')!.innerHTML;
     expect(listHtml).toContain('conv-new');
     expect(listHtml).toContain('New Chat');
+  });
+
+  it('同目录两个首轮运行乱序创建时只迁移匹配的 runId', () => {
+    appState.activePendingSessionKey = 'pending-run-a';
+    appState.runningSessions.add('pending-run-a');
+    appState.runningSessions.add('pending-run-b');
+    appState.runIdsBySession.set('pending-run-a', 'run-a');
+    appState.runIdsBySession.set('pending-run-b', 'run-b');
+    appState.pendingUserMessagesBySession.set('pending-run-a', { content: 'A' });
+    appState.pendingUserMessagesBySession.set('pending-run-b', { content: 'B' });
+    appState.sessionProcessModels.set('pending-run-a', 'model-a');
+    appState.sessionProcessModels.set('pending-run-b', 'model-b');
+
+    handleMessageChunk(chunk('conv-b', 'session_created', '/proj', 'run-b'));
+
+    expect(appState.activePendingSessionKey).toBe('pending-run-a');
+    expect(appState.activeConversationId).toBe('');
+    expect(appState.runningSessions.has('pending-run-a')).toBe(true);
+    expect(appState.pendingUserMessagesBySession.get('pending-run-a')?.content).toBe('A');
+    expect(appState.sessionProcessModels.get('pending-run-a')).toBe('model-a');
+    expect(appState.runningSessions.has('conv-b')).toBe(true);
+    expect(appState.pendingUserMessagesBySession.get('conv-b')?.content).toBe('B');
+    expect(appState.sessionProcessModels.get('conv-b')).toBe('model-b');
+    expect(appState.runningSessions.has('pending-run-b')).toBe(false);
   });
 
   it('既有会话重复收到 session_created 不新增、不重建侧边栏', () => {
@@ -512,12 +553,29 @@ describe('session-error clears stuck running state after failed restart', () => 
     expect(appState.modelRestartingSessions.has(sid)).toBe(false);
   });
 
-  it('clears the pending run marker when the error has no conversation id', () => {
-    appState.runningSessions.add('pending');
+  it('clears only the pending run identified by the error event', () => {
+    appState.runningSessions.add('pending-run-a');
+    appState.runningSessions.add('pending-run-b');
 
-    handleSessionError({ conversationId: '', error: '启动失败' });
+    handleSessionError({ conversationId: 'pending-run-a', error: '启动失败' });
 
-    expect(appState.runningSessions.has('pending')).toBe(false);
+    expect(appState.runningSessions.has('pending-run-a')).toBe(false);
+    expect(appState.runningSessions.has('pending-run-b')).toBe(true);
+  });
+});
+
+describe('cross-session aborting UI state', () => {
+  beforeEach(resetSessionState);
+
+  it('stopping session A does not mark session B as aborting after switching', () => {
+    appState.activeConversationId = 'session-a';
+    appState.abortingSessions.add('session-a');
+    expect(isActiveSessionAborting()).toBe(true);
+    expect(getDefaultMessagePlaceholder()).toBe('正在停止当前任务…');
+
+    appState.activeConversationId = 'session-b';
+    expect(isActiveSessionAborting()).toBe(false);
+    expect(getDefaultMessagePlaceholder(false)).not.toBe('正在停止当前任务…');
   });
 });
 

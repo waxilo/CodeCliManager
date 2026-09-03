@@ -17,7 +17,7 @@ import {
   scheduleHighlighting,
 } from '../../markdown';
 import { getThinkingScroller } from './thinking-scroller';
-import { updateSendButtonState, setSendButtonLoading } from './session-context';
+import { getActiveSessionKey, isPendingSessionKey, pendingSessionKey, updateSendButtonState, setSendButtonLoading } from './session-context';
 import { updateOrAddConversation, findConversationById, assistantTextCovers } from '../conversations';
 import { updateConversationListSpinner, refreshActiveTabContent } from '../sidebar';
 import {
@@ -31,6 +31,7 @@ import {
   setRunStatusOverride,
   transferSessionRunTimer,
 } from './run-status';
+import { transferInteractionPanel } from '../permissions/interaction-panel';
 import { scheduleUiRefresh } from '../../ui';
 import { syncTodoPanelUI } from './todo-panel';
 import { mergeStreamBlocks, getToolAnchorBlockIndexes } from './render-chat';
@@ -57,6 +58,78 @@ function getActiveToolsMap(sessionId: string): Map<string, ActiveToolState> {
 function sessionHasActiveTools(sessionId: string): boolean {
   const map = appState.activeToolsBySession.get(sessionId);
   return Boolean(map && map.size > 0);
+}
+
+function transferMapEntry<T>(map: Map<string, T>, from: string, to: string): void {
+  const value = map.get(from);
+  if (value === undefined) return;
+  map.set(to, value);
+  map.delete(from);
+}
+
+function transferSetEntry(set: Set<string>, from: string, to: string): void {
+  if (!set.delete(from)) return;
+  set.add(to);
+}
+
+function resolvePendingSessionKey(runId?: string | null): string | null {
+  if (runId) return pendingSessionKey(runId);
+  const pendingKeys = [...appState.runningSessions].filter((key) => key.startsWith('pending-run-'));
+  return pendingKeys.length === 1 ? pendingKeys[0] : null;
+}
+
+export function transferPendingSessionState(from: string, to: string): boolean {
+  if (!from || from === to) return false;
+  const wasViewing = appState.activePendingSessionKey === from;
+  const pendingRefresh = appState.streamRefreshBySession.get(from);
+  if (pendingRefresh?.rafId !== null && pendingRefresh?.rafId !== undefined) {
+    cancelAnimationFrame(pendingRefresh.rafId);
+  }
+  appState.streamRefreshBySession.delete(from);
+
+  transferSetEntry(appState.runningSessions, from, to);
+  transferSetEntry(appState.abortingSessions, from, to);
+  transferSetEntry(appState.modelRestartingSessions, from, to);
+
+  transferMapEntry(appState.streamingBySession, from, to);
+  transferMapEntry(appState.pendingTextDelta, from, to);
+  transferMapEntry(appState.sessionProcessModels, from, to);
+  transferMapEntry(appState.runIdsBySession, from, to);
+  transferMapEntry(appState.pendingUserMessagesBySession, from, to);
+  transferMapEntry(appState.transientSessionErrorsBySession, from, to);
+  transferMapEntry(appState.composerDrafts, from, to);
+  transferMapEntry(appState.queuedPromptsBySession, from, to);
+  transferMapEntry(appState.todosBySession, from, to);
+  transferMapEntry(appState.usageBySession, from, to);
+  transferMapEntry(appState.thinkingScrollers, from, to);
+  transferMapEntry(appState.activeQuestionEnterHandlers, from, to);
+  transferSessionRunTimer(from, to);
+
+  const pendingTools = appState.activeToolsBySession.get(from);
+  if (pendingTools) {
+    const tools = getActiveToolsMap(to);
+    for (const [id, state] of pendingTools) {
+      if (!tools.has(id)) tools.set(id, state);
+    }
+    appState.activeToolsBySession.delete(from);
+  }
+
+  const pendingAsk = appState.pendingAskQuestions.get(from);
+  if (pendingAsk) {
+    appState.pendingAskQuestions.delete(from);
+    pendingAsk.conversationId = to;
+    appState.pendingAskQuestions.set(to, pendingAsk);
+  }
+  transferInteractionPanel(from, to);
+  flushPendingTextDelta(to);
+
+  if (wasViewing) {
+    appState.activePendingSessionKey = '';
+    appState.activeConversationId = to;
+    appState.activeConversationSourcePath = null;
+    appState.pendingProjectDir = null;
+  }
+  return wasViewing;
 }
 
 function parseChunkJson(content: string): Record<string, unknown> | null {
@@ -162,7 +235,6 @@ export function reconcileActiveToolsWithHistory(sessionId: string, messages: Mes
   if (tools.size === 0) {
     appState.activeToolsBySession.delete(sessionId);
   }
-  appState.activeToolsBySession.delete('pending');
 }
 
 /** 清除某会话已终态（done/failed）的 Task，供 turn-complete 轮次切换时调用。 */
@@ -203,14 +275,6 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
       startedAt: existing?.startedAt || Date.now(),
       blockIndexAtStart,
     });
-    // pending → 真实 session
-    const pendingTools = appState.activeToolsBySession.get('pending');
-    if (pendingTools && sid !== 'pending') {
-      for (const [pid, pstate] of pendingTools) {
-        if (!tools.has(pid)) tools.set(pid, pstate);
-      }
-      appState.activeToolsBySession.delete('pending');
-    }
     refreshActiveToolUI(sid);
     return true;
   }
@@ -245,7 +309,7 @@ function handleToolChunk(sid: string, kind: string, content: string): boolean {
     const toolUseId = String(data?.tool_use_id || data?.toolUseId || '');
     const taskId = String(data?.task_id || data?.taskId || '');
     if (!toolUseId && !taskId) return false;
-    const tools = appState.activeToolsBySession.get(sid) || appState.activeToolsBySession.get('pending');
+    const tools = appState.activeToolsBySession.get(sid);
     if (!tools) return false;
     const state = findActiveTool(tools, toolUseId, taskId);
     if (!state) return false;
@@ -528,7 +592,6 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
   if (
     kind !== 'session_created' &&
     !appState.runningSessions.has(sid) &&
-    !appState.runningSessions.has('pending') &&
     !canReBusyAfterTurn &&
     !(isToolChunk && (sessionHasActiveTools(sid) || kind === 'tool_use_start'))
   ) {
@@ -536,73 +599,41 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
   }
 
   if (kind === 'session_created') {
-    // pending -> 真实 session ID 转换
-    const projectDir = content?.trim() || '';
-    const pendingRunKey = `new:${projectDir}`;
-    let runId = appState.runIdsBySession.get(pendingRunKey);
-    let matchedKey = pendingRunKey;
-    if (!runId) {
-      const pendingRuns = [...appState.runIdsBySession.entries()].filter(([key]) => key.startsWith('new:'));
-      if (pendingRuns.length === 1) {
-        [matchedKey, runId] = pendingRuns[0];
-      }
-    }
-    if (runId) {
-      appState.runIdsBySession.delete(matchedKey);
-      appState.runIdsBySession.set(sid, runId);
-    }
-    appState.runningSessions.delete('pending');
-    appState.runningSessions.add(sid);
-    transferSessionRunTimer('pending', sid);
-    const pendingModel = appState.sessionProcessModels.get('pending');
-    if (pendingModel !== undefined) {
-      appState.sessionProcessModels.set(sid, pendingModel);
-      appState.sessionProcessModels.delete('pending');
-    }
-    const pendingTools = appState.activeToolsBySession.get('pending');
-    if (pendingTools && pendingTools.size > 0) {
-      const tools = getActiveToolsMap(sid);
-      for (const [id, state] of pendingTools) {
-        if (!tools.has(id)) tools.set(id, state);
-      }
-      appState.activeToolsBySession.delete('pending');
-    }
-    // 仅在尚未激活会话时设置 appState.activeConversationId，避免打断用户已切换的视图
+    const pendingKey = resolvePendingSessionKey(payload.runId);
+    const wasViewing = pendingKey ? transferPendingSessionState(pendingKey, sid) : false;
     const existing = findConversationById(sid);
-    if (!appState.activeConversationId) {
-      appState.activeConversationId = sid;
-      // 若后端已先回填 source_path（罕见顺序），同步 active 路径避免匹配不到
-      if (existing?.source_path) {
-        appState.activeConversationSourcePath = existing.source_path;
-      }
+    if (wasViewing && existing?.source_path) {
+      appState.activeConversationSourcePath = existing.source_path;
     }
+
+    const pendingMessage = appState.pendingUserMessagesBySession.get(sid);
     const now = Math.floor(Date.now() / 1000);
-    // 只有当 appState.pendingUserMessage 属于此会话时才使用（防止串会话）
-    const pendingMatchesThisSession = appState.pendingUserMessage &&
-      (!appState.pendingUserMessageConvId || appState.pendingUserMessageConvId === sid);
     const added = updateOrAddConversation({
       id: sid,
       title: existing?.title || 'New Chat',
-      messages: existing?.messages ?? (pendingMatchesThisSession
-        ? [{ id: `user-${Date.now()}`, role: 'user', content: appState.pendingUserMessage!, timestamp: now }]
-        : []),
+      messages:
+        existing?.messages ??
+        (pendingMessage
+          ? [{
+              id: `user-${Date.now()}`,
+              role: 'user',
+              content: pendingMessage.content,
+              refs: pendingMessage.refs,
+              timestamp: now,
+            }]
+          : []),
       platform: 'claude',
       project_dir: content?.trim() || existing?.project_dir || null,
       source_path: existing?.source_path ?? null,
       created_at: existing?.created_at ?? now,
       updated_at: now,
     });
-    // 新会话加入列表后立即重建侧边栏当前 tab：pending 阶段已渲染出 #message-list，
-    // ensureChatViewVisible 只刷新聊天区，列表若不重建新会话不会出现，直到手动刷新。
     if (added) refreshActiveTabContent();
-    // 此时尚无会话数据，保留 appState.pendingUserMessage 以确保用户消息可见
-    updateSendButtonState();
-    ensureChatViewVisible();
     updateConversationListSpinner();
-    // ensureChatViewVisible 可能调用了 shellApi.render()，需要恢复按钮 loading 状态
-    // 只有当 pending 消息属于此会话时才设置 loading（防止串会话）
-    if (sid === appState.activeConversationId || (!appState.activeConversationId && appState.pendingUserMessage && !appState.pendingUserMessageConvId)) {
-      setSendButtonLoading(true);
+    if (wasViewing) {
+      updateSendButtonState();
+      ensureChatViewVisible();
+      setSendButtonLoading(appState.runningSessions.has(sid));
     }
     return;
   }
@@ -614,7 +645,7 @@ export function handleMessageChunk(payload: MessageChunkPayload) {
 
   // 所有会话都累积流式数据（包括后台运行的会话）
   const state = getStreamingState(sid);
-  const isActive = sid === appState.activeConversationId || (!appState.activeConversationId && appState.pendingUserMessage && !appState.pendingUserMessageConvId);
+  const isActive = sid === getActiveSessionKey();
 
   // 常驻会话追问：上一轮 turn-complete 后 CLI 可能立刻开始下一轮，需重新标记忙碌
   if (
@@ -773,7 +804,7 @@ function recoverableErrorStatus(code: string | undefined): string {
 }
 
 export function handleSessionError(payload: SessionErrorPayload) {
-  const sid = payload.conversationId || appState.activeConversationId || null;
+  const sid = payload.conversationId || getActiveSessionKey() || null;
   const errorText = payload.error.trim();
   if (!errorText) return;
   const errorCode = inferSessionErrorCode(payload, errorText);
@@ -786,7 +817,7 @@ export function handleSessionError(payload: SessionErrorPayload) {
   }
 
   if (payload.recoverable) {
-    setRunStatusOverride(sid || 'pending', recoverableErrorStatus(errorCode));
+    if (sid) setRunStatusOverride(sid, recoverableErrorStatus(errorCode));
     return;
   }
 
@@ -802,26 +833,20 @@ export function handleSessionError(payload: SessionErrorPayload) {
     }
   }
 
-  setRunStatusOverride(sid || 'pending', null);
+  if (sid) setRunStatusOverride(sid, null);
 
-  // 最终会话错误意味着后端将结束（或已结束）该会话进程：清掉运行/停止标记。
-  // 否则「切模型重启 / 重新生成后进程异常退出」时，session-ended 会被
-  // runningSessions 拦截忽略，输入框状态条与时长永远停在「执行中」。
   if (sid) {
     appState.runningSessions.delete(sid);
     appState.abortingSessions.delete(sid);
     appState.modelRestartingSessions.delete(sid);
-  } else {
-    appState.runningSessions.delete('pending');
-    appState.abortingSessions.delete('pending');
-    appState.modelRestartingSessions.delete('pending');
   }
 
-  const isCurrentSession = !sid || sid === appState.activeConversationId;
+  const isCurrentSession = Boolean(sid && sid === getActiveSessionKey());
   if (isCurrentSession) clearPendingRequestState();
-  clearStreamingState(sid || 'pending');
-  clearSessionTools(sid || 'pending');
-  clearSessionTools('pending');
+  if (sid) {
+    clearStreamingState(sid);
+    clearSessionTools(sid);
+  }
   if (isCurrentSession) hideSendingState();
 
   const errorMessage: Message = {
@@ -833,8 +858,8 @@ export function handleSessionError(payload: SessionErrorPayload) {
     timestamp: Math.floor(Date.now() / 1000),
   };
 
-  if (sid) {
-    appState.transientSessionError = null;
+  if (sid && !isPendingSessionKey(sid)) {
+    appState.transientSessionErrorsBySession.delete(sid);
     const existingConversation = findConversationById(sid);
     let conversation = existingConversation;
     if (!conversation) {
@@ -874,12 +899,9 @@ export function handleSessionError(payload: SessionErrorPayload) {
         conversation.updated_at = errorMessage.timestamp;
       }
     }
-    if (isCurrentSession) {
-      appState.pendingUserMessage = null;
-      appState.pendingUserMessageConvId = null;
-    }
-  } else {
-    appState.transientSessionError = errorText;
+    appState.pendingUserMessagesBySession.delete(sid);
+  } else if (sid) {
+    appState.transientSessionErrorsBySession.set(sid, errorText);
   }
 
   updateConversationListSpinner();
@@ -1010,7 +1032,7 @@ export function syncStreamingBlocksInPlace(sessionId: string): void {
 
 /** 流式状态变化只调度唯一聊天 commit；DOM patch 与几何恢复由该 commit 统一完成。 */
 export function refreshStreamingUI(sessionId: string) {
-  if (sessionId !== appState.activeConversationId && !(appState.pendingUserMessage && !appState.activeConversationId && !appState.pendingUserMessageConvId)) return;
+  if (sessionId !== getActiveSessionKey()) return;
 
   refreshRunStatusStrip();
   scheduleUiRefresh({ chat: true });

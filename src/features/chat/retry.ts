@@ -5,7 +5,7 @@ import { setSendButtonLoading, hideSendingState } from './session-context';
 import { clearStreamingState } from './streaming';
 import { abortSession, sendMessage } from './send';
 import { markSessionRunStart } from './run-status';
-import { canSendMessage, isSendButtonLoading } from './session-context';
+import { canSendMessage, getActiveSessionKey, isPendingSessionKey, isSendButtonLoading } from './session-context';
 import { refreshConversationFromBackend } from '../conversations/load';
 import { updateConversationListSpinner } from '../sidebar/render-list';
 export async function invokeRetryMessage(mode: 'regenerate' | 'undo') {
@@ -44,10 +44,7 @@ export async function invokeRetryMessage(mode: 'regenerate' | 'undo') {
 
     // undo 模式：清理本地瞬时状态，并强制刷新（防止事件偶发丢失时残留气泡）
     if (mode === 'undo') {
-      if (appState.pendingUserMessageConvId === cid) {
-        appState.pendingUserMessage = null;
-        appState.pendingUserMessageConvId = null;
-      }
+      appState.pendingUserMessagesBySession.delete(cid);
       clearStreamingState(cid);
       appState.runningSessions.delete(cid);
       setSendButtonLoading(false);
@@ -92,8 +89,8 @@ export function handleSendButtonClick() {
   if (!sendBtn) return;
 
   if (isSendButtonLoading()) {
-    // 运行中：有输入内容则追问，否则停止当前任务
-    if (canSendMessage()) {
+    const activeSessionKey = getActiveSessionKey();
+    if (!isPendingSessionKey(activeSessionKey) && canSendMessage()) {
       void sendMessage();
     } else {
       void abortSession();

@@ -4,6 +4,7 @@ import type { PermissionRequestPayload } from '../../types';
 import { escapeHtml } from '../../utils';
 import { mountInteractionPanel, unmountActiveInteractionPanel, getInteractionHost, clearInteractionHostUi } from './interaction-panel';
 import { parseAskUserQuestionInput, showQuestionDialog } from './ask-question';
+import { getActiveSessionKey } from '../chat/session-context';
 import { formatPermissionInput } from './interaction-panel';
 export function showPermissionDialog(payload: PermissionRequestPayload): Promise<'allow' | 'deny'> {
   return new Promise((resolve) => {
@@ -36,6 +37,8 @@ export function showPermissionDialog(payload: PermissionRequestPayload): Promise
     let settled = false;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
+      const currentPanel = appState.interactionPanelsBySession.get(getActiveSessionKey());
+      if (currentPanel?.element !== panel) return;
       event.preventDefault();
       cleanup('deny');
     };
@@ -56,7 +59,9 @@ export function showPermissionDialog(payload: PermissionRequestPayload): Promise
     document.addEventListener('keydown', onKey);
 
     mountInteractionPanel(panel, payload.conversationId || '', cleanup);
-    (panel.querySelector('[data-action="allow"]') as HTMLButtonElement | null)?.focus();
+    if (getActiveSessionKey() === payload.conversationId) {
+      (panel.querySelector('[data-action="allow"]') as HTMLButtonElement | null)?.focus();
+    }
   });
 }
 
@@ -65,35 +70,26 @@ export function closePermissionDialogs(conversationId?: string): void {
   // 未指定会话时关闭全部待作答问卡。
   for (const state of [...appState.pendingAskQuestions.values()]) {
     if (!state.finish) continue;
-    if (
-      !conversationId ||
-      state.conversationId === conversationId ||
-      (conversationId.startsWith('pending') && state.conversationId === 'pending')
-    ) {
+    if (!conversationId || state.conversationId === conversationId) {
       state.finish({ action: 'deny' });
     }
   }
 
-  const panels = document.querySelectorAll<HTMLElement>('.interaction-panel');
-  if (panels.length === 0 && appState.activeInteractionPanel) {
-    if (
-      !conversationId ||
-      !appState.activeInteractionPanel.conversationId ||
-      appState.activeInteractionPanel.conversationId === conversationId ||
-      conversationId.startsWith('pending-')
-    ) {
-      appState.activeInteractionPanel.cleanup('deny');
+  if (!conversationId) {
+    for (const panel of [...appState.interactionPanelsBySession.values()]) {
+      panel.cleanup('deny');
     }
     return;
   }
 
-  panels.forEach((panel) => {
-    if (conversationId) {
-      const oid = panel.dataset.conversationId || '';
-      if (oid && oid !== conversationId && !conversationId.startsWith('pending-')) {
-        return;
-      }
-    }
+  const activePanel = appState.interactionPanelsBySession.get(conversationId);
+  if (activePanel) {
+    activePanel.cleanup('deny');
+    return;
+  }
+
+  document.querySelectorAll<HTMLElement>('.interaction-panel').forEach((panel) => {
+    if (panel.dataset.conversationId !== conversationId) return;
     const cleanup = (
       panel as HTMLElement & { __permissionCleanup?: (r: 'allow' | 'deny') => void }
     ).__permissionCleanup;
@@ -129,10 +125,7 @@ export async function handlePermissionRequest(raw: PermissionRequestPayload): Pr
   }
 
   // 正在停止该会话时，不再弹窗
-  if (
-    appState.abortingSessions.has(normalized.conversationId) ||
-    (normalized.conversationId === appState.activeConversationId && appState.isAbortingActiveSession)
-  ) {
+  if (appState.abortingSessions.has(normalized.conversationId)) {
     try {
       await api.respondToolPermission({
         requestId: normalized.requestId,
@@ -184,7 +177,7 @@ export async function handlePermissionRequest(raw: PermissionRequestPayload): Pr
         });
       }
     } catch (e) {
-      if (!appState.abortingSessions.has(normalized.conversationId) && !appState.isAbortingActiveSession) {
+      if (!appState.abortingSessions.has(normalized.conversationId)) {
         console.error('[question] 回写失败:', e);
       }
     }
@@ -202,7 +195,7 @@ export async function handlePermissionRequest(raw: PermissionRequestPayload): Pr
     });
   } catch (e) {
     // abort 时后端已 deny 并移除请求，属预期
-    if (!appState.abortingSessions.has(normalized.conversationId) && !appState.isAbortingActiveSession) {
+    if (!appState.abortingSessions.has(normalized.conversationId)) {
       console.error('[permission] 回写失败:', e);
     }
   }

@@ -25,8 +25,9 @@ describe('renderCacheKey（按会话渲染缓存键）', () => {
     appState.activeConversationSourcePath = null;
     appState.messageWindowSizeByConversation.clear();
     appState.runningSessions.clear();
-    appState.pendingUserMessage = null;
-    appState.transientSessionError = null;
+    appState.activePendingSessionKey = '';
+    appState.pendingUserMessagesBySession.clear();
+    appState.transientSessionErrorsBySession.clear();
     appState.pendingAskQuestions.clear();
     appState.activeToolsBySession.clear();
     appState.expandedThinkingBlocks.clear();
@@ -117,15 +118,14 @@ describe('renderCacheKey（按会话渲染缓存键）', () => {
     expect(renderCacheKey(c1)).toBe(k1Expanded);
   });
 
-  it('新会话 pending 态下不同问题内容的 key 不同（防止串会话缓存命中）', () => {
-    // 会话1：新会话尚未落盘，activeConversationId 为空，走 pending 缓存
+  it('两个 pending 运行使用独立缓存键（防止同目录并发串会话）', () => {
     appState.activeConversationId = '';
-    appState.pendingUserMessage = '问题A';
-    appState.pendingUserMessageConvId = null;
+    appState.activePendingSessionKey = 'pending-run-a';
+    appState.pendingUserMessagesBySession.set('pending-run-a', { content: '相同问题' });
     const k1 = renderCacheKey(undefined);
 
-    // 会话1结束后重置，会话2同样处于新会话 pending 态但内容不同
-    appState.pendingUserMessage = '问题B';
+    appState.activePendingSessionKey = 'pending-run-b';
+    appState.pendingUserMessagesBySession.set('pending-run-b', { content: '相同问题' });
     const k2 = renderCacheKey(undefined);
 
     expect(k1).not.toBe(k2);

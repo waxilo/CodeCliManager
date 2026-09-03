@@ -1,4 +1,5 @@
 import { appState } from '../../state';
+import { getActiveSessionKey } from './session-context';
 import { updateCostIndicator } from './cost-indicator';
 
 /**
@@ -55,9 +56,7 @@ export function getSessionRunStatus(sessionId: string): RunStatusInfo | null {
     return { status: '正在切换模型…', elapsedMs, busy: false };
   }
 
-  const hasAsk =
-    appState.pendingAskQuestions.has(sessionId) ||
-    appState.pendingAskQuestions.has('pending');
+  const hasAsk = appState.pendingAskQuestions.has(sessionId);
   if (hasAsk && (running || startedAt != null)) {
     return { status: '等待你的选择…', elapsedMs, busy: false };
   }
@@ -218,7 +217,7 @@ export function refreshRunStatusStrip(): void {
     return;
   }
 
-  const sessionId = appState.activeConversationId || 'pending';
+  const sessionId = getActiveSessionKey();
   if (sessionId !== lastSessionId) {
     lastSessionId = sessionId;
     lastActiveAt = 0;
@@ -277,7 +276,7 @@ export function startRunStatusTicker(): void {
       refreshRunStatusStrip();
     }
     // 运行中：成本栏的「⏱耗时」需要持续刷新
-    if (appState.runningSessions.has(appState.activeConversationId || 'pending')) {
+    if (appState.runningSessions.has(getActiveSessionKey())) {
       updateCostIndicator();
     }
   }, 250);

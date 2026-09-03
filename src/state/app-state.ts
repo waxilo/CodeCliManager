@@ -16,6 +16,7 @@ import type {
   ActiveToolState,
   TodoItem,
   SessionUsage,
+  FileRef,
 } from '../types';
 import { createRequestGuard } from '../utils';
 import type { ScrollController } from '../ui';
@@ -73,6 +74,11 @@ export interface ActiveInteractionPanel {
   cleanup: (result: 'allow' | 'deny') => void;
 }
 
+export interface PendingUserMessage {
+  content: string;
+  refs?: FileRef[];
+}
+
 /**
  * 全局可变应用状态。
  * 使用对象属性以便跨模块读写（ESM 对 import let 绑定不可赋值）。
@@ -84,9 +90,9 @@ export const appState = {
   activeConversationSourcePath: null as string | null,
   editingConversationId: null as string | null,
   editingConversationSourcePath: null as string | null,
-  pendingUserMessage: null as string | null,
-  pendingUserMessageConvId: null as string | null,
-  transientSessionError: null as string | null,
+  activePendingSessionKey: '',
+  pendingUserMessagesBySession: new Map<string, PendingUserMessage>(),
+  transientSessionErrorsBySession: new Map<string, string>(),
   chatModelOptions: [] as string[],
   currentDefaultModel: '',
   pendingProjectDir: null as string | null,
@@ -158,7 +164,6 @@ export const appState = {
   runningSessions: new Set<string>(),
   abortingSessions: new Set<string>(),
   modelRestartingSessions: new Set<string>(),
-  isAbortingActiveSession: false,
   sessionProcessModels: new Map<string, string>(),
   runIdsBySession: new Map<string, string>(),
   queuedPromptsBySession: new Map<string, QueuedPromptItem[]>(),
@@ -177,7 +182,7 @@ export const appState = {
   activeQuestionEnterHandlers: new Map<string, () => boolean>(),
   streamRefreshBySession: new Map<string, StreamRefreshState>(),
   thinkingScrollers: new Map<string, ScrollController>(),
-  activeInteractionPanel: null as ActiveInteractionPanel | null,
+  interactionPanelsBySession: new Map<string, ActiveInteractionPanel>(),
   /** tail-N 消息窗口：conversationInstanceKey → 可见消息条数（「加载更早」按会话独立累计，切换不丢失） */
   messageWindowSizeByConversation: new Map<string, number>(),
   /** conversationInstanceKey → get_conversation 返回的版本号；用于回传 known_version 跳过未变更会话的重传 */

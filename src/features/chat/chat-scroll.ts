@@ -5,6 +5,7 @@ import {
   type ChatScrollSessionSnapshot,
 } from '../../ui/chat-scroll-coordinator';
 import type { ChatScrollMode } from '../../ui/chat-scroll-reducer';
+import { getActiveSessionKey } from './session-context';
 import { conversationInstanceKey } from '../conversations/normalize';
 
 let coordinator: ChatScrollCoordinator | null = null;
@@ -14,7 +15,7 @@ const sessionMemory = new Map<string, ChatScrollSessionSnapshot>();
 
 export function activeChatScrollSessionKey(): string {
   return conversationInstanceKey(
-    appState.activeConversationId || 'pending',
+    getActiveSessionKey() || 'new',
     appState.activeConversationSourcePath,
   );
 }

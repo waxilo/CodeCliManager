@@ -33,6 +33,7 @@ export interface MessageChunkPayload {
   conversation_id: string;
   kind: string;
   content: string;
+  runId?: string | null;
 }
 
 /** 后端 permission-request 事件（工具权限确认 / AskUserQuestion） */

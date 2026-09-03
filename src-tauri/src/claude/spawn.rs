@@ -161,7 +161,7 @@ pub(crate) fn spawn_claude_stream(
         unregister_active_process(&registry_key);
         clear_session_aborted(&registry_key);
         drop(stdin);
-        return Ok(StreamOutcome::Cancelled(conversation_id.cloned()));
+        return Ok(StreamOutcome::Cancelled(Some(registry_key)));
     }
     if is_restart_successor {
         // 取走 model_restart / graceful_shutdown：它们描述的是正在退出的旧进程。
@@ -398,6 +398,7 @@ pub(crate) fn spawn_claude_stream(
                 process_claude_stream_line(
                     &line,
                     &app,
+                    run_id,
                     &mut captured_session_id,
                     &mut block_types,
                     &mut tool_use_blocks,
@@ -679,6 +680,7 @@ pub(crate) fn spawn_claude_stream(
         process_claude_stream_line(
             &line,
             &app,
+            run_id,
             &mut captured_session_id,
             &mut block_types,
             &mut tool_use_blocks,
@@ -720,6 +722,9 @@ pub(crate) fn spawn_claude_stream(
         }
     };
     eprintln!("[claude] 退出码: {}", status);
+    let resolved_session_id = captured_session_id
+        .clone()
+        .unwrap_or_else(|| captured_registry_key.clone());
 
     if stream_error.is_some() {
         let error = stream_error.error().unwrap_or("模型调用失败").to_string();
@@ -728,11 +733,11 @@ pub(crate) fn spawn_claude_stream(
         if !should_emit_stream_error(was_aborted, &stream_error) {
             clear_stream_aborted(&captured_registry_key, &captured_session_id);
             eprintln!("[claude] 用户主动终止，忽略 stream error: {}", error);
-            return Ok(StreamOutcome::Cancelled(captured_session_id));
+            return Ok(StreamOutcome::Cancelled(Some(resolved_session_id)));
         }
-        stream_error.emit(&app, captured_session_id.as_deref());
+        stream_error.emit(&app, Some(&resolved_session_id));
         return Ok(StreamOutcome::Failed {
-            session_id: captured_session_id,
+            session_id: Some(resolved_session_id),
             error,
         });
     }
@@ -755,9 +760,9 @@ pub(crate) fn spawn_claude_stream(
             );
             // 注意：不要在这里 take_model_restart，留给外层 execute_prompt 跳过 session-ended
             return Ok(if was_aborted {
-                StreamOutcome::Cancelled(captured_session_id)
+                StreamOutcome::Cancelled(Some(resolved_session_id))
             } else {
-                StreamOutcome::Success(captured_session_id)
+                StreamOutcome::Success(Some(resolved_session_id))
             });
         }
 
@@ -768,18 +773,18 @@ pub(crate) fn spawn_claude_stream(
         };
         emit_session_error(
             &app,
-            captured_session_id.as_deref(),
+            Some(&resolved_session_id),
             &error_msg,
         );
         return Ok(StreamOutcome::Failed {
-            session_id: captured_session_id,
+            session_id: Some(resolved_session_id),
             error: error_msg,
         });
     }
 
     clear_stream_aborted(&captured_registry_key, &captured_session_id);
     clear_graceful_shutdown(&captured_registry_key, &captured_session_id);
-    Ok(StreamOutcome::Success(captured_session_id))
+    Ok(StreamOutcome::Success(Some(resolved_session_id)))
 }
 
 #[cfg(test)]

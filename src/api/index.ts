@@ -55,6 +55,7 @@ export {
   readFileBase64,
   exportMarkdown,
   writeClipboardImage,
+  writeClipboardText,
   importExternalPath,
 } from './files';
 

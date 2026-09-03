@@ -63,7 +63,7 @@ describe('AskUserQuestion 完整交互流程', () => {
     document.body.innerHTML = '';
     appState.pendingAskQuestions.clear();
     appState.activeConversationId = 'conv-1';
-    appState.activeInteractionPanel = null;
+    appState.interactionPanelsBySession.clear();
     appState.activeQuestionEnterHandlers.clear();
     respondMock.mockClear();
     // jsdom 未实现 scrollIntoView；afterUiRefresh 可能触发它
@@ -179,11 +179,11 @@ describe('AskUserQuestion 完整交互流程', () => {
     stalePanel.id = 'stale-perm-panel';
     host().replaceChildren(stalePanel);
     host().hidden = false;
-    appState.activeInteractionPanel = {
+    appState.interactionPanelsBySession.set('conv-other', {
       conversationId: 'conv-other',
       element: stalePanel,
       cleanup: () => {},
-    };
+    });
 
     const p = handlePermissionRequest(askPayload({ conversationId: 'conv-1' }));
 
@@ -203,19 +203,7 @@ describe('AskUserQuestion 完整交互流程', () => {
     });
   });
 
-  it('子代理等非当前会话 id 的问卡也能挂载并可作答', async () => {
-    // 子代理的 permission 携带的是其自身 session id，与当前 activeConversationId 不同；
-    // 预置一条同 requestId 的旧条目（旧卡已过期），新请求到达后应覆盖它
-    appState.pendingAskQuestions.set('pending', {
-      requestId: 'req-subagent-9',
-      conversationId: 'pending',
-      input: {
-        questions: [
-          { question: '继续吗？', options: [{ label: '是' }, { label: '否' }] },
-        ],
-      },
-      finish: () => {},
-    });
+  it('后台会话问卡保留，切换到对应会话后才挂载并可作答', async () => {
     const p = handlePermissionRequest(
       askPayload({
         conversationId: 'subagent-session-9',
@@ -223,9 +211,11 @@ describe('AskUserQuestion 完整交互流程', () => {
       }),
     );
 
-    // 旧条目被同 requestId 的新请求覆盖，只剩新状态
-    expect(appState.pendingAskQuestions.size).toBe(1);
     expect(appState.pendingAskQuestions.has('subagent-session-9')).toBe(true);
+    expect(card()).toBeNull();
+
+    appState.activeConversationId = 'subagent-session-9';
+    syncPendingAskToInteractionHost();
     expect(card()).not.toBeNull();
 
     const radio = card()!.querySelector<HTMLInputElement>('input[value="前台"]')!;

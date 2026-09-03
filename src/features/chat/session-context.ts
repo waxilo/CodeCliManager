@@ -1,7 +1,19 @@
 import { appState } from '../../state';
 import { getActiveConversation } from '../conversations/normalize';
+export function isPendingSessionKey(sessionKey: string): boolean {
+  return sessionKey.startsWith('pending-run-');
+}
+
+export function pendingSessionKey(runId: string): string {
+  return `pending-${runId}`;
+}
+
+export function getActiveSessionKey(): string {
+  return appState.activeConversationId || appState.activePendingSessionKey;
+}
+
 export function isNewChatSession(): boolean {
-  return !appState.activeConversationId;
+  return !appState.activeConversationId && !appState.activePendingSessionKey;
 }
 
 export function getEffectiveProjectDir(): string {
@@ -35,10 +47,13 @@ export function canSendMessage(content?: string): boolean {
 
 /** 当前激活会话是否在运行中（与左侧会话列表同一数据源：appState.runningSessions） */
 export function isActiveConversationRunning(): boolean {
-  if (appState.activeConversationId) {
-    return appState.runningSessions.has(appState.activeConversationId);
-  }
-  return appState.runningSessions.has('pending');
+  const sessionKey = getActiveSessionKey();
+  return Boolean(sessionKey && appState.runningSessions.has(sessionKey));
+}
+
+export function isActiveSessionAborting(): boolean {
+  const sessionKey = getActiveSessionKey();
+  return Boolean(sessionKey && appState.abortingSessions.has(sessionKey));
 }
 
 export function isSendButtonLoading(): boolean {
@@ -82,7 +97,7 @@ export function updateSendButtonState() {
   const loading = sessionRunning || sendBtn.dataset.loading === 'true';
   const hasContent = canSendMessage();
 
-  if (appState.isAbortingActiveSession) {
+  if (isActiveSessionAborting()) {
     sendBtn.disabled = true;
     sendBtn.classList.add('is-loading');
     sendBtn.classList.add('is-aborting');
@@ -95,8 +110,8 @@ export function updateSendButtonState() {
   sendBtn.classList.remove('is-aborting');
 
   if (loading) {
-    // 运行中：有内容 → 会话中追问；无内容 → 停止本轮
-    const followupMode = hasContent;
+    // 已落盘会话运行中可排队追问；首轮 pending 尚无 session id，只允许停止。
+    const followupMode = hasContent && Boolean(appState.activeConversationId);
     const queuedCount = appState.activeConversationId
       ? appState.queuedPromptsBySession.get(appState.activeConversationId)?.length || 0
       : 0;
@@ -121,14 +136,13 @@ export function updateSendButtonState() {
   if (stopIcon) stopIcon.style.display = 'none';
 }
 
-export function setAbortingUi(aborting: boolean) {
-  appState.isAbortingActiveSession = aborting;
+export function setAbortingUi(_aborting: boolean) {
   syncMessageInputPlaceholder();
   updateSendButtonState();
 }
 
 export function getDefaultMessagePlaceholder(loading = isSendButtonLoading()): string {
-  if (appState.isAbortingActiveSession) return '正在停止当前任务…';
+  if (isActiveSessionAborting()) return '正在停止当前任务…';
   if (loading) {
     const queuedCount = appState.activeConversationId
       ? appState.queuedPromptsBySession.get(appState.activeConversationId)?.length || 0
@@ -156,14 +170,14 @@ export function setSendButtonLoading(loading: boolean) {
   const input = document.querySelector<HTMLTextAreaElement>('#message-input');
   if (input) {
     input.disabled = false;
-    if (!appState.isAbortingActiveSession) {
+    if (!isActiveSessionAborting()) {
       syncMessageInputPlaceholder();
     }
   }
 
   const inputArea = document.querySelector('.input-composer');
   if (inputArea) {
-    inputArea.classList.toggle('is-loading', loading || appState.isAbortingActiveSession);
+    inputArea.classList.toggle('is-loading', loading || isActiveSessionAborting());
   }
 
   updateSendButtonState();

@@ -5,7 +5,7 @@ import { bindInteractiveAskCards, syncPendingAskToInteractionHost } from '../per
 import { renderConversationMessageChunks, buildDisplayMessages, renderStreamingBlocksChunks, renderLiveToolChunks, mergeStreamBlocks, getToolAnchorBlockIndexes, ensureMessageWindowForActiveConversation, getActiveMessageWindowSize, incrementActiveMessageWindow, renderChatHeaderHtml } from './render-chat';
 import type { RenderedMessageChunk } from './render-messages';
 import { bindSessionIdCopyEvents } from './input-composer';
-import { updateSendButtonState, isSendButtonLoading } from './session-context';
+import { getActiveSessionKey, isPendingSessionKey, updateSendButtonState, isSendButtonLoading } from './session-context';
 import { sendMessage } from './send';
 import { handleRetryClick, handleUndoClick } from './retry';
 import { refreshRunStatusStrip } from './run-status';
@@ -178,18 +178,13 @@ export function getCurrentCommittedChatRenderKey(): string {
 /** 进行中 AskUserQuestion 的 requestId 签名（含 'pending' 槽回退，对齐 syncPendingAskToInteractionHost）。
  * 问答出现/消失会改变该签名 → 触发一次聊天重建，setupMessageListPostRender 里同步输入框上方的问卡。 */
 function pendingAskSignature(sid: string): string {
-  const direct = appState.pendingAskQuestions.get(sid)?.requestId ?? '';
-  if (direct) return direct;
-  if (appState.activeConversationId) {
-    return appState.pendingAskQuestions.get('pending')?.requestId ?? '';
-  }
-  return '';
+  return appState.pendingAskQuestions.get(sid)?.requestId ?? '';
 }
 
 /** 当前会话流式状态的轻量签名：块数 + 各块内容长度/时长/完成标记 + 工具卡状态/进度。
  *  并入 chatRenderKey——流式 delta / 工具转态 / 子代理进度时内容变化，统一 diff 需感知。 */
 function streamingSignature(): string {
-  const sid = appState.activeConversationId || 'pending';
+  const sid = getActiveSessionKey();
   const state = appState.streamingBySession.get(sid);
   const blocksSig = state
     ? state.blocks
@@ -212,19 +207,19 @@ function streamingSignature(): string {
 function chatRenderKey(conversation: Conversation | undefined): string {
   const msgs = conversation?.messages ?? [];
   const last = msgs[msgs.length - 1];
-  const sid = appState.activeConversationId || 'pending';
+  const sid = getActiveSessionKey();
+  const pending = appState.pendingUserMessagesBySession.get(sid);
   return [
-    appState.activeConversationId || '',
+    sid,
     appState.activeConversationSourcePath || '',
     conversation?.updated_at ?? '',
     msgs.length,
     last?.id ?? '',
     last?.timestamp ?? '',
     getActiveMessageWindowSize(),
-    appState.runningSessions.has(appState.activeConversationId) ? 'r' : '',
-    appState.pendingUserMessage ?? '',
-    appState.pendingUserMessageConvId ?? '',
-    appState.transientSessionError ? 'e' : '',
+    appState.runningSessions.has(sid) ? 'r' : '',
+    pending?.content ?? '',
+    appState.transientSessionErrorsBySession.has(sid) ? 'e' : '',
     pendingAskSignature(sid),
     streamingSignature(),
   ].join('|');
@@ -243,16 +238,17 @@ function chatRenderKey(conversation: Conversation | undefined): string {
 function committedChatRenderKey(conversation: Conversation | undefined): string {
   const msgs = conversation?.messages ?? [];
   const last = msgs[msgs.length - 1];
+  const sid = getActiveSessionKey();
+  const pending = appState.pendingUserMessagesBySession.get(sid);
   return [
-    appState.activeConversationId || '',
+    sid,
     appState.activeConversationSourcePath || '',
     msgs.length,
     last?.id ?? '',
     last?.timestamp ?? '',
     getActiveMessageWindowSize(),
-    appState.pendingUserMessage ?? '',
-    appState.pendingUserMessageConvId ?? '',
-    appState.transientSessionError ? 'e' : '',
+    pending?.content ?? '',
+    appState.transientSessionErrorsBySession.has(sid) ? 'e' : '',
   ].join('|');
 }
 
@@ -483,7 +479,7 @@ function interleaveStreamAndToolChunks(
 ): RenderedMessageChunk[] {
   if (toolChunks.length === 0) return [...chunks, ...streamChunks];
 
-  const sid = appState.activeConversationId || 'pending';
+  const sid = getActiveSessionKey();
   const state = appState.streamingBySession.get(sid);
   const noMergeAfterRaw = new Set(
     toolChunks.flatMap((chunk) =>
@@ -533,7 +529,7 @@ function interleaveStreamAndToolChunks(
 function combineWithCurrentStreaming(
   historyChunks: RenderedMessageChunk[],
 ): { chunks: RenderedMessageChunk[]; sid: string; hasStreaming: boolean } {
-  const sid = appState.activeConversationId || 'pending';
+  const sid = getActiveSessionKey();
   const streamState = appState.streamingBySession.get(sid);
   const tools = appState.activeToolsBySession.get(sid);
   const toolStates = tools ? [...tools.values()] : [];
@@ -554,7 +550,7 @@ function combineWithCurrentStreaming(
  * 供调度器执行器决定是否需要重跑流式块恢复。
  */
 export function refreshChatContent(): boolean {
-  if (!appState.activeConversationId && !appState.pendingUserMessage && !appState.transientSessionError) return false;
+  if (!getActiveSessionKey()) return false;
 
   const conversation = getActiveConversation();
 
@@ -585,7 +581,7 @@ export function refreshChatContent(): boolean {
 
   // 按会话渲染缓存命中：回切 A 时直接复用上次渲染的 HTML 字符串，跳过整条渲染管线
   const cacheKey = conversationInstanceKey(
-    appState.activeConversationId || 'pending',
+    getActiveSessionKey(),
     appState.activeConversationSourcePath,
   );
   const renderKey = renderCacheKey(conversation);
@@ -673,15 +669,13 @@ export function handleKeydown(e: KeyboardEvent) {
     e.preventDefault();
     // 互动问答进行中：Enter 提交当前会话对应的问卡（后台会话的卡不拦截主输入框）
     const askHandlers = appState.activeQuestionEnterHandlers;
-    const askHandler =
-      askHandlers.get(appState.activeConversationId || 'pending') ?? askHandlers.get('pending');
+    const askHandler = askHandlers.get(getActiveSessionKey());
     if (askHandler) {
       if (askHandler()) return;
       return;
     }
-    // 运行中也允许 Enter：有内容则追问，无内容不触发停止
-    if (isSendButtonLoading() && !canSendMessage()) {
-      return;
+    if (isSendButtonLoading()) {
+      if (isPendingSessionKey(getActiveSessionKey()) || !canSendMessage()) return;
     }
     void sendMessage();
   }
