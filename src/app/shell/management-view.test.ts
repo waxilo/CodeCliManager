@@ -8,6 +8,7 @@ import {
 import { syncRunningSubagentsUI } from '../../features/chat/subagent-progress';
 import * as refresh from '../../features/chat/refresh';
 import type { ActiveToolState } from '../../types';
+import { dismissSkillsViewState } from '../../features/skills/mount';
 
 // 测试不触发真实余额刷新（status-bar 其余导出保持原样，仅替换这一入口）
 vi.mock('../../features/status-bar', async (importOriginal) => {
@@ -67,6 +68,8 @@ describe('management-view 增量进出', () => {
     appState.isSettingsViewActive = false;
     appState.isApiConfigViewActive = false;
     appState.isSkillsViewActive = false;
+    appState.skillsScope = 'global';
+    appState.skillsProjectDir = null;
     appState.activeConversationId = '';
     appState.activeToolsBySession.clear();
     clearStashedMainDom();
@@ -207,6 +210,42 @@ describe('management-view 增量进出', () => {
     expect(mgmtMain.classList.contains('is-api-config')).toBe(true);
     expect(mgmtMain).not.toBe(mainContent);
     expect(mgmtMain.querySelector('#skills-mcp-section')).not.toBeNull();
+  });
+
+  it('非标准退出项目技能页时清理项目作用域与 MCP 快照', () => {
+    appState.isSkillsViewActive = true;
+    appState.skillsScope = 'project';
+    appState.skillsProjectDir = '/projects/a';
+    appState.mcpServers = [{ name: 'a', config: { type: 'stdio', command: 'a' } }];
+    appState.mcpConfigPath = '/projects/a/.mcp.json';
+
+    dismissSkillsViewState();
+
+    expect(appState.isSkillsViewActive).toBe(false);
+    expect(appState.skillsScope).toBe('global');
+    expect(appState.skillsProjectDir).toBeNull();
+    expect(appState.mcpServers).toEqual([]);
+    expect(appState.mcpConfigPath).toBe('');
+  });
+
+  it('项目技能缓存按项目目录隔离', () => {
+    buildMainShell();
+    appState.isSkillsViewActive = true;
+    appState.skillsSection = 'skill';
+    appState.skillsScope = 'project';
+    appState.skillsProjectDir = '/projects/a';
+
+    enterManagementView('skills');
+    const projectAMain = document.querySelector('.main-content') as HTMLElement;
+    expect(document.body.textContent).toContain('/projects/a');
+    expect(exitManagementView()).toBe(true);
+
+    appState.skillsProjectDir = '/projects/b';
+    enterManagementView('skills');
+    const projectBMain = document.querySelector('.main-content') as HTMLElement;
+    expect(projectBMain).not.toBe(projectAMain);
+    expect(document.body.textContent).toContain('/projects/b');
+    expect(document.body.textContent).not.toContain('/projects/a');
   });
 
   it('管理页互斥切换：settings → skills 只换管理内容，主视图 stash 保留', () => {

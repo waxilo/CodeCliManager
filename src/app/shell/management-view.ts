@@ -46,7 +46,7 @@ interface StashedMainDom {
 }
 
 interface StashedMgmtDom {
-  kind: ManagementViewKind;
+  cacheKey: string;
   sidebar: HTMLElement;
   mainContent: HTMLElement;
 }
@@ -69,10 +69,17 @@ function isManagementShellPresent(appContainer: Element): boolean {
   return Boolean(main?.classList.contains('is-api-config'));
 }
 
+function managementCacheKey(kind: ManagementViewKind): string {
+  if (kind !== 'skills') return kind;
+  return appState.skillsScope === 'project' && appState.skillsProjectDir
+    ? `skills:project:${appState.skillsProjectDir}`
+    : 'skills:global';
+}
+
 /** 从当前 DOM 反推管理页类型（退出时 flags 已被 dismiss 清空，不能依赖 appState） */
 function detectManagementKind(): ManagementViewKind {
   if (document.querySelector('#api-config-view')) return 'api-config';
-  if (document.querySelector('#skills-mcp-section, #skills-global-skills-view, #skills-global-prompts-view')) return 'skills';
+  if (document.querySelector('#skills-mcp-section, #skills-global-skills-view, #skills-global-prompts-view, #skills-project-skills-view, #skills-project-prompts-view')) return 'skills';
   return 'settings';
 }
 
@@ -269,7 +276,7 @@ export function enterManagementView(kind: ManagementViewKind): void {
   statusBar?.remove();
 
   // 同页面二次进入：直接挂回缓存的管理壳，跳过 sidebar/main 的 innerHTML 重建
-  if (stashedMgmtDom && stashedMgmtDom.kind === kind) {
+  if (stashedMgmtDom && stashedMgmtDom.cacheKey === managementCacheKey(kind)) {
     const resizer = appContainer.querySelector('.sidebar-resizer');
     if (resizer) {
       resizer.before(stashedMgmtDom.sidebar);
@@ -310,8 +317,9 @@ export function exitManagementView(): boolean {
   const mgmtSidebar = appContainer.querySelector<HTMLElement>('.sidebar');
   const mgmtMain = appContainer.querySelector<HTMLElement>('.main-content');
   if (mgmtSidebar && mgmtMain) {
+    const kind = detectManagementKind();
     stashedMgmtDom = {
-      kind: detectManagementKind(),
+      cacheKey: managementCacheKey(kind),
       sidebar: mgmtSidebar,
       mainContent: mgmtMain,
     };

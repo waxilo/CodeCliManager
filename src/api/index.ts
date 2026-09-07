@@ -66,6 +66,18 @@ export {
 } from './mcp';
 
 export {
+  getProjectMcpServers,
+  upsertProjectMcpServer,
+  deleteProjectMcpServer,
+  getProjectSkills,
+  readProjectSkill,
+  writeProjectSkill,
+  deleteProjectSkill,
+  getProjectPrompt,
+  writeProjectPrompt,
+} from './project-config';
+
+export {
   kiroStatus,
   kiroUsage,
   kiroRefreshToken,

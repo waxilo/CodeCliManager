@@ -32,7 +32,7 @@ export const shellApi: {
   ensureChatViewVisible: VoidFn;
   openApiConfigView: VoidFn;
   openSettingsView: VoidFn;
-  openSkillsView: VoidFn;
+  openSkillsView: (projectDir?: string) => void;
   openKiroView: VoidFn;
   closeApiConfigView: VoidFn;
   closeSettingsView: VoidFn;

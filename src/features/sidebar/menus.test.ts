@@ -6,6 +6,7 @@ import {
 } from './menus';
 import { newChatInWorkspace } from './workspace-grouping';
 import { appState } from '../../state';
+import { shellApi } from '../../app/shell/api';
 
 /** rAF 同步执行，保证菜单定位在 dispatch 后立即可断言 */
 function stubRafSync(): void {
@@ -92,6 +93,23 @@ describe('侧边栏右键菜单', () => {
     const dropdown = overlay!.querySelector<HTMLElement>('.ws-menu-dropdown')!;
     expect(dropdown.style.left).toBe('200px');
     expect(dropdown.style.top).toBe('150px');
+  });
+
+  it('项目菜单将工作区路径传给项目技能管理入口', () => {
+    const openSkillsView = vi.fn();
+    const original = shellApi.openSkillsView;
+    shellApi.openSkillsView = openSkillsView;
+    try {
+      const header = document.querySelector<HTMLElement>('.workspace-header')!;
+      fireContextMenu(header, 200, 150);
+
+      document.querySelector<HTMLButtonElement>('[data-action="manage-skills"]')!.click();
+
+      expect(openSkillsView).toHaveBeenCalledWith('/proj');
+      expect(document.querySelector('.ws-menu-overlay')).toBeNull();
+    } finally {
+      shellApi.openSkillsView = original;
+    }
   });
 
   it('运行中新建会话不会终止后台会话', async () => {

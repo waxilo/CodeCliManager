@@ -1,20 +1,28 @@
 import { appState } from '../../state';
-import * as api from '../../api';
 import { escapeHtml } from '../../utils';
 import { showConfirmDialog, showCopyToastMsg } from '../../ui';
-import type { McpServerConfig, McpServerEntry } from '../../types';
+import type { McpServerConfig, McpServerEntry, SkillsTarget } from '../../types';
+import { deleteScopedMcpServer, getScopedMcpServers, upsertScopedMcpServer } from './mcp-api';
+import { getSkillsTarget, isSameSkillsTarget } from './scope';
+
+let loadToken = 0;
+
 export async function loadMcpServers(): Promise<void> {
+  const target = getSkillsTarget();
+  const token = ++loadToken;
   const listEl = document.querySelector('#mcp-list');
   if (!listEl) return;
   listEl.innerHTML = '<div class="mcp-loading">加载中…</div>';
   try {
-    const state = await api.getMcpServers();
+    const state = await getScopedMcpServers(target);
+    if (token !== loadToken || !listEl.isConnected || !isSameSkillsTarget(target, getSkillsTarget())) return;
     appState.mcpServers = state.servers;
     appState.mcpConfigPath = state.configPath;
     const pathEl = document.querySelector('.mcp-config-path');
     if (pathEl) pathEl.textContent = `配置文件：${state.configPath}`;
     renderMcpList();
   } catch (err) {
+    if (token !== loadToken || !listEl.isConnected || !isSameSkillsTarget(target, getSkillsTarget())) return;
     listEl.innerHTML = `<div class="mcp-empty mcp-error">加载失败：${escapeHtml(String(err))}</div>`;
   }
 }
@@ -84,15 +92,18 @@ export function renderMcpServerCard(entry: McpServerEntry): string {
 }
 
 export async function deleteMcpServer(name: string): Promise<void> {
+  const target = getSkillsTarget();
+  const configLabel = target.scope === 'project' ? '项目 .mcp.json' : '~/.claude.json';
   const confirmed = await showConfirmDialog({
     title: '删除 MCP 服务器',
     message: `确定要删除「${name}」吗？`,
-    sub: '将从 ~/.claude.json 中移除该服务器配置。',
+    sub: `将从 ${configLabel} 中移除该服务器配置。`,
     confirmLabel: '删除',
   });
   if (!confirmed) return;
   try {
-    const state = await api.deleteMcpServer(name);
+    const state = await deleteScopedMcpServer(target, name);
+    if (!isSameSkillsTarget(target, getSkillsTarget())) return;
     appState.mcpServers = state.servers;
     appState.mcpConfigPath = state.configPath;
     renderMcpList();
@@ -103,6 +114,7 @@ export async function deleteMcpServer(name: string): Promise<void> {
 }
 
 export function openMcpEditorDialog(name: string | null): void {
+  const target: SkillsTarget = getSkillsTarget();
   const existing = document.querySelector('.mcp-dialog-overlay');
   if (existing) existing.remove();
 
@@ -231,10 +243,11 @@ export function openMcpEditorDialog(name: string | null): void {
     saveBtn.disabled = true;
     saveBtn.textContent = '保存中…';
     try {
-      const state = await api.upsertMcpServer({
+      const state = await upsertScopedMcpServer(target, {
         name: serverName,
         config,
       });
+      if (!isSameSkillsTarget(target, getSkillsTarget())) return cleanup();
       appState.mcpServers = state.servers;
       appState.mcpConfigPath = state.configPath;
       renderMcpList();

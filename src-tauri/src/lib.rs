@@ -2,6 +2,7 @@ use tauri::Manager;
 
 mod claude;
 mod claude_global_config;
+mod claude_project_config;
 mod dsh;
 mod commands;
 mod config;
@@ -21,6 +22,11 @@ mod window;
 
 use claude_global_config::{
     delete_global_skill, get_global_prompts, get_global_skills, write_global_claude_md,
+};
+use claude_project_config::{
+    delete_project_mcp_server, delete_project_skill, get_project_mcp_servers, get_project_prompt,
+    get_project_skills, read_project_skill, upsert_project_mcp_server, write_project_claude_md,
+    write_project_skill,
 };
 use dsh::{dsh_install, dsh_start, dsh_status, dsh_stop};
 use commands::*;
@@ -103,6 +109,15 @@ pub fn run() {
             delete_global_skill,
             get_global_prompts,
             write_global_claude_md,
+            get_project_mcp_servers,
+            upsert_project_mcp_server,
+            delete_project_mcp_server,
+            get_project_skills,
+            read_project_skill,
+            write_project_skill,
+            delete_project_skill,
+            get_project_prompt,
+            write_project_claude_md,
             dsh_status,
             dsh_install,
             dsh_start,

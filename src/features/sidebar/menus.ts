@@ -7,6 +7,7 @@ import { openPathInFileManager, openPathInShell } from '../chat/input-composer';
 import { cancelEdit, saveEdit, handleEditKeydown } from '../conversations/edit-export';
 import { UNCATEGORIZED_WORKSPACE_KEY, toggleWorkspaceExpanded } from './render-list';
 import { copyTextToClipboard } from '../../utils/clipboard';
+import { shellApi } from '../../app/shell/api';
 export function handleConversationListKeydown(e: Event) {
   const event = e as KeyboardEvent;
   const target = event.target as HTMLElement;
@@ -146,6 +147,7 @@ export function toggleWorkspaceMenu(workspacePath: string, anchorEl: HTMLElement
   overlay.innerHTML = `
     <div class="conv-menu-dropdown ws-menu-dropdown">
       <button type="button" class="conv-menu-item" data-action="new-chat" data-workspace="${ws}">在此目录新建会话</button>
+      <button type="button" class="conv-menu-item" data-action="manage-skills" data-workspace="${ws}">管理项目技能</button>
       <button type="button" class="conv-menu-item" data-action="open-dir" data-workspace="${ws}">在文件管理器中打开</button>
       <button type="button" class="conv-menu-item" data-action="open-shell" data-workspace="${ws}">在 Shell 中打开</button>
       <button type="button" class="conv-menu-item" data-action="copy-path" data-workspace="${ws}">复制目录路径</button>
@@ -180,6 +182,7 @@ export function toggleWorkspaceMenu(workspacePath: string, anchorEl: HTMLElement
     const { action, workspace: dir } = btn.dataset;
     closeMenu();
     if (action === 'new-chat' && dir) newChatInWorkspace(dir);
+    if (action === 'manage-skills' && dir) shellApi.openSkillsView(dir);
     if (action === 'open-dir' && dir) void openPathInFileManager(dir);
     if (action === 'open-shell' && dir) void openPathInShell(dir);
     if (action === 'copy-path' && dir) {

@@ -5,9 +5,23 @@ import { startMainBalanceBarAutoRefresh } from '../status-bar';
 import { mountMcpSection } from './mcp-mount';
 import { mountGlobalSkillsSection } from './global-skills-section';
 import { mountGlobalPromptsSection } from './global-prompts-section';
+import { mountProjectSkillsSection } from './project-skills-section';
+import { mountProjectPromptsSection } from './project-prompts-section';
+import { getSkillsTarget, isSameSkillsTarget } from './scope';
 
-export function openSkillsView() {
-  if (appState.isSkillsViewActive) return;
+export function openSkillsView(projectDir?: string) {
+  const currentTarget = getSkillsTarget();
+  const nextTarget = projectDir
+    ? { scope: 'project' as const, projectDir }
+    : { scope: 'global' as const, projectDir: null };
+  if (appState.isSkillsViewActive && isSameSkillsTarget(currentTarget, nextTarget)) return;
+  if (!isSameSkillsTarget(currentTarget, nextTarget)) {
+    document.querySelector('.mcp-dialog-overlay')?.remove();
+    appState.mcpServers = [];
+    appState.mcpConfigPath = '';
+  }
+  appState.skillsScope = nextTarget.scope;
+  appState.skillsProjectDir = nextTarget.projectDir;
   // 全屏管理页互斥
   if (appState.isApiConfigViewActive) {
     shellApi.dismissApiConfigViewState();
@@ -25,8 +39,7 @@ export function openSkillsView() {
 }
 
 /** 退出「技能」页状态（不触发 render，供即将全量重绘的路径使用） */
-export function dismissSkillsViewState() {
-  if (!appState.isSkillsViewActive && !appState.skillsEscapeHandler) return;
+export function dismissSkillsViewState(preserveTarget = false) {
   if (appState.skillsEscapeHandler) {
     document.removeEventListener('keydown', appState.skillsEscapeHandler);
     appState.skillsEscapeHandler = null;
@@ -34,6 +47,12 @@ export function dismissSkillsViewState() {
   appState.skillsMountToken += 1;
   document.querySelector('.mcp-dialog-overlay')?.remove();
   appState.isSkillsViewActive = false;
+  if (!preserveTarget) {
+    appState.skillsScope = 'global';
+    appState.skillsProjectDir = null;
+    appState.mcpServers = [];
+    appState.mcpConfigPath = '';
+  }
 }
 
 export function closeSkillsView() {
@@ -41,8 +60,12 @@ export function closeSkillsView() {
     dismissSkillsViewState();
     return;
   }
-  dismissSkillsViewState();
+  dismissSkillsViewState(true);
   shellApi.exitManagementView();
+  appState.skillsScope = 'global';
+  appState.skillsProjectDir = null;
+  appState.mcpServers = [];
+  appState.mcpConfigPath = '';
   restoreComposerDraft();
   startMainBalanceBarAutoRefresh();
 }
@@ -76,10 +99,13 @@ export function mountSkillsView() {
 
 /** 按当前 skillsSection 挂载对应分区内容 */
 export async function mountActiveSkillsSection(): Promise<void> {
+  const isProject = appState.skillsScope === 'project';
   if (appState.skillsSection === 'skill') {
-    await mountGlobalSkillsSection();
+    if (isProject) await mountProjectSkillsSection();
+    else await mountGlobalSkillsSection();
   } else if (appState.skillsSection === 'prompts') {
-    await mountGlobalPromptsSection();
+    if (isProject) await mountProjectPromptsSection();
+    else await mountGlobalPromptsSection();
   } else {
     await mountMcpSection();
   }

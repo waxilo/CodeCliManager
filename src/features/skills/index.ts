@@ -16,3 +16,5 @@ export {
 export { openMcpImportDialog, parseMcpServersJson } from './mcp-import-dialog';
 export { renderGlobalSkillsSectionHtml, mountGlobalSkillsSection } from './global-skills-section';
 export { renderGlobalPromptsSectionHtml, mountGlobalPromptsSection } from './global-prompts-section';
+export { renderProjectSkillsSectionHtml, mountProjectSkillsSection } from './project-skills-section';
+export { renderProjectPromptsSectionHtml, mountProjectPromptsSection } from './project-prompts-section';

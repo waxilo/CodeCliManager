@@ -66,4 +66,11 @@ export type {
   ThemeMode,
 } from './updates';
 export type { GlobalSkillEntry, GlobalPromptEntry, GlobalPromptsState } from './global-config';
+export type {
+  SkillsScope,
+  SkillsTarget,
+  ProjectSkillEntry,
+  ProjectSkillDocument,
+  ProjectPromptState,
+} from './project-config';
 export type { DshStatusData } from './dsh';

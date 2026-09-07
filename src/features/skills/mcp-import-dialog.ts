@@ -1,9 +1,10 @@
 import { appState } from '../../state';
-import * as api from '../../api';
 import { escapeHtml } from '../../utils';
 import { showCopyToastMsg } from '../../ui';
-import type { McpServerConfig } from '../../types';
+import type { McpServerConfig, SkillsTarget } from '../../types';
 import { renderMcpList } from './mcp-editor-dialog';
+import { upsertScopedMcpServer } from './mcp-api';
+import { getSkillsTarget, isSameSkillsTarget } from './scope';
 
 export interface ImportedMcpServer {
   name: string;
@@ -158,6 +159,7 @@ export function parseMcpServersJson(
 
 /** 打开「从 JSON 导入 MCP 服务器」对话框 */
 export function openMcpImportDialog(): void {
+  const target: SkillsTarget = getSkillsTarget();
   const existing = document.querySelector('.mcp-dialog-overlay');
   if (existing) existing.remove();
 
@@ -227,7 +229,7 @@ export function openMcpImportDialog(): void {
       renderImportResult(body, result, {
         onBack: restoreForm,
         onConfirm: (servers) => {
-          void runImport(overlay, body, servers, { onBack: restoreForm, importState });
+          void runImport(overlay, body, servers, target, { onBack: restoreForm, importState });
         },
       });
     });
@@ -247,6 +249,7 @@ async function runImport(
   overlay: HTMLElement,
   body: HTMLElement,
   servers: ImportedMcpServer[],
+  target: SkillsTarget,
   opts: { onBack: () => void; importState: { busy: boolean } },
 ): Promise<void> {
   let okCount = 0;
@@ -263,9 +266,11 @@ async function runImport(
     for (const s of batch) {
       if (!overlay.isConnected) return; // 用户已取消（Esc/关视图）
       try {
-        const state = await api.upsertMcpServer({ name: s.name, config: s.config });
-        appState.mcpServers = state.servers;
-        appState.mcpConfigPath = state.configPath;
+        const state = await upsertScopedMcpServer(target, { name: s.name, config: s.config });
+        if (isSameSkillsTarget(target, getSkillsTarget())) {
+          appState.mcpServers = state.servers;
+          appState.mcpConfigPath = state.configPath;
+        }
         okCount += 1;
       } catch (e) {
         failReasons.set(s.name, String(e));
@@ -274,7 +279,7 @@ async function runImport(
     opts.importState.busy = false;
     if (!overlay.isConnected) return;
     if (failReasons.size === 0) {
-      renderMcpList();
+      if (isSameSkillsTarget(target, getSkillsTarget())) renderMcpList();
       overlay.remove();
       showCopyToastMsg(`已导入 ${okCount} 个服务器`);
       return;

@@ -1,12 +1,21 @@
 import { appState } from '../../state';
+import { escapeHtml } from '../../utils';
 import { renderMcpSectionHtml } from './mcp-section';
 import { renderGlobalSkillsSectionHtml } from './global-skills-section';
 import { renderGlobalPromptsSectionHtml } from './global-prompts-section';
+import { renderProjectSkillsSectionHtml } from './project-skills-section';
+import { renderProjectPromptsSectionHtml } from './project-prompts-section';
+import { getSkillsTarget, projectName } from './scope';
 
 /** 「技能」页左侧竖排导航：MCP / 全局 Skills / 全局提示词 三个横向分区（复用设置页分类导航样式） */
 export function renderSkillsSidebarHtml(): string {
+  const target = getSkillsTarget();
+  const projectContext = target.scope === 'project' && target.projectDir
+    ? `<div class="skills-scope-context"><span class="skills-scope-label">项目配置</span><strong>${escapeHtml(projectName(target.projectDir))}</strong><span title="${escapeHtml(target.projectDir)}">${escapeHtml(target.projectDir)}</span></div>`
+    : '<div class="skills-scope-context"><span class="skills-scope-label">全局配置</span><strong>Claude Code</strong><span>~/.claude</span></div>';
   return `
     <div class="api-config-sidebar settings-sidebar">
+      ${projectContext}
       <div class="settings-section-nav" role="navigation" aria-label="技能分类">
         <button type="button" class="settings-section-item${appState.skillsSection === 'mcp' ? ' is-active' : ''}" data-skills-section="mcp">
           <span class="settings-section-item-icon">
@@ -45,11 +54,12 @@ export function renderSkillsSidebarHtml(): string {
 }
 
 export function renderSkillsViewHtml(): string {
+  const isProject = appState.skillsScope === 'project';
   if (appState.skillsSection === 'skill') {
-    return renderGlobalSkillsSectionHtml();
+    return isProject ? renderProjectSkillsSectionHtml() : renderGlobalSkillsSectionHtml();
   }
   if (appState.skillsSection === 'prompts') {
-    return renderGlobalPromptsSectionHtml();
+    return isProject ? renderProjectPromptsSectionHtml() : renderGlobalPromptsSectionHtml();
   }
   return renderMcpSectionHtml();
 }

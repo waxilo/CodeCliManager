@@ -245,6 +245,12 @@
   line-height: 1.5;
 }
 
+.mcp-dialog-form .project-skill-editor {
+  min-height: 360px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  white-space: pre;
+}
+
 .mcp-dialog-form select:focus,
 .mcp-dialog-form textarea:focus {
   outline: none;
