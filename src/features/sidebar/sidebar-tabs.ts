@@ -7,7 +7,7 @@ import { scheduleHighlighting } from '../../markdown';
  *
  * - `#conversation-list` 是唯一的内容容器：切换 tab 只替换它的 innerHTML，
  *   render.ts 上对它的事件委托（会话点击/上下文菜单）与 select.ts 的存在性判断都不受影响。
- * - 活跃 = 近 24 小时更新的会话平铺；归档 = 更早的会话按工作区分组。
+ * - 活跃 = 近 24 小时内全部会话，且至少展示最近 10 条；归档 = 其余会话。
  * - 进行中的子代理在输入框上方实时展示（见 subagent-progress.ts），侧边栏不再有子代理页签。
  */
 

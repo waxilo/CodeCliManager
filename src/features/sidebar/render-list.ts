@@ -11,17 +11,24 @@ export const UNCATEGORIZED_WORKSPACE_KEY = '__uncategorized__';
 /** 活跃会话的时间窗口：updated_at 在最近 N 小时内 */
 export const RECENT_HOURS = 24;
 
+/** 活跃列表至少展示的最近会话数 */
+export const MIN_ACTIVE_CONVERSATIONS = 10;
+
 /** 判定会话是否属于「活跃」（最近 RECENT_HOURS 小时内有更新） */
 export function isRecentConversation(conv: Conversation, now = Date.now()): boolean {
   // updated_at 后端为秒级（timestamp()），本地乐观气泡可能为毫秒；统一经 toMillis 归一化
   return toMillis(conv.updated_at) >= now - RECENT_HOURS * 3600 * 1000;
 }
 
-/** 活跃会话列表：近 24 小时更新的会话，按最近更新降序 */
+/** 活跃会话列表：近 24 小时内全部会话，且至少包含最近 10 条 */
 export function getRecentConversations(now = Date.now()): Conversation[] {
-  return appState.conversations
-    .filter((c) => isRecentConversation(c, now))
-    .sort((a, b) => b.updated_at - a.updated_at);
+  const sorted = [...appState.conversations]
+    .sort((a, b) => toMillis(b.updated_at) - toMillis(a.updated_at));
+
+  return sorted.filter(
+    (conversation, index) =>
+      index < MIN_ACTIVE_CONVERSATIONS || isRecentConversation(conversation, now),
+  );
 }
 
 export interface SidebarWorkspaceView {
@@ -220,13 +227,13 @@ function renderSidebarEmptyHtml(title: string, hint: string): string {
   `;
 }
 
-/** 活跃会话 tab：近 RECENT_HOURS 小时内更新的会话按工作区（文件夹）分组展示 */
+/** 活跃会话 tab：近 RECENT_HOURS 小时内全部会话，且至少展示最近 MIN_ACTIVE_CONVERSATIONS 条 */
 export function renderActiveConversations(): string {
   const recent = getRecentConversations();
 
   if (recent.length === 0) {
     appState.newConversationIds.clear();
-    return renderSidebarEmptyHtml('近一天没有新会话', '开始一段新对话后，会话会显示在这里');
+    return renderSidebarEmptyHtml('还没有会话', '开始一段新对话后，会话会显示在这里');
   }
 
   // 与归档会话一致：按 project_dir 分组成工作区卡片，方便按文件夹查看活跃会话
@@ -240,10 +247,10 @@ export function renderActiveConversations(): string {
   return label + cards;
 }
 
-/** 归档会话 tab：超过 RECENT_HOURS 未更新的会话按工作区分组展示 */
+/** 归档会话 tab：不属于活跃列表的会话按工作区分组展示 */
 export function renderArchivedConversationList(): string {
-  const now = Date.now();
-  const archived = appState.conversations.filter((c) => !isRecentConversation(c, now));
+  const active = new Set(getRecentConversations());
+  const archived = appState.conversations.filter((conversation) => !active.has(conversation));
   const views = archived.length === 0 ? [] : buildSidebarWorkspaceViews(archived);
 
   if (views.length === 0) {
@@ -251,7 +258,7 @@ export function renderArchivedConversationList(): string {
     if (appState.conversations.length === 0) {
       return renderSidebarEmptyHtml('还没有会话', '点击上方「新建会话」选择工作目录开始');
     }
-    return renderSidebarEmptyHtml('暂无归档会话', '近一天的会话在「活跃会话」tab');
+    return renderSidebarEmptyHtml('暂无归档会话', '最近的会话在「活跃会话」tab');
   }
 
   const label = `<div class="sidebar-section-label"><span>归档会话</span><span class="sidebar-section-label-count">${views.length} 个项目</span></div>`;

@@ -134,20 +134,34 @@ describe('活跃 / 归档会话拆分', () => {
     refreshActiveTabContent();
   }
 
-  it('活跃 tab 只列近 24h 更新的会话，按最近更新降序', () => {
+  it('24h 内不足 10 条时，活跃 tab 补足最近 10 条并按更新时间降序', () => {
     const now = Date.now();
-    appState.conversations = [
-      conv('old', now - 30 * HOUR),
-      conv('newer', now - 2 * HOUR),
-      conv('newest', now - 1 * HOUR),
-    ];
+    appState.conversations = Array.from({ length: 12 }, (_, index) =>
+      conv(`item-${index}`, now - (index + 1) * 6 * HOUR),
+    );
     renderCurrentTab();
     expect(getActiveSidebarTab()).toBe('active');
     const html = document.querySelector('#conversation-list')!.innerHTML;
-    expect(html).toContain('会话-newest');
-    expect(html).toContain('会话-newer');
+    expect(html).toContain('10 个会话');
+    expect(html).toContain('会话-item-0');
+    expect(html).toContain('会话-item-9');
+    expect(html).not.toContain('会话-item-10');
+    expect(html.indexOf('会话-item-0')).toBeLessThan(html.indexOf('会话-item-9'));
+  });
+
+  it('24h 内超过 10 条时，活跃 tab 展示 24h 内的全部会话', () => {
+    const now = Date.now();
+    appState.conversations = [
+      ...Array.from({ length: 11 }, (_, index) =>
+        conv(`recent-${index}`, now - (index + 1) * HOUR),
+      ),
+      conv('old', now - 30 * HOUR),
+    ];
+    renderCurrentTab();
+    const html = document.querySelector('#conversation-list')!.innerHTML;
+    expect(html).toContain('11 个会话');
+    expect(html).toContain('会话-recent-10');
     expect(html).not.toContain('会话-old');
-    expect(html.indexOf('会话-newest')).toBeLessThan(html.indexOf('会话-newer'));
   });
 
   it('活跃 tab 按文件夹分组展示：不同工作区各成一卡', () => {
@@ -168,28 +182,24 @@ describe('活跃 / 归档会话拆分', () => {
     expect(document.querySelectorAll('.workspace-card').length).toBe(2);
   });
 
-  it('归档 tab 只列超过 24h 的会话，按工作区分组展示', () => {
+  it('归档 tab 只列活跃集合之外的会话，补入的最近 10 条不重复出现', () => {
     const now = Date.now();
-    appState.conversations = [
-      conv('old', now - 30 * HOUR),
-      conv('recent', now - 2 * HOUR),
-    ];
+    appState.conversations = Array.from({ length: 12 }, (_, index) =>
+      conv(`item-${index}`, now - (index + 1) * 6 * HOUR),
+    );
     buildDom();
     setActiveSidebarTab('archived');
     const html = document.querySelector('#conversation-list')!.innerHTML;
     expect(html).toContain('归档会话');
-    expect(html).toContain('会话-old');
-    expect(html).not.toContain('会话-recent');
+    expect(html).toContain('会话-item-10');
+    expect(html).toContain('会话-item-11');
+    expect(html).not.toContain('会话-item-9');
   });
 
-  it('活跃 tab 空态：近一天没有新会话', () => {
-    const now = Date.now();
-    appState.conversations = [conv('old', now - 30 * HOUR)];
+  it('活跃 tab 空态：没有任何会话', () => {
     renderCurrentTab();
     expect(getActiveSidebarTab()).toBe('active');
-    expect(document.querySelector('#conversation-list')?.textContent).toContain(
-      '近一天没有新会话',
-    );
+    expect(document.querySelector('#conversation-list')?.textContent).toContain('还没有会话');
   });
 
   it('全部为活跃会话时归档 tab 显示「暂无归档会话」', () => {
@@ -203,14 +213,16 @@ describe('活跃 / 归档会话拆分', () => {
   });
 
   it('后端秒级 updated_at 同样正确判定活跃/归档（单位归一化）', () => {
-    const nowSec = Math.floor(Date.now() / 1000); // 后端 chrono timestamp() 为秒级
+    const nowSec = Math.floor(Date.now() / 1000);
     appState.conversations = [
-      conv('sec-recent', nowSec - 2 * 3600),
+      ...Array.from({ length: 11 }, (_, index) =>
+        conv(`sec-recent-${index}`, nowSec - (index + 1) * 3600),
+      ),
       conv('sec-old', nowSec - 30 * 3600),
     ];
     renderCurrentTab();
     const html = document.querySelector('#conversation-list')!.innerHTML;
-    expect(html).toContain('会话-sec-recent');
+    expect(html).toContain('会话-sec-recent-10');
     expect(html).not.toContain('会话-sec-old');
   });
 
