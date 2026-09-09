@@ -19,67 +19,708 @@ pub struct KiroContent {
     pub images: Vec<Value>,
 }
 
-// ============ 工具调用解析（JSON + XML） ============
+// ============ 通用声明约束工具恢复 ============
 
-fn strip_json_code_fence(text: &str) -> String {
-    let trimmed = text.trim();
-    if let Some(rest) = trimmed.strip_prefix("```") {
-        let body = rest.strip_prefix("json").unwrap_or(rest);
-        let body = body.trim_start();
-        if let Some(stripped) = body.strip_suffix("```") {
-            return stripped.trim().to_string();
-        }
-    }
-    trimmed.to_string()
+const MAX_TOOL_RECOVERY_BYTES: usize = 512 * 1024;
+const MAX_EXACT_NUMBER_DIGITS: usize = 1024;
+const MAX_SCALED_NUMBER_DIGITS: usize = 2048;
+
+#[derive(Clone, Debug, Default)]
+pub struct ToolRecoverySpec {
+    schemas: std::collections::HashMap<String, Value>,
 }
 
-fn parse_json_lenient(text: &str) -> Option<Value> {
-    let candidate = strip_json_code_fence(text);
-    if candidate.is_empty() {
-        return None;
-    }
-    for variant in [candidate.clone(), unescape_json(&candidate)] {
-        if let Ok(value) = serde_json::from_str::<Value>(&variant) {
-            return Some(value);
+impl ToolRecoverySpec {
+    pub fn from_body(body: &Value) -> Self {
+        let mut schemas = std::collections::HashMap::new();
+        let Some(tools) = body.get("tools").and_then(Value::as_array) else {
+            return Self { schemas };
+        };
+        for tool in tools {
+            let function = tool.get("function").unwrap_or(tool);
+            let Some(name) = function.get("name").and_then(Value::as_str).map(str::trim) else {
+                continue;
+            };
+            if name.is_empty() {
+                continue;
+            }
+            let schema = tool
+                .get("input_schema")
+                .or_else(|| function.get("parameters"))
+                .cloned()
+                .unwrap_or_else(|| json!({ "type": "object" }));
+            schemas.insert(name.to_string(), schema);
         }
+        Self { schemas }
     }
-    None
+
+    pub fn is_empty(&self) -> bool {
+        self.schemas.is_empty()
+    }
+
+    pub fn declares(&self, name: &str) -> bool {
+        self.schemas.contains_key(name)
+    }
+
+    pub fn validates_input(&self, name: &str, input: &Value) -> bool {
+        input.is_object()
+            && self.schemas.get(name).is_some_and(|schema| schema_accepts(schema, input))
+    }
+
+    fn looks_like_protocol(&self, text: &str) -> bool {
+        text.contains("\"tool_use\"")
+            || (text.contains("\"id\"") && text.contains("\"input\""))
+            || self.schemas.keys().any(|name| {
+                text.contains(&format!("\"{name}\""))
+                    && (text.contains("\"name\"") || text.contains("\"input\""))
+            })
+    }
+
+    pub fn input_fingerprint(&self, block: &Value) -> Option<String> {
+        let name = block.get("name")?.as_str()?;
+        let input = block.get("input")?;
+        self.validates_input(name, input)
+            .then(|| format!("{name}\n{}", canonical_json(input)))
+    }
+
+    pub fn is_generated_recovery_id(block: &Value) -> bool {
+        block
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.starts_with("call_recovered_"))
+    }
+
+    pub fn is_native_mirror(&self, recovered: &Value, native: &Value) -> bool {
+        let same_id = recovered.get("id").and_then(Value::as_str)
+            == native.get("id").and_then(Value::as_str);
+        same_id
+            || (Self::is_generated_recovery_id(recovered)
+                && self.input_fingerprint(recovered) == self.input_fingerprint(native))
+    }
 }
 
-/// 去掉 JSON 字符串中多余的转义（JS 的 replace(/\\(?!["\\/bfnrtu])/g, "")）。
-fn unescape_json(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.peek() {
-                Some(&next) if matches!(next, '"' | '\\' | '/' | 'b' | 'f' | 'n' | 'r' | 't' | 'u') => {
-                    out.push(ch);
-                    out.push(next);
-                    chars.next();
-                }
-                _ => {
-                    // drop the backslash
+fn schema_accepts(schema: &Value, value: &Value) -> bool {
+    schema_shape_valid(schema, 0) && schema_accepts_inner(schema, value, schema, 0)
+}
+
+fn schema_shape_valid(schema: &Value, depth: usize) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    let object = match schema {
+        Value::Bool(_) => return true,
+        Value::Object(object) => object,
+        _ => return false,
+    };
+    const SUPPORTED: &[&str] = &[
+        "$defs", "$id", "$ref", "$schema", "additionalProperties", "allOf", "anyOf",
+        "const", "default", "deprecated", "description", "enum", "examples", "exclusiveMaximum",
+        "exclusiveMinimum", "format", "items", "maxItems", "maxLength", "maxProperties",
+        "maximum", "minItems", "minLength", "minProperties", "minimum", "multipleOf", "not",
+        "oneOf", "pattern", "properties", "readOnly", "required", "title", "type", "uniqueItems",
+        "writeOnly",
+    ];
+    if object.keys().any(|key| !SUPPORTED.contains(&key.as_str())) {
+        return false;
+    }
+    for key in ["$id", "$schema", "description", "format", "pattern", "title"] {
+        if object.get(key).is_some_and(|value| !value.is_string()) {
+            return false;
+        }
+    }
+    if object
+        .get("$ref")
+        .is_some_and(|value| value.as_str().is_none_or(|reference| !reference.starts_with('#')))
+    {
+        return false;
+    }
+    for key in ["deprecated", "readOnly", "uniqueItems", "writeOnly"] {
+        if object.get(key).is_some_and(|value| !value.is_boolean()) {
+            return false;
+        }
+    }
+    for key in ["maxItems", "maxLength", "maxProperties", "minItems", "minLength", "minProperties"] {
+        if object.get(key).is_some_and(|value| value.as_u64().is_none()) {
+            return false;
+        }
+    }
+    for key in ["exclusiveMaximum", "exclusiveMinimum", "maximum", "minimum", "multipleOf"] {
+        if object.get(key).is_some_and(|value| !value.is_number()) {
+            return false;
+        }
+    }
+    if object
+        .get("multipleOf")
+        .is_some_and(|value| compare_json_numbers(value, &json!(0)) != Some(std::cmp::Ordering::Greater))
+    {
+        return false;
+    }
+    if object.get("enum").is_some_and(|value| {
+        value.as_array().is_none_or(|values| values.is_empty())
+    }) || object.get("examples").is_some_and(|value| !value.is_array()) {
+        return false;
+    }
+    if object.get("required").is_some_and(|value| {
+        value.as_array().is_none_or(|values| {
+            let names = values.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+            names.len() != values.len()
+                || names.iter().collect::<std::collections::HashSet<_>>().len() != names.len()
+        })
+    }) {
+        return false;
+    }
+    if let Some(kind) = object.get("type") {
+        let valid = match kind {
+            Value::String(kind) => is_json_schema_type(kind),
+            Value::Array(kinds) if !kinds.is_empty() => {
+                let names = kinds.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+                names.len() == kinds.len()
+                    && names.iter().all(|kind| is_json_schema_type(kind))
+                    && names.iter().collect::<std::collections::HashSet<_>>().len() == names.len()
+            }
+            _ => false,
+        };
+        if !valid {
+            return false;
+        }
+    }
+    for key in ["allOf", "anyOf", "oneOf"] {
+        if object.get(key).is_some_and(|value| {
+            value.as_array().is_none_or(|schemas| {
+                schemas.is_empty() || schemas.iter().any(|schema| !schema_shape_valid(schema, depth + 1))
+            })
+        }) {
+            return false;
+        }
+    }
+    for key in ["additionalProperties", "items", "not"] {
+        if object
+            .get(key)
+            .is_some_and(|schema| !schema_shape_valid(schema, depth + 1))
+        {
+            return false;
+        }
+    }
+    for key in ["$defs", "properties"] {
+        if object.get(key).is_some_and(|value| {
+            value.as_object().is_none_or(|schemas| {
+                schemas.values().any(|schema| !schema_shape_valid(schema, depth + 1))
+            })
+        }) {
+            return false;
+        }
+    }
+    object
+        .get("pattern")
+        .and_then(Value::as_str)
+        .is_none_or(|pattern| regex::Regex::new(pattern).is_ok())
+}
+
+fn is_json_schema_type(kind: &str) -> bool {
+    matches!(kind, "object" | "array" | "string" | "integer" | "number" | "boolean" | "null")
+}
+
+fn schema_accepts_inner(schema: &Value, value: &Value, root: &Value, depth: usize) -> bool {
+    if depth > 64 {
+        return false;
+    }
+    let object = match schema {
+        Value::Bool(allowed) => return *allowed,
+        Value::Object(object) => object,
+        _ => return false,
+    };
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
+        let Some(target) = resolve_local_schema_ref(root, reference) else {
+            return false;
+        };
+        if !schema_accepts_inner(target, value, root, depth + 1) {
+            return false;
+        }
+    }
+    if object
+        .get("allOf")
+        .and_then(Value::as_array)
+        .is_some_and(|schemas| {
+            schemas
+                .iter()
+                .any(|schema| !schema_accepts_inner(schema, value, root, depth + 1))
+        })
+    {
+        return false;
+    }
+    if object
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .is_some_and(|schemas| {
+            !schemas
+                .iter()
+                .any(|schema| schema_accepts_inner(schema, value, root, depth + 1))
+        })
+    {
+        return false;
+    }
+    if object
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .is_some_and(|schemas| {
+            schemas
+                .iter()
+                .filter(|schema| schema_accepts_inner(schema, value, root, depth + 1))
+                .count()
+                != 1
+        })
+    {
+        return false;
+    }
+    if object
+        .get("not")
+        .is_some_and(|schema| schema_accepts_inner(schema, value, root, depth + 1))
+    {
+        return false;
+    }
+    if object.get("const").is_some_and(|expected| expected != value) {
+        return false;
+    }
+    if let Some(expected) = object.get("type") {
+        let matches = match expected {
+            Value::String(kind) => value_matches_type(value, kind),
+            Value::Array(kinds) => kinds
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|kind| value_matches_type(value, kind)),
+            _ => false,
+        };
+        if !matches {
+            return false;
+        }
+    }
+    if object
+        .get("enum")
+        .and_then(Value::as_array)
+        .is_some_and(|values| !values.contains(value))
+    {
+        return false;
+    }
+    if let Some(text) = value.as_str() {
+        let length = text.chars().count() as u64;
+        if object.get("minLength").and_then(Value::as_u64).is_some_and(|min| length < min)
+            || object.get("maxLength").and_then(Value::as_u64).is_some_and(|max| length > max)
+        {
+            return false;
+        }
+        if let Some(pattern) = object.get("pattern").and_then(Value::as_str) {
+            let Ok(regex) = regex::Regex::new(pattern) else {
+                return false;
+            };
+            if !regex.is_match(text) {
+                return false;
+            }
+        }
+    }
+    if value.is_number() {
+        if object.get("minimum").is_some_and(|minimum| {
+            !matches!(
+                compare_json_numbers(value, minimum),
+                Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Greater)
+            )
+        }) || object.get("maximum").is_some_and(|maximum| {
+            !matches!(
+                compare_json_numbers(value, maximum),
+                Some(std::cmp::Ordering::Equal | std::cmp::Ordering::Less)
+            )
+        }) || object.get("exclusiveMinimum").is_some_and(|minimum| {
+            !matches!(
+                compare_json_numbers(value, minimum),
+                Some(std::cmp::Ordering::Greater)
+            )
+        }) || object.get("exclusiveMaximum").is_some_and(|maximum| {
+            !matches!(
+                compare_json_numbers(value, maximum),
+                Some(std::cmp::Ordering::Less)
+            )
+        }) {
+            return false;
+        }
+        if object
+            .get("multipleOf")
+            .is_some_and(|multiple| !json_number_is_multiple(value, multiple))
+        {
+            return false;
+        }
+    }
+    if let Some(map) = value.as_object() {
+        let length = map.len() as u64;
+        if object
+            .get("minProperties")
+            .and_then(Value::as_u64)
+            .is_some_and(|min| length < min)
+            || object
+                .get("maxProperties")
+                .and_then(Value::as_u64)
+                .is_some_and(|max| length > max)
+        {
+            return false;
+        }
+        if object
+            .get("required")
+            .and_then(Value::as_array)
+            .is_some_and(|required| {
+                required
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .any(|key| !map.contains_key(key))
+            })
+        {
+            return false;
+        }
+        let properties = object.get("properties").and_then(Value::as_object);
+        if let Some(properties) = properties {
+            for (key, property_schema) in properties {
+                if map.get(key).is_some_and(|property| {
+                    !schema_accepts_inner(property_schema, property, root, depth + 1)
+                }) {
+                    return false;
                 }
             }
-        } else {
-            out.push(ch);
+        }
+        if let Some(additional) = object.get("additionalProperties") {
+            for (key, property) in map {
+                if properties.is_some_and(|properties| properties.contains_key(key)) {
+                    continue;
+                }
+                if !schema_accepts_inner(additional, property, root, depth + 1) {
+                    return false;
+                }
+            }
         }
     }
-    out
+    if let Some(array) = value.as_array() {
+        let length = array.len() as u64;
+        if object.get("minItems").and_then(Value::as_u64).is_some_and(|min| length < min)
+            || object.get("maxItems").and_then(Value::as_u64).is_some_and(|max| length > max)
+        {
+            return false;
+        }
+        if object.get("uniqueItems").and_then(Value::as_bool) == Some(true) {
+            let mut seen = std::collections::HashSet::new();
+            if array.iter().any(|item| !seen.insert(canonical_json(item))) {
+                return false;
+            }
+        }
+        if let Some(items) = object.get("items") {
+            if array
+                .iter()
+                .any(|item| !schema_accepts_inner(items, item, root, depth + 1))
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
-/// 扫描文本中所有配平的 JSON 对象片段。
-fn extract_json_object_candidates(text: &str) -> Vec<String> {
-    let source = strip_json_code_fence(text);
-    let bytes: Vec<char> = source.chars().collect();
-    let mut candidates = Vec::new();
-    let mut start: Option<usize> = None;
-    let mut depth: i32 = 0;
+fn resolve_local_schema_ref<'a>(root: &'a Value, reference: &str) -> Option<&'a Value> {
+    let pointer = reference.strip_prefix('#')?;
+    if pointer.is_empty() {
+        return Some(root);
+    }
+    root.pointer(pointer)
+}
+
+fn value_matches_type(value: &Value, kind: &str) -> bool {
+    match kind {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => parse_exact_decimal(value)
+            .is_some_and(|number| number.digits == "0" || number.scale <= 0),
+        "number" => value.is_number(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => false,
+    }
+}
+
+#[derive(Clone)]
+struct ExactDecimal {
+    negative: bool,
+    digits: String,
+    scale: i64,
+}
+
+fn parse_exact_decimal(value: &Value) -> Option<ExactDecimal> {
+    let source = value.as_number()?.to_string();
+    let (negative, source) = source
+        .strip_prefix('-')
+        .map_or((false, source.as_str()), |rest| (true, rest));
+    let (mantissa, exponent) = if let Some((mantissa, exponent)) = source.split_once(['e', 'E']) {
+        (mantissa, exponent.parse::<i64>().ok()?)
+    } else {
+        (source, 0)
+    };
+    if exponent.unsigned_abs() > MAX_SCALED_NUMBER_DIGITS as u64 {
+        return None;
+    }
+    let mut digits = String::new();
+    let mut fraction = 0i64;
+    let mut seen_dot = false;
+    for ch in mantissa.chars() {
+        match ch {
+            '0'..='9' => {
+                digits.push(ch);
+                if seen_dot {
+                    fraction += 1;
+                }
+            }
+            '.' if !seen_dot => seen_dot = true,
+            _ => return None,
+        }
+    }
+    if digits.is_empty() || digits.len() > MAX_EXACT_NUMBER_DIGITS {
+        return None;
+    }
+    let first_nonzero = digits.find(|ch| ch != '0').unwrap_or(digits.len());
+    digits.drain(..first_nonzero);
+    if digits.is_empty() {
+        return Some(ExactDecimal {
+            negative: false,
+            digits: "0".to_string(),
+            scale: 0,
+        });
+    }
+    let mut scale = fraction.checked_sub(exponent)?;
+    while digits.ends_with('0') {
+        digits.pop();
+        scale = scale.checked_sub(1)?;
+    }
+    Some(ExactDecimal {
+        negative,
+        digits,
+        scale,
+    })
+}
+
+fn compare_decimal_magnitude(left: &ExactDecimal, right: &ExactDecimal) -> std::cmp::Ordering {
+    if left.digits == "0" || right.digits == "0" {
+        return match (left.digits == "0", right.digits == "0") {
+            (true, true) => std::cmp::Ordering::Equal,
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => unreachable!(),
+        };
+    }
+    let left_integer_digits = left.digits.len() as i64 - left.scale;
+    let right_integer_digits = right.digits.len() as i64 - right.scale;
+    match left_integer_digits.cmp(&right_integer_digits) {
+        std::cmp::Ordering::Equal => {
+            let length = left.digits.len().max(right.digits.len());
+            for index in 0..length {
+                let left_digit = left.digits.as_bytes().get(index).copied().unwrap_or(b'0');
+                let right_digit = right.digits.as_bytes().get(index).copied().unwrap_or(b'0');
+                match left_digit.cmp(&right_digit) {
+                    std::cmp::Ordering::Equal => {}
+                    ordering => return ordering,
+                }
+            }
+            std::cmp::Ordering::Equal
+        }
+        ordering => ordering,
+    }
+}
+
+fn compare_json_numbers(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    let left = parse_exact_decimal(left)?;
+    let right = parse_exact_decimal(right)?;
+    if left.digits == "0" && right.digits == "0" {
+        return Some(std::cmp::Ordering::Equal);
+    }
+    if left.negative != right.negative {
+        return Some(if left.negative {
+            std::cmp::Ordering::Less
+        } else {
+            std::cmp::Ordering::Greater
+        });
+    }
+    let ordering = compare_decimal_magnitude(&left, &right);
+    Some(if left.negative { ordering.reverse() } else { ordering })
+}
+
+fn scaled_integer_string(decimal: &ExactDecimal, common_scale: i64) -> Option<String> {
+    if common_scale < decimal.scale {
+        return None;
+    }
+    let zeros = usize::try_from(common_scale - decimal.scale).ok()?;
+    if decimal.digits.len().checked_add(zeros)? > MAX_SCALED_NUMBER_DIGITS {
+        return None;
+    }
+    let mut value = decimal.digits.clone();
+    value.extend(std::iter::repeat_n('0', zeros));
+    Some(value)
+}
+
+fn trim_decimal_integer(value: &str) -> &str {
+    let trimmed = value.trim_start_matches('0');
+    if trimmed.is_empty() { "0" } else { trimmed }
+}
+
+fn compare_decimal_integers(left: &str, right: &str) -> std::cmp::Ordering {
+    let left = trim_decimal_integer(left);
+    let right = trim_decimal_integer(right);
+    left.len().cmp(&right.len()).then_with(|| left.cmp(right))
+}
+
+fn subtract_decimal_integers(left: &str, right: &str) -> String {
+    let mut result = Vec::with_capacity(left.len());
+    let mut borrow = 0i16;
+    let mut right_digits = right.as_bytes().iter().rev();
+    for left_digit in left.as_bytes().iter().rev() {
+        let mut digit = i16::from(*left_digit - b'0') - borrow;
+        let subtrahend = right_digits
+            .next()
+            .map_or(0, |right_digit| i16::from(*right_digit - b'0'));
+        if digit < subtrahend {
+            digit += 10;
+            borrow = 1;
+        } else {
+            borrow = 0;
+        }
+        result.push((digit - subtrahend) as u8 + b'0');
+    }
+    while result.len() > 1 && result.last() == Some(&b'0') {
+        result.pop();
+    }
+    result.reverse();
+    String::from_utf8(result).unwrap_or_else(|_| "0".to_string())
+}
+
+fn decimal_integer_is_multiple(dividend: &str, divisor: &str) -> bool {
+    let divisor = trim_decimal_integer(divisor);
+    if divisor == "0" {
+        return false;
+    }
+    let mut remainder = "0".to_string();
+    for digit in trim_decimal_integer(dividend).bytes() {
+        if remainder == "0" {
+            remainder.clear();
+        }
+        remainder.push(char::from(digit));
+        remainder = trim_decimal_integer(&remainder).to_string();
+        while compare_decimal_integers(&remainder, divisor) != std::cmp::Ordering::Less {
+            remainder = subtract_decimal_integers(&remainder, divisor);
+        }
+    }
+    remainder == "0"
+}
+
+fn json_number_is_multiple(value: &Value, multiple: &Value) -> bool {
+    let Some(value) = parse_exact_decimal(value) else {
+        return false;
+    };
+    let Some(multiple) = parse_exact_decimal(multiple) else {
+        return false;
+    };
+    if multiple.negative || multiple.digits == "0" {
+        return false;
+    }
+    let common_scale = value.scale.max(multiple.scale);
+    let Some(value) = scaled_integer_string(&value, common_scale) else {
+        return false;
+    };
+    let Some(multiple) = scaled_integer_string(&multiple, common_scale) else {
+        return false;
+    };
+    decimal_integer_is_multiple(&value, &multiple)
+}
+
+fn canonical_json(value: &Value) -> String {
+    match value {
+        Value::Object(object) => {
+            let mut keys = object.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let fields = keys
+                .into_iter()
+                .map(|key| format!(
+                    "{}:{}",
+                    serde_json::to_string(key).unwrap_or_default(),
+                    canonical_json(&object[key])
+                ))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{{{fields}}}")
+        }
+        Value::Array(array) => format!(
+            "[{}]",
+            array.iter().map(canonical_json).collect::<Vec<_>>().join(",")
+        ),
+        _ => serde_json::to_string(value).unwrap_or_else(|_| "null".to_string()),
+    }
+}
+
+fn stable_hash(text: &str, seed: u64) -> u64 {
+    text.as_bytes().iter().fold(seed, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn stable_tool_id(span: usize, ordinal: usize, name: &str, input: &Value) -> String {
+    let material = format!("{span}:{ordinal}:{name}:{}", canonical_json(input));
+    let first = stable_hash(&material, 0xcbf29ce484222325);
+    let second = stable_hash(&material, 0x84222325cbf29ce4);
+    format!("call_recovered_{first:016x}{:08x}", second as u32)
+}
+
+#[derive(Clone, Debug)]
+pub enum RecoveredContent {
+    Text(String),
+    Tool(Value),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ToolRecoveryResult {
+    pub parts: Vec<RecoveredContent>,
+    pub incomplete_tool: bool,
+}
+
+impl ToolRecoveryResult {
+    #[cfg(test)]
+    pub fn tool_blocks(&self) -> Vec<Value> {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                RecoveredContent::Tool(block) => Some(block.clone()),
+                RecoveredContent::Text(_) => None,
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn visible_text(&self) -> String {
+        self.parts
+            .iter()
+            .filter_map(|part| match part {
+                RecoveredContent::Text(text) => Some(text.as_str()),
+                RecoveredContent::Tool(_) => None,
+            })
+            .collect()
+    }
+}
+
+fn push_text(parts: &mut Vec<RecoveredContent>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(RecoveredContent::Text(previous)) = parts.last_mut() {
+        previous.push_str(text);
+    } else {
+        parts.push(RecoveredContent::Text(text.to_string()));
+    }
+}
+
+fn balanced_json_end(text: &str, start: usize) -> Option<usize> {
+    let mut stack = Vec::new();
     let mut in_string = false;
     let mut escaping = false;
-
-    for (i, &ch) in bytes.iter().enumerate() {
+    for (relative, ch) in text[start..].char_indices() {
         if in_string {
             if escaping {
                 escaping = false;
@@ -92,416 +733,404 @@ fn extract_json_object_candidates(text: &str) -> Vec<String> {
         }
         match ch {
             '"' => in_string = true,
-            '{' => {
-                if depth == 0 {
-                    start = Some(i);
+            '{' => stack.push('}'),
+            '[' => stack.push(']'),
+            '}' | ']' => {
+                if stack.pop() != Some(ch) {
+                    return None;
                 }
-                depth += 1;
-            }
-            '}' if depth > 0 => {
-                depth -= 1;
-                if depth == 0 {
-                    if let Some(start_idx) = start {
-                        let slice: String = bytes[start_idx..=i].iter().collect();
-                        candidates.push(slice);
-                        start = None;
-                    }
+                if stack.is_empty() {
+                    return Some(start + relative + ch.len_utf8());
                 }
             }
             _ => {}
         }
     }
-    candidates
+    None
 }
 
-/// 文本工具候选的最大缓冲。超过上限后若已呈现工具包络，则安全截断并触发恢复，
-/// 而不是继续占用内存或把协议残片泄漏到用户正文。
-const MAX_PENDING_TEXT_TOOL_JSON_BYTES: usize = 512 * 1024;
+fn skip_whitespace(text: &str, mut offset: usize) -> usize {
+    while let Some(ch) = text[offset..].chars().next() {
+        if !ch.is_whitespace() {
+            break;
+        }
+        offset += ch.len_utf8();
+    }
+    offset
+}
+
+fn normalize_tool(value: &Value, spec: &ToolRecoverySpec, span: usize, ordinal: usize) -> Option<Value> {
+    let object = value.as_object()?;
+    let name = object.get("name")?.as_str()?.trim();
+    if name.is_empty() || !spec.declares(name) {
+        return None;
+    }
+    if object
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "tool_use")
+    {
+        return None;
+    }
+    let input = if let Some(input) = object.get("input") {
+        input.as_object()?;
+        input.clone()
+    } else {
+        let mut flat = object.clone();
+        flat.remove("type");
+        flat.remove("id");
+        flat.remove("name");
+        if flat.is_empty() {
+            return None;
+        }
+        Value::Object(flat)
+    };
+    if !spec.validates_input(name, &input) {
+        return None;
+    }
+    let id = object
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| stable_tool_id(span, ordinal, name, &input));
+    Some(json!({ "type": "tool_use", "id": id, "name": name, "input": input }))
+}
+
+fn normalize_candidate(value: &Value, spec: &ToolRecoverySpec, span: usize) -> Option<Vec<Value>> {
+    match value {
+        Value::Array(values) if !values.is_empty() => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| normalize_tool(value, spec, span, index))
+            .collect(),
+        Value::Object(_) => normalize_tool(value, spec, span, 0).map(|block| vec![block]),
+        _ => None,
+    }
+}
+
+enum MalformedRecovery {
+    Complete { end: usize, block: Value },
+    Incomplete,
+    None,
+}
+
+fn recover_extra_brace(
+    text: &str,
+    object_start: usize,
+    object_end: usize,
+    input: &Value,
+    spec: &ToolRecoverySpec,
+    base: usize,
+) -> MalformedRecovery {
+    if !input.is_object() {
+        return MalformedRecovery::None;
+    }
+    let mut suffix_start = skip_whitespace(text, object_end);
+    if text.as_bytes().get(suffix_start) != Some(&b',') {
+        return MalformedRecovery::None;
+    }
+    suffix_start = skip_whitespace(text, suffix_start + 1);
+    if !text[suffix_start..].starts_with('"') {
+        return MalformedRecovery::None;
+    }
+    let repaired_tail = format!("{{{}", &text[suffix_start..]);
+    let Some(repaired_end) = balanced_json_end(&repaired_tail, 0) else {
+        let suffix = text[suffix_start..].trim();
+        return if suffix.contains("\"name\"") || "\"name\"".starts_with(suffix) {
+            MalformedRecovery::Incomplete
+        } else {
+            MalformedRecovery::None
+        };
+    };
+    let suffix_end = suffix_start + repaired_end.saturating_sub(1);
+    let repaired = format!("{{{}", &text[suffix_start..suffix_end]);
+    let Ok(metadata) = serde_json::from_str::<Value>(&repaired) else {
+        return MalformedRecovery::None;
+    };
+    let Some(metadata) = metadata.as_object() else {
+        return MalformedRecovery::None;
+    };
+    if metadata.keys().any(|key| key != "name" && key != "id" && key != "type") {
+        return MalformedRecovery::None;
+    }
+    let Some(name) = metadata.get("name").and_then(Value::as_str).map(str::trim) else {
+        return MalformedRecovery::None;
+    };
+    if !spec.declares(name) || !spec.validates_input(name, input) {
+        return MalformedRecovery::None;
+    }
+    if metadata
+        .get("type")
+        .and_then(Value::as_str)
+        .is_some_and(|kind| kind != "tool_use")
+    {
+        return MalformedRecovery::None;
+    }
+    let id = metadata
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| stable_tool_id(base + object_start, 0, name, input));
+    MalformedRecovery::Complete {
+        end: suffix_end,
+        block: json!({ "type": "tool_use", "id": id, "name": name, "input": input }),
+    }
+}
+
+fn recover_range(text: &str, spec: &ToolRecoverySpec, base: usize) -> ToolRecoveryResult {
+    if spec.is_empty() || text.is_empty() {
+        return ToolRecoveryResult {
+            parts: (!text.is_empty())
+                .then(|| RecoveredContent::Text(text.to_string()))
+                .into_iter()
+                .collect(),
+            incomplete_tool: false,
+        };
+    }
+    let mut result = ToolRecoveryResult::default();
+    let mut scan = 0usize;
+    let mut plain_start = 0usize;
+    while scan < text.len() {
+        let fence = if text[scan..].starts_with("```") {
+            Some("```")
+        } else if text[scan..].starts_with("~~~") {
+            Some("~~~")
+        } else {
+            None
+        };
+        if let Some(fence) = fence {
+            if let Some(opening_end) = text[scan + fence.len()..]
+                .find('\n')
+                .map(|relative| scan + fence.len() + relative + 1)
+            {
+                if let Some(relative_close) = text[opening_end..].find(fence) {
+                    scan = opening_end + relative_close + fence.len();
+                    continue;
+                }
+            }
+            break;
+        }
+        let Some(ch) = text[scan..].chars().next() else {
+            break;
+        };
+        if ch != '{' && ch != '[' {
+            scan += ch.len_utf8();
+            continue;
+        }
+        let Some(end) = balanced_json_end(text, scan) else {
+            if spec.looks_like_protocol(&text[scan..]) {
+                push_text(&mut result.parts, &text[plain_start..scan]);
+                result.incomplete_tool = true;
+                return result;
+            }
+            break;
+        };
+        let candidate = &text[scan..end];
+        if candidate.len() > MAX_TOOL_RECOVERY_BYTES {
+            if spec.looks_like_protocol(candidate) {
+                push_text(&mut result.parts, &text[plain_start..scan]);
+                result.incomplete_tool = true;
+                return result;
+            }
+            scan = end;
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(candidate) else {
+            scan += ch.len_utf8();
+            continue;
+        };
+        let protocol_position = scan == 0
+            || plain_start == scan
+            || result
+                .parts
+                .iter()
+                .any(|part| matches!(part, RecoveredContent::Tool(_)))
+            || text[..scan]
+                .chars()
+                .next_back()
+                .is_some_and(|ch| ch == '\n' || ch == '\r');
+        if protocol_position {
+            if let Some(blocks) = normalize_candidate(&value, spec, base + scan) {
+                push_text(&mut result.parts, &text[plain_start..scan]);
+                result.parts.extend(blocks.into_iter().map(RecoveredContent::Tool));
+                scan = end;
+                plain_start = scan;
+                continue;
+            }
+        }
+        match if protocol_position {
+            recover_extra_brace(text, scan, end, &value, spec, base)
+        } else {
+            MalformedRecovery::None
+        } {
+            MalformedRecovery::Complete { end, block } => {
+                push_text(&mut result.parts, &text[plain_start..scan]);
+                result.parts.push(RecoveredContent::Tool(block));
+                scan = end;
+                plain_start = scan;
+            }
+            MalformedRecovery::Incomplete => {
+                push_text(&mut result.parts, &text[plain_start..scan]);
+                result.incomplete_tool = true;
+                return result;
+            }
+            MalformedRecovery::None => scan = end,
+        }
+    }
+    push_text(&mut result.parts, &text[plain_start..]);
+    result
+}
+
+pub fn ensure_tool_id_unique(
+    tool: &mut Value,
+    seen: &mut std::collections::HashSet<String>,
+    salt: usize,
+) {
+    let id = tool.get("id").and_then(Value::as_str).unwrap_or("");
+    if seen.insert(id.to_string()) {
+        return;
+    }
+    let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+    let input = tool.get("input").cloned().unwrap_or_else(|| json!({}));
+    let mut attempt = salt;
+    let replacement = loop {
+        let candidate = stable_tool_id(salt, attempt, name, &input);
+        if seen.insert(candidate.clone()) {
+            break candidate;
+        }
+        attempt += 1;
+    };
+    tool.as_object_mut()
+        .unwrap()
+        .insert("id".to_string(), Value::String(replacement));
+}
+
+fn ensure_unique_tool_ids(result: &mut ToolRecoveryResult) {
+    let mut seen = std::collections::HashSet::new();
+    for (index, part) in result.parts.iter_mut().enumerate() {
+        if let RecoveredContent::Tool(tool) = part {
+            ensure_tool_id_unique(tool, &mut seen, index);
+        }
+    }
+}
+
+pub fn recover_tool_calls_from_text(text: &str, spec: &ToolRecoverySpec) -> ToolRecoveryResult {
+    let mut result = recover_range(text, spec, 0);
+    ensure_unique_tool_ids(&mut result);
+    result
+}
 
 #[derive(Default)]
-pub struct MixedTextToolFinish {
-    pub visible_text: String,
-    pub tool_blocks: Vec<Value>,
+pub struct TextToolRecoveryFinish {
+    pub parts: Vec<RecoveredContent>,
     pub incomplete_tool: bool,
 }
 
-/// 持续扫描「普通正文 + 行首 SDK tool_use JSON」混合流。
-///
-/// 普通正文即时返回；行首 JSON 暂缓到顶层对象闭合。普通 JSON 随即原样释放，
-/// 合法 tool_use 则进入协议尾缓冲，连同后续噪声/多个工具对象在 finish 时统一恢复。
-pub struct MixedTextToolGuard {
-    enabled: bool,
-    at_line_start: bool,
-    candidate: String,
-    protocol_tail: String,
-    object_depth: usize,
-    in_string: bool,
-    escaping: bool,
+pub struct TextToolRecoveryGuard {
+    spec: ToolRecoverySpec,
+    prefix_hold: String,
+    pending: String,
+    buffering: bool,
     overflowed_tool: bool,
+    passthrough: bool,
 }
 
-impl MixedTextToolGuard {
-    pub fn new(enabled: bool) -> Self {
+impl TextToolRecoveryGuard {
+    pub fn new(spec: ToolRecoverySpec) -> Self {
         Self {
-            enabled,
-            at_line_start: true,
-            candidate: String::new(),
-            protocol_tail: String::new(),
-            object_depth: 0,
-            in_string: false,
-            escaping: false,
+            spec,
+            prefix_hold: String::new(),
+            pending: String::new(),
+            buffering: false,
             overflowed_tool: false,
+            passthrough: false,
         }
     }
 
     pub fn push(&mut self, chunk: &str) -> String {
-        if !self.enabled || chunk.is_empty() {
+        if self.spec.is_empty() || chunk.is_empty() || self.passthrough {
             return chunk.to_string();
         }
-        if !self.protocol_tail.is_empty() || self.overflowed_tool {
-            self.protocol_tail.push_str(chunk);
+        if self.overflowed_tool {
             return String::new();
         }
-
-        let mut visible = String::new();
-        for ch in chunk.chars() {
-            // 首个合法工具对象后，当前 chunk 的剩余字符（hash/乱码/后续工具）
-            // 全部属于协议尾，不能重新落回用户可见正文。
-            if !self.protocol_tail.is_empty() || self.overflowed_tool {
-                self.protocol_tail.push(ch);
-                continue;
-            }
-            if self.object_depth == 0 {
-                if self.at_line_start && ch == '{' {
-                    self.candidate.push(ch);
-                    self.object_depth = 1;
-                    self.at_line_start = false;
-                    continue;
-                }
-                visible.push(ch);
-                self.at_line_start = if ch == '\n' || ch == '\r' {
-                    true
-                } else if self.at_line_start {
-                    ch.is_whitespace()
-                } else {
-                    false
-                };
-                continue;
-            }
-
-            self.candidate.push(ch);
-            if self.in_string {
-                if self.escaping {
-                    self.escaping = false;
-                } else if ch == '\\' {
-                    self.escaping = true;
-                } else if ch == '"' {
-                    self.in_string = false;
-                }
-            } else {
-                match ch {
-                    '"' => self.in_string = true,
-                    '{' => self.object_depth += 1,
-                    '}' => self.object_depth = self.object_depth.saturating_sub(1),
-                    _ => {}
-                }
-            }
-
-            if self.object_depth == 0 {
-                if parse_tool_use_blocks_from_text(&self.candidate).is_some() {
-                    self.protocol_tail = std::mem::take(&mut self.candidate);
-                } else {
-                    visible.push_str(&std::mem::take(&mut self.candidate));
-                    self.at_line_start = false;
-                }
-                self.in_string = false;
-                self.escaping = false;
-            } else if self.candidate.len() > MAX_PENDING_TEXT_TOOL_JSON_BYTES {
-                if looks_like_tool_envelope(&self.candidate) {
-                    self.overflowed_tool = true;
-                    self.protocol_tail = std::mem::take(&mut self.candidate);
-                } else {
-                    visible.push_str(&std::mem::take(&mut self.candidate));
-                    self.object_depth = 0;
-                    self.in_string = false;
-                    self.escaping = false;
-                    self.at_line_start = false;
-                }
-            }
+        if self.buffering {
+            return self.append_pending(chunk);
         }
+        let combined = format!("{}{}", self.prefix_hold, chunk);
+        self.prefix_hold.clear();
+        let candidate = ['{', '[']
+            .into_iter()
+            .filter_map(|needle| combined.find(needle))
+            .chain(combined.find("```"))
+            .min();
+        if let Some(start) = candidate {
+            self.buffering = true;
+            let mut visible = combined[..start].to_string();
+            visible.push_str(&self.append_pending(&combined[start..]));
+            return visible;
+        }
+        let split = combined
+            .char_indices()
+            .rev()
+            .nth(2)
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        self.prefix_hold.push_str(&combined[split..]);
+        combined[..split].to_string()
+    }
+
+    fn append_pending(&mut self, chunk: &str) -> String {
+        if self.pending.len().saturating_add(chunk.len()) <= MAX_TOOL_RECOVERY_BYTES {
+            self.pending.push_str(chunk);
+            return String::new();
+        }
+        let remaining = MAX_TOOL_RECOVERY_BYTES.saturating_sub(self.pending.len());
+        let mut split = remaining.min(chunk.len());
+        while split > 0 && !chunk.is_char_boundary(split) {
+            split -= 1;
+        }
+        self.pending.push_str(&chunk[..split]);
+        if self.spec.looks_like_protocol(&self.pending) {
+            self.overflowed_tool = true;
+            return String::new();
+        }
+        let mut visible = std::mem::take(&mut self.pending);
+        visible.push_str(&chunk[split..]);
+        self.buffering = false;
+        self.passthrough = true;
         visible
     }
 
-    pub fn finish(&mut self) -> MixedTextToolFinish {
-        if !self.protocol_tail.is_empty() {
-            let tail = std::mem::take(&mut self.protocol_tail);
-            return MixedTextToolFinish {
-                tool_blocks: parse_tool_use_blocks_from_text(&tail).unwrap_or_default(),
-                incomplete_tool: self.overflowed_tool,
-                ..MixedTextToolFinish::default()
+    pub fn finish(&mut self) -> TextToolRecoveryFinish {
+        if self.overflowed_tool {
+            self.pending.clear();
+            return TextToolRecoveryFinish {
+                incomplete_tool: true,
+                ..Default::default()
             };
         }
-
-        if !self.candidate.is_empty() {
-            let candidate = std::mem::take(&mut self.candidate);
-            if looks_like_tool_envelope(&candidate) {
-                return MixedTextToolFinish {
-                    incomplete_tool: true,
-                    ..MixedTextToolFinish::default()
-                };
-            }
-            return MixedTextToolFinish {
-                visible_text: candidate,
-                ..MixedTextToolFinish::default()
+        if !self.buffering {
+            let text = std::mem::take(&mut self.prefix_hold);
+            return TextToolRecoveryFinish {
+                parts: (!text.is_empty())
+                    .then(|| RecoveredContent::Text(text))
+                    .into_iter()
+                    .collect(),
+                incomplete_tool: false,
             };
         }
-        MixedTextToolFinish::default()
-    }
-}
-
-fn looks_like_tool_envelope(text: &str) -> bool {
-    text.contains("\"tool_use\"")
-        || (text.contains("\"id\"")
-            && (text.contains("\"input\"") || text.contains("\"name\"")))
-}
-
-fn generated_tool_use_id() -> String {
-    let id = Uuid::new_v4().to_string().replace('-', "");
-    format!("call_{}", &id[..24])
-}
-
-fn normalize_tool_use_block(value: &Value) -> Option<Value> {
-    if !value.is_object() || value.as_array().is_some() {
-        return None;
-    }
-    let name = value.get("name").and_then(|v| v.as_str())?;
-    if value.get("type").and_then(|v| v.as_str()) != Some("tool_use") || name.is_empty() {
-        return None;
-    }
-    let id = value
-        .get("id")
-        .and_then(|v| v.as_str())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_string())
-        .unwrap_or_else(generated_tool_use_id);
-    let input = value
-        .get("input")
-        .filter(|v| v.is_object())
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    Some(json!({ "type": "tool_use", "id": id, "name": name, "input": input }))
-}
-
-fn parse_tool_use_block_fallback(text: &str) -> Option<Value> {
-    if !text.contains("\"type\"") || !text.contains("tool_use") {
-        return None;
-    }
-    let id = find_quoted_after(text, "\"id\"", "\"")
-        .map(|s| s.to_string())
-        .unwrap_or_else(generated_tool_use_id);
-    let name = find_quoted_after(text, "\"name\"", "\"")?;
-    if name.is_empty() {
-        return None;
-    }
-    let mut input = json!({});
-    if let Some(input_str) = find_braced_after(text, "\"input\"") {
-        if let Some(parsed) = parse_json_lenient(&input_str) {
-            if parsed.is_object() {
-                input = parsed;
-            }
+        let recovered = recover_tool_calls_from_text(&std::mem::take(&mut self.pending), &self.spec);
+        self.buffering = false;
+        TextToolRecoveryFinish {
+            parts: recovered.parts,
+            incomplete_tool: recovered.incomplete_tool,
         }
     }
-    if input.as_object().map(|o| o.is_empty()).unwrap_or(false) {
-        if let Some(command) = find_quoted_after(text, "\"command\"", "\"") {
-            input
-                .as_object_mut()
-                .unwrap()
-                .insert("command".to_string(), Value::String(command.to_string()));
-        }
-        if let Some(description) = find_quoted_after(text, "\"description\"", "\"") {
-            input
-                .as_object_mut()
-                .unwrap()
-                .insert("description".to_string(), Value::String(description.to_string()));
-        }
-    }
-    Some(json!({ "type": "tool_use", "id": id, "name": name, "input": input }))
-}
-
-/// 在 `needle` 之后查找下一个 `quote` 包围的字符串值，支持 `\"` 转义。
-fn find_quoted_after<'a>(text: &'a str, needle: &str, quote: &str) -> Option<&'a str> {
-    let start = text.find(needle)? + needle.len();
-    let rest = &text[start..];
-    let open = rest.find(quote)? + 1;
-    let mut chars = rest[open..].char_indices().peekable();
-    let mut end = 0;
-    while let Some((idx, ch)) = chars.next() {
-        if ch == '\\' {
-            chars.next();
-            end = idx + 1;
-            continue;
-        }
-        if ch == '"' {
-            end = idx;
-            break;
-        }
-        end = idx + ch.len_utf8();
-    }
-    Some(&rest[open..open + end])
-}
-
-/// 在 `needle` 之后查找第一个 `{...}` 平衡片段。
-fn find_braced_after(text: &str, needle: &str) -> Option<String> {
-    let start = text.find(needle)? + needle.len();
-    let rest = &text[start..];
-    let open = rest.find('{')?;
-    let mut depth = 0;
-    let mut in_string = false;
-    let mut escaping = false;
-    for (i, ch) in rest[open..].char_indices() {
-        if in_string {
-            if escaping {
-                escaping = false;
-            } else if ch == '\\' {
-                escaping = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(rest[open..open + i + ch.len_utf8()].to_string());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn parse_xml_tool_calls(text: &str) -> Option<Vec<Value>> {
-    let mut blocks = Vec::new();
-    let mut search_from = 0;
-    while let Some(start) = text[search_from..].find("<invoke ") {
-        let invoke_start = search_from + start;
-        let rest = &text[invoke_start..];
-        let Some(name_attr) = rest.find("name=\"") else { break };
-        let name_start = invoke_start + name_attr + "name=\"".len();
-        let Some(name_end) = text[name_start..].find('"') else { break };
-        let name = &text[name_start..name_start + name_end];
-        let Some(body_start) = text[name_start + name_end..].find('>') else { break };
-        let body_begin = name_start + name_end + body_start + 1;
-        let Some(close_tag) = text[body_begin..].find("</invoke>") else { break };
-        let body = &text[body_begin..body_begin + close_tag];
-
-        let mut input = Map::new();
-        let mut p = 0;
-        while let Some(param_start) = body[p..].find("<parameter ") {
-            let param_begin = p + param_start;
-            let p_rest = &body[param_begin..];
-            let Some(param_name_attr) = p_rest.find("name=\"") else { break };
-            let p_name_start = param_begin + param_name_attr + "name=\"".len();
-            let Some(p_name_end) = body[p_name_start..].find('"') else { break };
-            let param_name = body[p_name_start..p_name_start + p_name_end].to_string();
-            let Some(p_body_start) = body[p_name_start + p_name_end..].find('>') else { break };
-            let p_body_begin = p_name_start + p_name_end + p_body_start + 1;
-            let Some(p_close) = body[p_body_begin..].find("</parameter>") else { break };
-            let param_value = body[p_body_begin..p_body_begin + p_close].to_string();
-            input.insert(param_name, Value::String(param_value));
-            p = p_body_begin + p_close + "</parameter>".len();
-        }
-
-        blocks.push(json!({ "type": "tool_use", "id": generated_tool_use_id(), "name": name, "input": Value::Object(input) }));
-        search_from = body_begin + close_tag + "</invoke>".len();
-    }
-    if blocks.is_empty() {
-        None
-    } else {
-        Some(blocks)
-    }
-}
-
-pub fn parse_tool_use_blocks_from_text(text: &str) -> Option<Vec<Value>> {
-    let mut blocks: Vec<Value> = Vec::new();
-    let mut seen_ids = std::collections::HashSet::new();
-
-    // 先尝试直接解析 / 提取 JSON 片段
-    let mut parsed_values: Vec<Value> = Vec::new();
-    if let Some(value) = parse_json_lenient(text) {
-        parsed_values.push(value);
-    }
-    let candidates = extract_json_object_candidates(text);
-    if let Some(first) = candidates.first() {
-        if let Some(value) = parse_json_lenient(first) {
-            parsed_values.push(value);
-        }
-    }
-    for candidate in candidates.iter() {
-        if let Some(value) = parse_json_lenient(candidate) {
-            parsed_values.push(value);
-        }
-    }
-
-    for parsed in parsed_values {
-        let parsed_blocks: Vec<Value> = if let Some(arr) = parsed.as_array() {
-            arr.iter().filter_map(normalize_tool_use_block).collect()
-        } else {
-            normalize_tool_use_block(&parsed).into_iter().collect()
-        };
-        for block in parsed_blocks {
-            let id = block.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            if seen_ids.contains(&id) {
-                continue;
-            }
-            seen_ids.insert(id);
-            blocks.push(block);
-        }
-    }
-
-    // 正则兜底解析
-    for candidate in candidates.iter() {
-        if let Some(block) = parse_tool_use_block_fallback(candidate) {
-            let id = block.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            if seen_ids.contains(&id) {
-                continue;
-            }
-            seen_ids.insert(id);
-            blocks.push(block);
-        }
-    }
-
-    // XML 格式
-    if let Some(xml_blocks) = parse_xml_tool_calls(text) {
-        for block in xml_blocks {
-            let id = block.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            if !seen_ids.contains(&id) {
-                seen_ids.insert(id);
-                blocks.push(block);
-            }
-        }
-    }
-
-    if blocks.is_empty() {
-        None
-    } else {
-        Some(blocks)
-    }
-}
-
-pub fn normalize_assistant_content(text: &str, stop_reason: &str) -> (Vec<Value>, String) {
-    if let Some(tool_use_blocks) = parse_tool_use_blocks_from_text(text) {
-        return (tool_use_blocks, "tool_use".to_string());
-    }
-    // 文本里解析不出 tool 时，不能沿用上游声称的 tool_use
-    (
-        vec![json!({ "type": "text", "text": text })],
-        normalize_stop_reason(stop_reason, false, false).to_string(),
-    )
 }
 
 // ============ Anthropic ↔ Kiro ============
@@ -1066,8 +1695,10 @@ pub fn anthropic_message_response_with_tools(
     text: &str,
     thinking: &str,
     thinking_signature: Option<&str>,
+    ordered_content: &[Value],
     native_tool_uses: &[Value],
     stop_reason: &str,
+    recovery_spec: &ToolRecoverySpec,
 ) -> Value {
     let mut content = Vec::new();
     if !thinking.is_empty() || thinking_signature.is_some_and(|s| !s.is_empty()) {
@@ -1077,40 +1708,82 @@ pub fn anthropic_message_response_with_tools(
             "signature": thinking_signature.unwrap_or(""),
         }));
     }
-    if !text.is_empty() {
-        // 原生 tool 已到位时，不再把文本当 tool JSON 再解析一遍
-        if native_tool_uses.is_empty() {
-            let (parsed, parsed_stop) = normalize_assistant_content(text, stop_reason);
-            if parsed_stop == "tool_use" {
-                let mut blocks = Vec::new();
-                if !thinking.is_empty() || thinking_signature.is_some_and(|s| !s.is_empty()) {
-                    blocks.push(json!({
-                        "type": "thinking",
-                        "thinking": thinking,
-                        "signature": thinking_signature.unwrap_or(""),
-                    }));
+
+    let native_tools = native_tool_uses
+        .iter()
+        .filter(|tool| {
+            let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+            let input = tool.get("input").unwrap_or(&Value::Null);
+            recovery_spec.validates_input(name, input)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let source_content = if ordered_content.is_empty() {
+        let mut source = Vec::new();
+        if !text.is_empty() {
+            source.push(json!({ "type": "text", "text": text }));
+        }
+        source.extend(native_tools.iter().cloned());
+        source
+    } else {
+        ordered_content.to_vec()
+    };
+    let native_tool_ids = native_tools
+        .iter()
+        .filter_map(|tool| tool.get("id").and_then(Value::as_str).map(str::to_string))
+        .collect::<std::collections::HashSet<_>>();
+    let mut seen_tool_ids = native_tool_ids;
+    let mut recovered_ordinal = 0usize;
+    let mut incomplete_tool = false;
+    for part in source_content {
+        match part.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                let text = part.get("text").and_then(Value::as_str).unwrap_or("");
+                let recovered = recover_tool_calls_from_text(text, recovery_spec);
+                incomplete_tool |= recovered.incomplete_tool;
+                for recovered_part in recovered.parts {
+                    match recovered_part {
+                        RecoveredContent::Text(text) if !text.is_empty() => {
+                            content.push(json!({ "type": "text", "text": text }));
+                        }
+                        RecoveredContent::Tool(mut tool)
+                            if !native_tools
+                                .iter()
+                                .any(|native| recovery_spec.is_native_mirror(&tool, native)) =>
+                        {
+                            ensure_tool_id_unique(
+                                &mut tool,
+                                &mut seen_tool_ids,
+                                recovered_ordinal,
+                            );
+                            recovered_ordinal += 1;
+                            content.push(tool);
+                        }
+                        _ => {}
+                    }
                 }
-                blocks.extend(parsed);
-                return json!({
-                    "id": id,
-                    "type": "message",
-                    "role": "assistant",
-                    "model": model,
-                    "content": blocks,
-                    "stop_reason": parsed_stop,
-                    "stop_sequence": null,
-                    "usage": { "input_tokens": 0, "output_tokens": estimate_tokens(text) },
-                });
             }
-            content.extend(parsed);
-        } else {
-            content.push(json!({ "type": "text", "text": text }));
+            Some("tool_use") => {
+                let name = part.get("name").and_then(Value::as_str).unwrap_or("");
+                let input = part.get("input").unwrap_or(&Value::Null);
+                if recovery_spec.validates_input(name, input) {
+                    content.push(part);
+                }
+            }
+            _ => {}
         }
     }
-    content.extend(native_tool_uses.iter().cloned());
-    // 只有真正带上 tool_use 块时才能声明 tool_use；否则 Claude Code 会 ede_diagnostic
-    let stop_reason =
-        normalize_stop_reason(stop_reason, !native_tool_uses.is_empty(), false).to_string();
+
+    let has_tools = content
+        .iter()
+        .any(|block| block.get("type").and_then(Value::as_str) == Some("tool_use"));
+    let final_stop = if has_tools {
+        "tool_use"
+    } else if incomplete_tool {
+        "max_tokens"
+    } else {
+        normalize_stop_reason(stop_reason, false, false)
+    };
     if content.is_empty() {
         content.push(json!({
             "type": "text",
@@ -1123,7 +1796,7 @@ pub fn anthropic_message_response_with_tools(
         "role": "assistant",
         "model": model,
         "content": content,
-        "stop_reason": stop_reason,
+        "stop_reason": final_stop,
         "stop_sequence": null,
         "usage": { "input_tokens": 0, "output_tokens": estimate_tokens(text) },
     })
@@ -1173,6 +1846,71 @@ mod tests {
         assert_eq!(built["conversationState"]["currentMessage"]["userInputMessage"]["content"], "again");
     }
 
+    fn recovery_spec() -> ToolRecoverySpec {
+        ToolRecoverySpec::from_body(&json!({
+            "tools": [
+                {
+                    "name": "Bash",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["command"],
+                        "properties": { "command": { "type": "string" } }
+                    }
+                },
+                { "name": "Read", "input_schema": { "type": "object" } },
+                { "name": "Edit", "input_schema": { "type": "object" } },
+                {
+                    "name": "AskUserQuestion",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["questions"],
+                        "properties": { "questions": { "type": "array" } }
+                    }
+                }
+            ]
+        }))
+    }
+
+    fn parse_tool_use_blocks_from_text(text: &str) -> Option<Vec<Value>> {
+        let blocks = recover_tool_calls_from_text(text, &recovery_spec()).tool_blocks();
+        (!blocks.is_empty()).then_some(blocks)
+    }
+
+    struct MixedTextToolFinish {
+        visible_text: String,
+        tool_blocks: Vec<Value>,
+        incomplete_tool: bool,
+    }
+
+    struct MixedTextToolGuard(TextToolRecoveryGuard);
+
+    impl MixedTextToolGuard {
+        fn new(enabled: bool) -> Self {
+            Self(TextToolRecoveryGuard::new(if enabled {
+                recovery_spec()
+            } else {
+                ToolRecoverySpec::default()
+            }))
+        }
+
+        fn push(&mut self, chunk: &str) -> String {
+            self.0.push(chunk)
+        }
+
+        fn finish(&mut self) -> MixedTextToolFinish {
+            let finish = self.0.finish();
+            let result = ToolRecoveryResult {
+                parts: finish.parts,
+                incomplete_tool: finish.incomplete_tool,
+            };
+            MixedTextToolFinish {
+                visible_text: result.visible_text(),
+                tool_blocks: result.tool_blocks(),
+                incomplete_tool: result.incomplete_tool,
+            }
+        }
+    }
+
     #[test]
     fn parses_tool_use_from_text() {
         let text = "{\"type\":\"tool_use\",\"id\":\"call_123\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}";
@@ -1181,6 +1919,49 @@ mod tests {
         assert_eq!(blocks[0]["name"], "Bash");
         assert_eq!(blocks[0]["id"], "call_123");
         assert_eq!(blocks[0]["input"]["command"], "ls");
+    }
+
+    #[test]
+    fn parses_malformed_flat_ask_user_question_from_text() {
+        let text = concat!(
+            "{\"questions\":[{\"header\":\"旧 Key\",\"multiSelect\":false,",
+            "\"options\":[{\"description\":\"生成替代 Key\",\"label\":\"点击轮换（推荐）\"}],",
+            "\"question\":\"数据库中无法还原原文的旧 Key，采用哪种处理方式？\"}]},",
+            "\"name\":\"AskUserQuestion\"}"
+        );
+        let blocks = parse_tool_use_blocks_from_text(text).unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["type"], "tool_use");
+        assert_eq!(blocks[0]["name"], "AskUserQuestion");
+        assert_eq!(blocks[0]["input"]["questions"][0]["header"], "旧 Key");
+        assert!(blocks[0]["id"].as_str().unwrap().starts_with("call_"));
+    }
+
+    #[test]
+    fn mixed_guard_recovers_malformed_flat_ask_user_question() {
+        let mut guard = MixedTextToolGuard::new(true);
+        assert_eq!(
+            guard.push("需求明确。\n{\"questions\":[{\"header\":\"旧 Key\","),
+            "需求明确。\n"
+        );
+        assert_eq!(
+            guard.push("\"multiSelect\":false,\"options\":[],\"question\":\"如何迁移？\"}]},\"name\":\"AskUserQuestion\"}"),
+            ""
+        );
+        let finish = guard.finish();
+        assert!(!finish.incomplete_tool);
+        assert_eq!(finish.tool_blocks.len(), 1);
+        assert_eq!(finish.tool_blocks[0]["name"], "AskUserQuestion");
+        assert_eq!(finish.tool_blocks[0]["input"]["questions"][0]["question"], "如何迁移？");
+    }
+
+    #[test]
+    fn mixed_guard_releases_plain_questions_json() {
+        let input = "说明：\n{\"questions\":[]}\n完成。";
+        let mut guard = MixedTextToolGuard::new(true);
+        let mut visible = guard.push(input);
+        visible.push_str(&guard.finish().visible_text);
+        assert_eq!(visible, input);
     }
 
     #[test]
@@ -1215,7 +1996,10 @@ mod tests {
         assert_eq!(visible, "已定位到模型选择器。接下来读取布局。\n");
 
         let finish = guard.finish();
-        assert!(finish.visible_text.is_empty());
+        assert_eq!(
+            finish.visible_text,
+            " e3b0c44298fc1c149afbf4c8996fb924\n通 ... error"
+        );
         assert!(!finish.incomplete_tool);
         assert_eq!(finish.tool_blocks.len(), 2);
         assert_eq!(finish.tool_blocks[0]["name"], "Bash");
@@ -1264,20 +2048,348 @@ mod tests {
     }
 
     #[test]
-    fn parses_tool_use_after_prose_and_code_fence() {
+    fn preserves_tool_example_inside_code_fence() {
         let text = concat!(
-            "让我先看看项目的整体结构：\n\n```json\n",
+            "Example only:\n```json\n",
             "{\"type\":\"tool_use\",\"id\":\"call_001\",\"name\":\"Bash\",",
-            "\"input\":{\"command\":\"find . -type f -name \\\"*.rs\\\" | head -20\"}}",
-            "\n```"
+            "\"input\":{\"command\":\"find . -name \\\"*.rs\\\"\"}}",
+            "\n```\nDo not run it."
         );
-        let blocks = parse_tool_use_blocks_from_text(text).unwrap();
-        assert_eq!(blocks.len(), 1);
-        assert_eq!(blocks[0]["name"], "Bash");
+        let recovered = recover_tool_calls_from_text(text, &recovery_spec());
+        assert!(recovered.tool_blocks().is_empty());
+        assert_eq!(recovered.visible_text(), text);
+    }
+
+    #[test]
+    fn rejects_false_schema_and_additional_properties() {
+        let false_spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{ "name": "Denied", "input_schema": false }]
+        }));
+        let denied = recover_tool_calls_from_text(
+            "{\"name\":\"Denied\",\"input\":{}}",
+            &false_spec,
+        );
+        assert!(denied.tool_blocks().is_empty());
+
+        let strict_spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Strict",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["path"],
+                    "properties": { "path": { "type": "string" } },
+                    "additionalProperties": false
+                }
+            }]
+        }));
+        let extra = recover_tool_calls_from_text(
+            "{\"name\":\"Strict\",\"path\":\"a\",\"unexpected\":true}",
+            &strict_spec,
+        );
+        assert!(extra.tool_blocks().is_empty());
+    }
+
+    #[test]
+    fn malformed_schema_keyword_types_fail_closed() {
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Run",
+                "input_schema": {
+                    "type": "object",
+                    "required": "command"
+                }
+            }]
+        }));
+        let recovered = recover_tool_calls_from_text(
+            "{\"name\":\"Run\",\"input\":{}}",
+            &spec,
+        );
+        assert!(recovered.tool_blocks().is_empty());
+    }
+
+    #[test]
+    fn large_integer_bounds_are_compared_exactly() {
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Bounded",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["n"],
+                    "properties": {
+                        "n": {
+                            "type": "integer",
+                            "maximum": 9007199254740992_u64
+                        }
+                    }
+                }
+            }]
+        }));
+        let valid = recover_tool_calls_from_text(
+            "{\"name\":\"Bounded\",\"input\":{\"n\":9007199254740992}}",
+            &spec,
+        );
+        assert_eq!(valid.tool_blocks().len(), 1);
+        let invalid = recover_tool_calls_from_text(
+            "{\"name\":\"Bounded\",\"input\":{\"n\":9007199254740993}}",
+            &spec,
+        );
+        assert!(invalid.tool_blocks().is_empty());
+    }
+
+    #[test]
+    fn exact_decimal_constraints_handle_fraction_exponent_and_big_integers() {
+        let bounded = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Number",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["n"],
+                    "properties": { "n": { "type": "number", "minimum": 0.1 } }
+                }
+            }]
+        }));
         assert_eq!(
-            blocks[0]["input"]["command"],
-            "find . -type f -name \"*.rs\" | head -20"
+            recover_tool_calls_from_text(
+                "{\"name\":\"Number\",\"input\":{\"n\":0.1}}",
+                &bounded,
+            )
+            .tool_blocks()
+            .len(),
+            1
         );
+        assert!(recover_tool_calls_from_text(
+            "{\"name\":\"Number\",\"input\":{\"n\":0}}",
+            &bounded,
+        )
+        .tool_blocks()
+        .is_empty());
+
+        let big = ToolRecoverySpec::from_body(&serde_json::from_str::<Value>(r#"{
+            "tools":[{"name":"Big","input_schema":{"type":"object","required":["n"],
+            "properties":{"n":{"type":"integer","maximum":18446744073709551616}}}}]
+        }"#).unwrap());
+        assert!(recover_tool_calls_from_text(
+            "{\"name\":\"Big\",\"input\":{\"n\":18446744073709551617}}",
+            &big,
+        )
+        .tool_blocks()
+        .is_empty());
+
+        let integer = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Integer",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "n": { "type": "integer" } }
+                }
+            }]
+        }));
+        assert_eq!(
+            recover_tool_calls_from_text(
+                "{\"name\":\"Integer\",\"input\":{\"n\":1e2}}",
+                &integer,
+            )
+            .tool_blocks()
+            .len(),
+            1
+        );
+
+        let multiple = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Multiple",
+                "input_schema": {
+                    "type": "object",
+                    "properties": { "n": { "type": "number", "multipleOf": 0.1 } }
+                }
+            }]
+        }));
+        assert_eq!(
+            recover_tool_calls_from_text(
+                "{\"name\":\"Multiple\",\"input\":{\"n\":1e100}}",
+                &multiple,
+            )
+            .tool_blocks()
+            .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn malformed_examples_keyword_fails_closed() {
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Run",
+                "input_schema": { "type": "object", "examples": "not-an-array" }
+            }]
+        }));
+        assert!(recover_tool_calls_from_text(
+            "{\"name\":\"Run\",\"input\":{}}",
+            &spec,
+        )
+        .tool_blocks()
+        .is_empty());
+    }
+
+    #[test]
+    fn tilde_fenced_tool_example_remains_text() {
+        let text = "~~~json\n{\"name\":\"AskUserQuestion\",\"input\":{\"questions\":[]}}\n~~~";
+        let recovered = recover_tool_calls_from_text(text, &recovery_spec());
+        assert!(recovered.tool_blocks().is_empty());
+        assert_eq!(recovered.visible_text(), text);
+    }
+
+    #[test]
+    fn oversized_exact_numbers_fail_closed() {
+        let huge = format!("1{}", "0".repeat(MAX_EXACT_NUMBER_DIGITS));
+        let body_text = r#"{"tools":[{"name":"Huge","input_schema":{"type":"object","properties":{"n":{"type":"number","multipleOf":__HUGE__}}}}]}"#
+            .replace("__HUGE__", &huge);
+        let body = serde_json::from_str::<Value>(&body_text).unwrap();
+        let spec = ToolRecoverySpec::from_body(&body);
+        let recovered = recover_tool_calls_from_text(
+            "{\"name\":\"Huge\",\"input\":{\"n\":1}}",
+            &spec,
+        );
+        assert!(recovered.tool_blocks().is_empty());
+    }
+
+    #[test]
+    fn supports_pattern_schema_without_weakening_validation() {
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Lookup",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["key"],
+                    "properties": { "key": { "type": "string", "pattern": "^[a-z]+$" } },
+                    "additionalProperties": false
+                }
+            }]
+        }));
+        let valid = recover_tool_calls_from_text(
+            "{\"name\":\"Lookup\",\"input\":{\"key\":\"valid\"}}",
+            &spec,
+        );
+        assert_eq!(valid.tool_blocks().len(), 1);
+        let invalid = recover_tool_calls_from_text(
+            "{\"name\":\"Lookup\",\"input\":{\"key\":\"INVALID1\"}}",
+            &spec,
+        );
+        assert!(invalid.tool_blocks().is_empty());
+    }
+
+    #[test]
+    fn distinct_ids_are_not_mirror_duplicates() {
+        let spec = recovery_spec();
+        let text = json!({
+            "type": "tool_use",
+            "id": "text_1",
+            "name": "Bash",
+            "input": { "command": "same" }
+        });
+        let native = json!({
+            "type": "tool_use",
+            "id": "native_1",
+            "name": "Bash",
+            "input": { "command": "same" }
+        });
+        assert!(!spec.is_native_mirror(&text, &native));
+    }
+
+    #[test]
+    fn same_id_native_call_wins_even_when_text_input_differs() {
+        let spec = recovery_spec();
+        let text = json!({
+            "type": "tool_use",
+            "id": "call_same",
+            "name": "Bash",
+            "input": { "command": "one" }
+        });
+        let native = json!({
+            "type": "tool_use",
+            "id": "call_same",
+            "name": "Bash",
+            "input": { "command": "two" }
+        });
+        assert!(spec.is_native_mirror(&text, &native));
+    }
+
+    #[test]
+    fn inline_tool_json_example_remains_text() {
+        let text = concat!(
+            "Example only; do not run: ",
+            "{\"type\":\"tool_use\",\"id\":\"example_1\",\"name\":\"Bash\",",
+            "\"input\":{\"command\":\"echo example\"}}"
+        );
+        let recovered = recover_tool_calls_from_text(text, &recovery_spec());
+        assert!(recovered.tool_blocks().is_empty());
+        assert_eq!(recovered.visible_text(), text);
+    }
+
+    #[test]
+    fn line_start_tool_after_prose_is_recovered() {
+        let text = concat!(
+            "I will inspect it now.\n",
+            "{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"Bash\",",
+            "\"input\":{\"command\":\"ls\"}}"
+        );
+        let recovered = recover_tool_calls_from_text(text, &recovery_spec());
+        assert_eq!(recovered.tool_blocks().len(), 1);
+        assert_eq!(recovered.visible_text(), "I will inspect it now.\n");
+    }
+
+    #[test]
+    fn duplicate_explicit_ids_are_rewritten() {
+        let text = concat!(
+            "{\"type\":\"tool_use\",\"id\":\"call_dup\",\"name\":\"Bash\",",
+            "\"input\":{\"command\":\"one\"}}",
+            "{\"type\":\"tool_use\",\"id\":\"call_dup\",\"name\":\"Bash\",",
+            "\"input\":{\"command\":\"two\"}}"
+        );
+        let blocks = recover_tool_calls_from_text(text, &recovery_spec()).tool_blocks();
+        assert_eq!(blocks.len(), 2);
+        assert_ne!(blocks[0]["id"], blocks[1]["id"]);
+    }
+
+    #[test]
+    fn duplicate_id_rewrite_avoids_existing_generated_id() {
+        let third_input = json!({ "command": "third" });
+        let occupied = stable_tool_id(2, 2, "Bash", &third_input);
+        let text = format!(
+            "{{\"type\":\"tool_use\",\"id\":\"{occupied}\",\"name\":\"Bash\",\"input\":{{\"command\":\"first\"}}}}\
+             {{\"type\":\"tool_use\",\"id\":\"dup\",\"name\":\"Bash\",\"input\":{{\"command\":\"second\"}}}}\
+             {{\"type\":\"tool_use\",\"id\":\"dup\",\"name\":\"Bash\",\"input\":{{\"command\":\"third\"}}}}"
+        );
+        let blocks = recover_tool_calls_from_text(&text, &recovery_spec()).tool_blocks();
+        assert_eq!(blocks.len(), 3);
+        let ids = blocks
+            .iter()
+            .filter_map(|block| block.get("id").and_then(Value::as_str))
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn recovery_buffer_has_hard_limit_and_preserves_ordinary_json() {
+        let ordinary = format!(
+            "{{\"command\":\"not a tool call\"}}{}",
+            "x".repeat(MAX_TOOL_RECOVERY_BYTES)
+        );
+        let mut guard = TextToolRecoveryGuard::new(recovery_spec());
+        let visible = guard.push(&ordinary);
+        let finish = guard.finish();
+        assert_eq!(visible, ordinary);
+        assert!(finish.parts.is_empty());
+        assert!(!finish.incomplete_tool);
+
+        let protocol = format!(
+            "{{\"type\":\"tool_use\",\"id\":\"call_big\",\"input\":{{\"command\":\"{}",
+            "x".repeat(MAX_TOOL_RECOVERY_BYTES)
+        );
+        let mut guard = TextToolRecoveryGuard::new(recovery_spec());
+        assert!(guard.push(&protocol).is_empty());
+        let finish = guard.finish();
+        assert!(finish.parts.is_empty());
+        assert!(finish.incomplete_tool);
     }
 
     #[test]
@@ -1528,6 +2640,77 @@ mod tests {
     }
 
     #[test]
+    fn nonstream_response_preserves_text_tool_text_order() {
+        let spec = recovery_spec();
+        let native = json!({
+            "type": "tool_use",
+            "id": "call_1",
+            "name": "Bash",
+            "input": { "command": "ls" }
+        });
+        let ordered = vec![
+            json!({ "type": "text", "text": "before" }),
+            native.clone(),
+            json!({ "type": "text", "text": "after" }),
+        ];
+        let response = anthropic_message_response_with_tools(
+            "msg_order",
+            "claude-opus-4.8",
+            "beforeafter",
+            "",
+            None,
+            &ordered,
+            &[native],
+            "tool_use",
+            &spec,
+        );
+        assert_eq!(response["content"][0]["text"], "before");
+        assert_eq!(response["content"][1]["id"], "call_1");
+        assert_eq!(response["content"][2]["text"], "after");
+    }
+
+    #[test]
+    fn nonstream_response_uniquifies_ids_across_text_segments() {
+        let spec = recovery_spec();
+        let native = json!({
+            "type": "tool_use",
+            "id": "native",
+            "name": "Bash",
+            "input": { "command": "middle" }
+        });
+        let ordered = vec![
+            json!({
+                "type": "text",
+                "text": "{\"type\":\"tool_use\",\"id\":\"dup\",\"name\":\"Bash\",\"input\":{\"command\":\"one\"}}"
+            }),
+            native.clone(),
+            json!({
+                "type": "text",
+                "text": "{\"type\":\"tool_use\",\"id\":\"dup\",\"name\":\"Bash\",\"input\":{\"command\":\"two\"}}"
+            }),
+        ];
+        let response = anthropic_message_response_with_tools(
+            "msg_ids",
+            "claude-opus-4.8",
+            "",
+            "",
+            None,
+            &ordered,
+            &[native],
+            "tool_use",
+            &spec,
+        );
+        let ids = response["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|block| block["type"] == "tool_use")
+            .filter_map(|block| block["id"].as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
     fn response_includes_thinking_block_before_text() {
         let response = anthropic_message_response_with_tools(
             "msg_1",
@@ -1536,7 +2719,9 @@ mod tests {
             "先想一步。",
             Some("sig_xyz"),
             &[],
+            &[],
             "end_turn",
+            &ToolRecoverySpec::default(),
         );
         let content = response["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
@@ -1556,7 +2741,9 @@ mod tests {
             "",
             None,
             &[],
+            &[],
             "tool_use",
+            &ToolRecoverySpec::default(),
         );
         assert_eq!(response["stop_reason"], "end_turn");
         assert_eq!(response["content"][0]["type"], "text");
@@ -1572,7 +2759,9 @@ mod tests {
             "",
             None,
             &[],
+            &[],
             "tool_use",
+            &ToolRecoverySpec::default(),
         );
         assert_eq!(response["stop_reason"], "end_turn");
         assert_eq!(response["content"][0]["type"], "text");

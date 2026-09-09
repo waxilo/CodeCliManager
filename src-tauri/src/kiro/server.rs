@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::kiro::auth::Auth;
 use crate::kiro::eventstream::{
-    collect_kiro_text, extract_reasoning_parts, parse_event_stream, IncrementalEventStream,
+    collect_kiro_text, extract_reasoning_parts, parse_event_stream_checked, IncrementalEventStream,
     KiroEvent,
 };
 use crate::kiro::models::{
@@ -34,7 +34,8 @@ use crate::kiro::models::{
 };
 use crate::kiro::transform::{
     anthropic_message_response_with_tools, build_kiro_request, build_kiro_request_with_schema,
-    MixedTextToolGuard,
+    ensure_tool_id_unique, recover_tool_calls_from_text, RecoveredContent, TextToolRecoveryGuard,
+    ToolRecoverySpec,
 };
 use crate::protocol_guard::{normalize_stop_reason, sanitize_protocol_text, ProtocolTextGuard};
 
@@ -1041,13 +1042,268 @@ fn emit_fallback_text_block_sse(
     ));
 }
 
+enum BufferedKiroPart {
+    Text(String),
+    NativeTool(String),
+}
+
+fn push_buffered_text(parts: &mut Vec<BufferedKiroPart>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(BufferedKiroPart::Text(previous)) = parts.last_mut() {
+        previous.push_str(text);
+    } else {
+        parts.push(BufferedKiroPart::Text(text.to_string()));
+    }
+}
+
+fn emit_buffered_kiro_events_to_anthropic_sse(
+    events: Vec<KiroEvent>,
+    recovery_spec: ToolRecoverySpec,
+    mut send: impl FnMut(String),
+) -> bool {
+    let mut parts = Vec::new();
+    let mut native_tools: HashMap<String, NativeToolBlock> = HashMap::new();
+    let mut completed_tools: HashMap<String, Value> = HashMap::new();
+    let mut thinking = String::new();
+    let mut thinking_signature = None;
+    let mut stop_reason = "end_turn".to_string();
+    let mut invalid_tool = false;
+
+    for event in events {
+        match event.event_type.as_str() {
+            "assistantResponseEvent" => {
+                if let Some(text) = event.payload.get("content").and_then(Value::as_str) {
+                    push_buffered_text(&mut parts, text);
+                }
+            }
+            "reasoningContentEvent" => {
+                let (text, signature) = extract_reasoning_parts(&event.payload);
+                thinking.push_str(&text);
+                if signature.is_some() {
+                    thinking_signature = signature;
+                }
+            }
+            "toolUseEvent" => {
+                let id = event
+                    .payload
+                    .get("toolUseId")
+                    .or_else(|| event.payload.get("tool_use_id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .trim();
+                let name = event.payload.get("name").and_then(Value::as_str).unwrap_or("").trim();
+                if id.is_empty() || !recovery_spec.declares(name) {
+                    invalid_tool = true;
+                    continue;
+                }
+                if !native_tools.contains_key(id) {
+                    let Some(block) = new_native_tool_block(id, name) else {
+                        invalid_tool = true;
+                        continue;
+                    };
+                    native_tools.insert(id.to_string(), block);
+                    parts.push(BufferedKiroPart::NativeTool(id.to_string()));
+                }
+                let Some(block) = native_tools.get_mut(id) else {
+                    invalid_tool = true;
+                    continue;
+                };
+                if block.name != name {
+                    invalid_tool = true;
+                    block.open = false;
+                    continue;
+                }
+                let is_stop = event.payload.get("stop").and_then(Value::as_bool).unwrap_or(false);
+                match update_native_tool(block, event.payload.get("input"), is_stop) {
+                    NativeToolUpdate::Pending => {}
+                    NativeToolUpdate::Complete(tool) => {
+                        let input = tool.get("input").unwrap_or(&Value::Null);
+                        if recovery_spec.validates_input(name, input) {
+                            completed_tools.insert(id.to_string(), tool);
+                        } else {
+                            invalid_tool = true;
+                        }
+                    }
+                    NativeToolUpdate::Invalid => invalid_tool = true,
+                }
+            }
+            "metadataEvent" => {
+                if let Some(reason) = event.payload.get("stopReason").and_then(Value::as_str) {
+                    stop_reason = map_kiro_stop_reason(reason);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if native_tools.values().any(|tool| tool.open)
+        || completed_tools.len() != native_tools.len()
+    {
+        invalid_tool = true;
+    }
+    if invalid_tool {
+        let mut block_counter = 0;
+        emit_fallback_text_block_sse(
+            &mut block_counter,
+            "API Error: model returned an incomplete tool call",
+            &mut send,
+        );
+        emit_sse_message_delta_stop(&mut send, "end_turn", 0);
+        return true;
+    }
+
+    let mut ordered = Vec::new();
+    let mut incomplete_tool = false;
+    let mut protocol_leak = false;
+    let mut output_tokens_text = String::new();
+    for part in parts {
+        match part {
+            BufferedKiroPart::Text(raw) => {
+                output_tokens_text.push_str(&raw);
+                let (text, detected) = sanitize_protocol_text(&raw);
+                protocol_leak |= detected;
+                let recovered = recover_tool_calls_from_text(&text, &recovery_spec);
+                incomplete_tool |= recovered.incomplete_tool;
+                for recovered_part in recovered.parts {
+                    match &recovered_part {
+                        RecoveredContent::Tool(tool)
+                            if completed_tools
+                                .values()
+                                .any(|native| recovery_spec.is_native_mirror(tool, native)) => {}
+                        _ => ordered.push(recovered_part),
+                    }
+                }
+            }
+            BufferedKiroPart::NativeTool(id) => {
+                if let Some(tool) = completed_tools.get(&id) {
+                    ordered.push(RecoveredContent::Tool(tool.clone()));
+                }
+            }
+        }
+    }
+
+    let native_tool_ids = completed_tools.keys().cloned().collect::<std::collections::HashSet<_>>();
+    let mut seen_tool_ids = native_tool_ids.clone();
+    for (index, part) in ordered.iter_mut().enumerate() {
+        if let RecoveredContent::Tool(tool) = part {
+            let id = tool.get("id").and_then(Value::as_str).unwrap_or("");
+            if !native_tool_ids.contains(id) {
+                ensure_tool_id_unique(tool, &mut seen_tool_ids, index);
+            }
+        }
+    }
+
+    let mut block_counter = 0;
+    let mut thinking_started = false;
+    let mut thinking_index = None;
+    if !thinking.is_empty() || thinking_signature.is_some() {
+        thinking_index = Some(block_counter);
+        block_counter += 1;
+        emit_thinking_start_sse(thinking_index.unwrap(), &mut send);
+        thinking_started = true;
+        if !thinking.is_empty() {
+            emit_thinking_delta_sse(thinking_index.unwrap(), &thinking, &mut send);
+        }
+    }
+    close_thinking_block_sse(
+        &mut thinking_started,
+        thinking_index,
+        &thinking_signature,
+        &mut send,
+    );
+
+    let mut text_started = false;
+    let mut text_index = None;
+    let mut emitted_tools = false;
+    for part in ordered {
+        match part {
+            RecoveredContent::Text(text) if !text.is_empty() => {
+                let index = ensure_text_block_index(&mut text_index, &mut block_counter);
+                send_text_immediate(&mut text_started, index, &text, &mut send);
+            }
+            RecoveredContent::Tool(tool) => {
+                if text_started {
+                    send(sse_event(
+                        "content_block_stop",
+                        &json!({ "type": "content_block_stop", "index": text_index.unwrap_or(0) }),
+                    ));
+                    text_started = false;
+                    text_index = None;
+                }
+                let mut out = String::new();
+                emit_tool_blocks_sse(&[tool], &mut block_counter, &mut out);
+                send(out);
+                emitted_tools = true;
+            }
+            RecoveredContent::Text(_) => {}
+        }
+    }
+    if text_started {
+        send(sse_event(
+            "content_block_stop",
+            &json!({ "type": "content_block_stop", "index": text_index.unwrap_or(0) }),
+        ));
+    }
+    if block_counter == 0 {
+        emit_fallback_text_block_sse(
+            &mut block_counter,
+            "API Error: empty assistant response",
+            &mut send,
+        );
+    }
+    let final_stop = normalize_stop_reason(
+        &stop_reason,
+        emitted_tools,
+        incomplete_tool || protocol_leak,
+    );
+    emit_sse_message_delta_stop(
+        &mut send,
+        final_stop,
+        estimate_tokens(&output_tokens_text),
+    );
+    true
+}
+
+fn pipe_buffered_kiro_tools_to_anthropic_sse(
+    response: ReqwestResponse,
+    recovery_spec: ToolRecoverySpec,
+    mut send: impl FnMut(String),
+) -> bool {
+    let bytes = match response.bytes() {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let mut block_counter = 0;
+            emit_fallback_text_block_sse(
+                &mut block_counter,
+                &format!("API Error: 读取 Kiro 流失败: {error}"),
+                &mut send,
+            );
+            emit_sse_message_delta_stop(&mut send, "end_turn", 0);
+            return false;
+        }
+    };
+    let events = match parse_event_stream_checked(&bytes) {
+        Ok(events) => events,
+        Err(error) => {
+            let mut block_counter = 0;
+            emit_fallback_text_block_sse(
+                &mut block_counter,
+                &format!("API Error: {error}"),
+                &mut send,
+            );
+            emit_sse_message_delta_stop(&mut send, "max_tokens", 0);
+            return false;
+        }
+    };
+    emit_buffered_kiro_events_to_anthropic_sse(events, recovery_spec, send)
+}
+
 /// 解析上游 Event Stream，边收边推 Anthropic SSE。返回是否干净结束（流是否被完整读完）。
-///
-/// 原生 `toolUseEvent` 是主路径：文本增量不再为 tools 整包缓冲。
-/// 仅当内容像「文本里嵌 tool JSON」时短暂暂缓；真正的 tool 调用走增量 toolUseEvent。
 fn pipe_kiro_body_to_anthropic_sse(
     response: ReqwestResponse,
-    has_tools: bool,
+    recovery_spec: ToolRecoverySpec,
     mut send: impl FnMut(String),
 ) -> bool {
     let mut parser = IncrementalEventStream::new();
@@ -1068,8 +1324,8 @@ fn pipe_kiro_body_to_anthropic_sse(
     let mut completed_native_tools: HashMap<String, Value> = HashMap::new();
     let mut stop_reason = "end_turn".to_string();
     let mut protocol_guard = ProtocolTextGuard::default();
-    // 请求声明了 tools 时才恢复文本中泄漏的 SDK tool_use，避免普通对话里的 JSON 示例被执行。
-    let mut mixed_tool_guard = MixedTextToolGuard::new(has_tools);
+    // 仅恢复请求声明过的工具；普通前缀即时发送，首个 JSON 候选起缓冲以保持片段顺序。
+    let mut text_tool_guard = TextToolRecoveryGuard::new(recovery_spec.clone());
 
     loop {
         let n = match reader.read(&mut read_buf) {
@@ -1133,7 +1389,7 @@ fn pipe_kiro_body_to_anthropic_sse(
                     let Some(raw_chunk) = event.payload.get("content").and_then(|v| v.as_str()) else {
                         continue;
                     };
-                    if raw_chunk.is_empty() || saw_native_tool {
+                    if raw_chunk.is_empty() {
                         continue;
                     }
                     let chunk = protocol_guard.push(raw_chunk);
@@ -1142,9 +1398,7 @@ fn pipe_kiro_body_to_anthropic_sse(
                     }
                     full_text.push_str(&chunk);
 
-                    // 整个响应期间持续扫描，而不是在首段普通正文后永久锁定文本模式。
-                    // 普通文字立即可见；任意后续行首的 SDK tool_use JSON 暂缓并在收尾恢复。
-                    let visible = mixed_tool_guard.push(&chunk);
+                    let visible = text_tool_guard.push(&chunk);
                     if visible.is_empty() {
                         continue;
                     }
@@ -1177,23 +1431,8 @@ fn pipe_kiro_body_to_anthropic_sse(
                         .to_string();
 
                     if !native_tool_blocks.contains_key(&tool_id) {
-                        // 原生 toolUseEvent 始终优先：丢掉文本路径中尚未确认的工具候选，
-                        // 再收尾 thinking/text，避免同一调用被文本恢复与原生事件重复发射。
-                        mixed_tool_guard = MixedTextToolGuard::new(has_tools);
-                        close_thinking_block_sse(
-                            &mut thinking_started,
-                            thinking_block_index,
-                            &thinking_signature,
-                            &mut send,
-                        );
-                        if text_started {
-                            let index = text_block_index.unwrap_or(0);
-                            send(sse_event(
-                                "content_block_stop",
-                                &json!({ "type": "content_block_stop", "index": index }),
-                            ));
-                            text_block_index = None;
-                            text_started = false;
+                        if !recovery_spec.declares(&name) {
+                            continue;
                         }
                         let Some(block) = new_native_tool_block(&tool_id, &name) else {
                             continue;
@@ -1211,13 +1450,21 @@ fn pipe_kiro_body_to_anthropic_sse(
                     let Some(block) = native_tool_blocks.get_mut(&tool_id) else {
                         continue;
                     };
-                    if block.name.is_empty() && !name.is_empty() {
-                        block.name = name;
+                    if !name.is_empty() && block.name != name {
+                        invalid_native_tool = true;
+                        block.open = false;
+                        continue;
                     }
                     match update_native_tool(block, event.payload.get("input"), is_stop) {
                         NativeToolUpdate::Pending => {}
                         NativeToolUpdate::Complete(tool) => {
-                            completed_native_tools.insert(tool_id.clone(), tool);
+                            let tool_name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+                            let input = tool.get("input").unwrap_or(&Value::Null);
+                            if recovery_spec.validates_input(tool_name, input) {
+                                completed_native_tools.insert(tool_id.clone(), tool);
+                            } else {
+                                invalid_native_tool = true;
+                            }
                         }
                         NativeToolUpdate::Invalid => invalid_native_tool = true,
                     }
@@ -1232,47 +1479,29 @@ fn pipe_kiro_body_to_anthropic_sse(
         }
     }
 
+    let event_stream_clean = parser.finish();
+    if !event_stream_clean {
+        stop_reason = "max_tokens".to_string();
+    }
+
     let trailing_text = protocol_guard.finish();
     if !trailing_text.is_empty() {
         full_text.push_str(&trailing_text);
-        if !saw_native_tool {
-            let visible = mixed_tool_guard.push(&trailing_text);
-            if !visible.is_empty() {
-                close_thinking_block_sse(
-                    &mut thinking_started,
-                    thinking_block_index,
-                    &thinking_signature,
-                    &mut send,
-                );
-                let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
-                send_text_immediate(&mut text_started, index, &visible, &mut send);
-            }
+        let visible = text_tool_guard.push(&trailing_text);
+        if !visible.is_empty() {
+            close_thinking_block_sse(
+                &mut thinking_started,
+                thinking_block_index,
+                &thinking_signature,
+                &mut send,
+            );
+            let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
+            send_text_immediate(&mut text_started, index, &visible, &mut send);
         }
     }
 
-    let mixed_finish = if saw_native_tool {
-        Default::default()
-    } else {
-        mixed_tool_guard.finish()
-    };
-    if !mixed_finish.visible_text.is_empty() {
-        close_thinking_block_sse(
-            &mut thinking_started,
-            thinking_block_index,
-            &thinking_signature,
-            &mut send,
-        );
-        let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
-        send_text_immediate(
-            &mut text_started,
-            index,
-            &mixed_finish.visible_text,
-            &mut send,
-        );
-    }
-    if mixed_finish.incomplete_tool {
-        // 候选在 JSON 顶层对象闭合前断流：不泄漏协议残片，以 max_tokens 触发
-        // Claude 流解析器已有的一次 INTERNAL_RECOVERY_PROMPT 自动续跑。
+    let recovered_finish = text_tool_guard.finish();
+    if recovered_finish.incomplete_tool {
         stop_reason = "max_tokens".to_string();
     }
 
@@ -1283,26 +1512,7 @@ fn pipe_kiro_body_to_anthropic_sse(
         &mut send,
     );
 
-    // 前置正文可以先占用一个 text block；恢复出的工具块必须在关闭正文后，
-    // 从当前 block_counter 继续编号，不能重新使用 index 0。
-    if text_started {
-        let index = text_block_index.unwrap_or(0);
-        send(sse_event(
-            "content_block_stop",
-            &json!({ "type": "content_block_stop", "index": index }),
-        ));
-    }
-    if !mixed_finish.tool_blocks.is_empty() {
-        let mut out = String::new();
-        emit_tool_blocks_sse(&mixed_finish.tool_blocks, &mut block_counter, &mut out);
-        if !out.is_empty() {
-            send(out);
-            emitted_tool_use = true;
-            stop_reason = "tool_use".to_string();
-        }
-    }
-
-    // 上游可能省略 toolUseEvent.stop；EOF 时仍需验证完整 JSON，不能把半截 input 当工具调用。
+    // 上游可能省略 toolUseEvent.stop；EOF 时仍验证完整 JSON 和请求 schema。
     for tool_id in &native_tool_order {
         let Some(block) = native_tool_blocks.get_mut(tool_id) else {
             invalid_native_tool = true;
@@ -1311,19 +1521,68 @@ fn pipe_kiro_body_to_anthropic_sse(
         if block.open {
             match block.finish() {
                 Some(tool) => {
-                    completed_native_tools.insert(tool_id.clone(), tool);
+                    let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+                    let input = tool.get("input").unwrap_or(&Value::Null);
+                    if recovery_spec.validates_input(name, input) {
+                        completed_native_tools.insert(tool_id.clone(), tool);
+                    } else {
+                        invalid_native_tool = true;
+                    }
                 }
                 None => invalid_native_tool = true,
             }
         }
     }
 
-    // 原生工具整轮均合法后才按首次出现顺序向 Claude Code 发出，避免部分合法、
-    // 部分残缺的混合流，也避免 HashMap/完成时序导致工具块乱序。
     let ordered_native_tools = native_tool_order
         .iter()
         .filter_map(|tool_id| completed_native_tools.get(tool_id).cloned())
         .collect::<Vec<_>>();
+
+    // 保留恢复片段的原始次序：工具前后的正文分别占用单调递增的 text block。
+    for part in recovered_finish.parts {
+        match part {
+            RecoveredContent::Text(text) if !text.is_empty() => {
+                let index = ensure_text_block_index(&mut text_block_index, &mut block_counter);
+                send_text_immediate(&mut text_started, index, &text, &mut send);
+            }
+            RecoveredContent::Tool(tool) => {
+                if ordered_native_tools
+                    .iter()
+                    .any(|native| recovery_spec.is_native_mirror(&tool, native))
+                {
+                    continue;
+                }
+                if text_started {
+                    let index = text_block_index.unwrap_or(0);
+                    send(sse_event(
+                        "content_block_stop",
+                        &json!({ "type": "content_block_stop", "index": index }),
+                    ));
+                    text_started = false;
+                    text_block_index = None;
+                }
+                let mut out = String::new();
+                emit_tool_blocks_sse(&[tool], &mut block_counter, &mut out);
+                if !out.is_empty() {
+                    send(out);
+                    emitted_tool_use = true;
+                    stop_reason = "tool_use".to_string();
+                }
+            }
+            RecoveredContent::Text(_) => {}
+        }
+    }
+    if text_started {
+        let index = text_block_index.unwrap_or(0);
+        send(sse_event(
+            "content_block_stop",
+            &json!({ "type": "content_block_stop", "index": index }),
+        ));
+        text_block_index = None;
+    }
+
+    // 原生工具整轮均合法后才按首次出现顺序发出；不同 ID 的相同参数调用仍各自保留。
     if saw_native_tool
         && !invalid_native_tool
         && ordered_native_tools.len() == native_tool_order.len()
@@ -1339,7 +1598,7 @@ fn pipe_kiro_body_to_anthropic_sse(
     }
 
     let had_assistant_content =
-        emitted_tool_use || text_started || text_block_index.is_some() || thinking_block_index.is_some();
+        emitted_tool_use || text_block_index.is_some() || thinking_block_index.is_some() || !full_text.is_empty();
 
     // 无效工具输入即使前面有思考/正文，也追加一条合法文本错误并以 end_turn 收尾。
     if invalid_native_tool {
@@ -1372,7 +1631,7 @@ fn pipe_kiro_body_to_anthropic_sse(
         }),
     ));
     send(sse_event("message_stop", &json!({ "type": "message_stop" })));
-    true
+    event_stream_clean
 }
 
 /// 先立刻打开 SSE（message_start），再请求 Kiro；避免等上游整包结束后才开始响应。
@@ -1383,7 +1642,7 @@ fn respond_sse_stream_fetch(
     auth: Arc<Auth>,
     runtime_url: String,
     built: Value,
-    has_tools: bool,
+    recovery_spec: ToolRecoverySpec,
     health: Arc<ProxyHealth>,
     entry: Option<Arc<DedupEntry>>,
     dedup: Arc<DedupStore>,
@@ -1504,7 +1763,11 @@ fn respond_sse_stream_fetch(
             return;
         }
 
-        let clean = pipe_kiro_body_to_anthropic_sse(upstream, has_tools, send);
+        let clean = if recovery_spec.is_empty() {
+            pipe_kiro_body_to_anthropic_sse(upstream, recovery_spec, send)
+        } else {
+            pipe_buffered_kiro_tools_to_anthropic_sse(upstream, recovery_spec, send)
+        };
         if clean {
             health.record_success();
             if let Some(e) = &entry {
@@ -1635,7 +1898,7 @@ fn call_kiro_generate(
             .unwrap_or(text);
         return Err(message);
     }
-    Ok(parse_event_stream(&bytes))
+    parse_event_stream_checked(&bytes)
 }
 
 fn resolve_profile_arn(auth: &Auth) -> Result<Option<String>, String> {
@@ -1853,10 +2116,7 @@ fn handle_messages(
     let id = format!("msg_{}", Uuid::new_v4().to_string().replace('-', ""));
     let response_model = if model.is_empty() { kiro_model.clone() } else { model.to_string() };
 
-    let has_tools = body
-        .get("tools")
-        .and_then(|v| v.as_array())
-        .is_some_and(|tools| !tools.is_empty());
+    let recovery_spec = ToolRecoverySpec::from_body(&body);
 
     // 先发 SSE 头/message_start，再请求 Kiro；文本按节奏拆开，改善“整包突发”观感
     if is_stream {
@@ -1867,7 +2127,7 @@ fn handle_messages(
             Arc::clone(auth),
             config.runtime_url.clone(),
             built,
-            has_tools,
+            recovery_spec,
             health,
             dedup_entry,
             dedup,
@@ -1896,8 +2156,24 @@ fn handle_messages(
         }
     };
     let mut collected = collect_kiro_text(&events);
-    let (visible_text, protocol_leak_detected) = sanitize_protocol_text(&collected.text);
+    collected.tool_uses.retain(|tool| {
+        let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
+        let input = tool.get("input").unwrap_or(&Value::Null);
+        recovery_spec.validates_input(name, input)
+    });
+    let (visible_text, mut protocol_leak_detected) = sanitize_protocol_text(&collected.text);
     collected.text = visible_text;
+    for part in &mut collected.ordered_content {
+        if part.get("type").and_then(Value::as_str) != Some("text") {
+            continue;
+        }
+        let raw = part.get("text").and_then(Value::as_str).unwrap_or("");
+        let (visible, detected) = sanitize_protocol_text(raw);
+        protocol_leak_detected |= detected;
+        if let Some(text) = part.get_mut("text") {
+            *text = Value::String(visible);
+        }
+    }
     collected.stop_reason = normalize_stop_reason(
         &collected.stop_reason,
         !collected.tool_uses.is_empty(),
@@ -1910,8 +2186,10 @@ fn handle_messages(
         &collected.text,
         &collected.thinking,
         collected.thinking_signature.as_deref(),
+        &collected.ordered_content,
         &collected.tool_uses,
         &collected.stop_reason,
+        &recovery_spec,
     );
     health.record_success();
     json_response(request, 200, &response);
@@ -2198,6 +2476,76 @@ mod tests {
             update_native_tool(&mut block, Some(&json!("{\"command\":")), true),
             NativeToolUpdate::Invalid
         ));
+    }
+
+    #[test]
+    fn buffered_tool_events_preserve_text_tool_text_order() {
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Bash",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": { "command": { "type": "string" } },
+                    "additionalProperties": false
+                }
+            }]
+        }));
+        let events = vec![
+            KiroEvent {
+                event_type: "assistantResponseEvent".to_string(),
+                payload: json!({ "content": "before" }),
+            },
+            KiroEvent {
+                event_type: "toolUseEvent".to_string(),
+                payload: json!({
+                    "toolUseId": "call_order",
+                    "name": "Bash",
+                    "input": { "command": "ls" },
+                    "stop": true
+                }),
+            },
+            KiroEvent {
+                event_type: "assistantResponseEvent".to_string(),
+                payload: json!({ "content": "after" }),
+            },
+        ];
+        let mut out = String::new();
+        assert!(emit_buffered_kiro_events_to_anthropic_sse(
+            events,
+            spec,
+            |chunk| out.push_str(&chunk),
+        ));
+        let before = out.find("before").unwrap();
+        let tool = out.find("call_order").unwrap();
+        let after = out.find("after").unwrap();
+        assert!(before < tool && tool < after);
+        assert!(out.contains("\"stop_reason\":\"tool_use\""));
+    }
+
+    #[test]
+    fn buffered_tool_events_reject_missing_stop() {
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{ "name": "Bash", "input_schema": { "type": "object" } }]
+        }));
+        let events = vec![KiroEvent {
+            event_type: "toolUseEvent".to_string(),
+            payload: json!({
+                "toolUseId": "call_open",
+                "name": "Bash",
+                "input": { "command": "side-effect" }
+            }),
+        }];
+        let mut out = String::new();
+        assert!(emit_buffered_kiro_events_to_anthropic_sse(
+            events,
+            spec,
+            |chunk| out.push_str(&chunk),
+        ));
+        assert!(!out.contains("\"type\":\"tool_use\""));
+        assert!(!out.contains("call_open"));
+        assert!(out.contains("incomplete tool call"));
+        assert!(out.contains("\"stop_reason\":\"end_turn\""));
     }
 
     #[test]

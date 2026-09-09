@@ -23,6 +23,7 @@ pub struct KiroEvent {
 #[derive(Debug, Default, Clone)]
 pub struct CollectedText {
     pub text: String,
+    pub ordered_content: Vec<Value>,
     /// 可见思考过程（Claude adaptive thinking / 其它模型的 reasoning 事件）。
     pub thinking: String,
     /// Anthropic thinking 块所需的签名（有则原样回传）。
@@ -52,6 +53,18 @@ fn read_u16_be(b: &[u8], off: usize) -> usize {
 
 fn read_u32_be(b: &[u8], off: usize) -> usize {
     u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]) as usize
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = 0xffff_ffffu32;
+    for byte in bytes {
+        crc ^= u32::from(*byte);
+        for _ in 0..8 {
+            let mask = 0u32.wrapping_sub(crc & 1);
+            crc = (crc >> 1) ^ (0xedb8_8320 & mask);
+        }
+    }
+    !crc
 }
 
 /// 读取一个 header 条目，返回 (name, value, 下一个 offset)。
@@ -123,6 +136,7 @@ fn read_header_value(buffer: &[u8], offset: usize) -> Option<(String, HeaderValu
 #[derive(Debug, Default)]
 pub struct IncrementalEventStream {
     pub(crate) buffer: Vec<u8>,
+    invalid_frame: bool,
 }
 
 impl IncrementalEventStream {
@@ -138,6 +152,12 @@ impl IncrementalEventStream {
         self.drain_complete_frames()
     }
 
+    /// HTTP body 到达 EOF 后调用。只有无非法帧且无残留半帧才算完整。
+    pub fn finish(&mut self) -> bool {
+        let _ = self.drain_complete_frames();
+        !self.invalid_frame && self.buffer.is_empty()
+    }
+
     fn drain_complete_frames(&mut self) -> Vec<KiroEvent> {
         let mut events = Vec::new();
         loop {
@@ -145,8 +165,9 @@ impl IncrementalEventStream {
                 break;
             }
             let total_length = read_u32_be(&self.buffer, 0);
-            // 非法长度：停止消费，避免死循环（留给上层当截断处理）
+            // 非法长度无法重同步；记录协议损坏并留待 finish 报告。
             if total_length < 16 || total_length > 64 * 1024 * 1024 {
+                self.invalid_frame = true;
                 break;
             }
             if self.buffer.len() < total_length {
@@ -155,6 +176,8 @@ impl IncrementalEventStream {
             let frame: Vec<u8> = self.buffer.drain(..total_length).collect();
             if let Some(event) = parse_single_frame(&frame) {
                 events.push(event);
+            } else {
+                self.invalid_frame = true;
             }
         }
         events
@@ -167,7 +190,14 @@ fn parse_single_frame(frame: &[u8]) -> Option<KiroEvent> {
     }
     let total_length = read_u32_be(frame, 0);
     let headers_length = read_u32_be(frame, 4);
-    if total_length == 0 || total_length > frame.len() {
+    if total_length != frame.len() {
+        return None;
+    }
+    let expected_prelude_crc = read_u32_be(frame, 8) as u32;
+    let expected_message_crc = read_u32_be(frame, total_length - 4) as u32;
+    if crc32(&frame[..8]) != expected_prelude_crc
+        || crc32(&frame[..total_length - 4]) != expected_message_crc
+    {
         return None;
     }
 
@@ -177,14 +207,16 @@ fn parse_single_frame(frame: &[u8]) -> Option<KiroEvent> {
         return None;
     }
     let mut header_offset = 12;
-    while header_offset + 2 <= header_end {
-        match read_header_value(frame, header_offset) {
-            Some((name, value, next)) => {
-                headers.insert(name, value);
-                header_offset = next;
-            }
-            None => break,
+    while header_offset < header_end {
+        let (name, value, next) = read_header_value(frame, header_offset)?;
+        if next > header_end {
+            return None;
         }
+        headers.insert(name, value);
+        header_offset = next;
+    }
+    if header_offset != header_end {
+        return None;
     }
 
     let payload_start = header_end;
@@ -212,9 +244,19 @@ fn parse_single_frame(frame: &[u8]) -> Option<KiroEvent> {
 }
 
 /// 解析完整的事件流 body（不含 HTTP 分块编码，reqwest 已自动解码）。
-pub fn parse_event_stream(input: &[u8]) -> Vec<KiroEvent> {
+pub fn parse_event_stream_checked(input: &[u8]) -> Result<Vec<KiroEvent>, String> {
     let mut parser = IncrementalEventStream::new();
-    parser.push(input)
+    let events = parser.push(input);
+    if parser.finish() {
+        Ok(events)
+    } else {
+        Err("truncated or invalid Kiro event stream".to_string())
+    }
+}
+
+#[cfg(test)]
+fn parse_event_stream(input: &[u8]) -> Vec<KiroEvent> {
+    parse_event_stream_checked(input).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -238,10 +280,11 @@ mod tests {
         let mut frame = Vec::new();
         frame.extend_from_slice(&(total_len as u32).to_be_bytes());
         frame.extend_from_slice(&(headers.len() as u32).to_be_bytes());
-        frame.extend_from_slice(&0u32.to_be_bytes()); // prelude crc
+        frame.extend_from_slice(&crc32(&frame[..8]).to_be_bytes());
         frame.extend_from_slice(&headers);
         frame.extend_from_slice(&payload_bytes);
-        frame.extend_from_slice(&0u32.to_be_bytes()); // trailing crc
+        let message_crc = crc32(&frame);
+        frame.extend_from_slice(&message_crc.to_be_bytes());
         frame
     }
 
@@ -294,6 +337,77 @@ mod tests {
         let events = parser.push(&frame[split..]);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].payload["content"], "ab");
+    }
+
+    #[test]
+    fn incremental_parser_reports_truncated_eof() {
+        let frame = build_frame("assistantResponseEvent", &json!({ "content": "ab" }));
+        let mut parser = IncrementalEventStream::new();
+        assert!(parser.push(&frame[..frame.len() - 1]).is_empty());
+        assert!(!parser.finish());
+    }
+
+    #[test]
+    fn incremental_parser_reports_clean_eof() {
+        let frame = build_frame("assistantResponseEvent", &json!({ "content": "ab" }));
+        let mut parser = IncrementalEventStream::new();
+        assert_eq!(parser.push(&frame).len(), 1);
+        assert!(parser.finish());
+    }
+
+    #[test]
+    fn rejects_bad_crc() {
+        let mut frame = build_frame("assistantResponseEvent", &json!({ "content": "ab" }));
+        let last = frame.len() - 1;
+        frame[last] ^= 1;
+        let mut parser = IncrementalEventStream::new();
+        assert!(parser.push(&frame).is_empty());
+        assert!(!parser.finish());
+        assert!(parse_event_stream_checked(&frame).is_err());
+    }
+
+    #[test]
+    fn checked_parser_rejects_complete_tool_followed_by_partial_frame() {
+        let mut data = build_frame(
+            "toolUseEvent",
+            &json!({
+                "toolUseId": "call_truncated",
+                "name": "Bash",
+                "input": { "command": "side-effect" },
+                "stop": true
+            }),
+        );
+        let trailing = build_frame("metadataEvent", &json!({ "stopReason": "TOOL_USE" }));
+        data.extend_from_slice(&trailing[..trailing.len() - 1]);
+        assert!(parse_event_stream_checked(&data).is_err());
+    }
+
+    #[test]
+    fn collected_content_preserves_text_tool_text_order() {
+        let events = vec![
+            KiroEvent {
+                event_type: "assistantResponseEvent".to_string(),
+                payload: json!({ "content": "before" }),
+            },
+            KiroEvent {
+                event_type: "toolUseEvent".to_string(),
+                payload: json!({
+                    "toolUseId": "call_1",
+                    "name": "Bash",
+                    "input": { "command": "ls" },
+                    "stop": true
+                }),
+            },
+            KiroEvent {
+                event_type: "assistantResponseEvent".to_string(),
+                payload: json!({ "content": "after" }),
+            },
+        ];
+        let collected = collect_kiro_text(&events);
+        assert_eq!(collected.ordered_content.len(), 3);
+        assert_eq!(collected.ordered_content[0]["text"], "before");
+        assert_eq!(collected.ordered_content[1]["id"], "call_1");
+        assert_eq!(collected.ordered_content[2]["text"], "after");
     }
 
     #[test]
@@ -453,6 +567,23 @@ fn tool_use_event_to_block(payload: &Value) -> Option<Value> {
     }))
 }
 
+fn push_ordered_text(content: &mut Vec<Value>, text: &str) {
+    if text.is_empty() {
+        return;
+    }
+    if let Some(last) = content.last_mut() {
+        if last.get("type").and_then(Value::as_str) == Some("text") {
+            if let Some(existing) = last.get_mut("text").and_then(|value| value.as_str()) {
+                let mut merged = existing.to_string();
+                merged.push_str(text);
+                *last.get_mut("text").unwrap() = Value::String(merged);
+                return;
+            }
+        }
+    }
+    content.push(json!({ "type": "text", "text": text }));
+}
+
 /// 遍历事件，累积文本回复、停止原因与用量信息。
 pub fn collect_kiro_text(events: &[KiroEvent]) -> CollectedText {
     let mut collected = CollectedText {
@@ -467,6 +598,7 @@ pub fn collect_kiro_text(events: &[KiroEvent]) -> CollectedText {
             "assistantResponseEvent" => {
                 if let Some(content) = event.payload.get("content").and_then(|v| v.as_str()) {
                     collected.text.push_str(content);
+                    push_ordered_text(&mut collected.ordered_content, content);
                 }
             }
             "reasoningContentEvent" => {
@@ -497,6 +629,9 @@ pub fn collect_kiro_text(events: &[KiroEvent]) -> CollectedText {
                     .to_string();
                 if !tool_parts.contains_key(&id) {
                     tool_order.push(id.clone());
+                    collected
+                        .ordered_content
+                        .push(json!({ "type": "native_tool_placeholder", "id": id.clone() }));
                 }
                 let entry = tool_parts
                     .entry(id.clone())
@@ -547,6 +682,24 @@ pub fn collect_kiro_text(events: &[KiroEvent]) -> CollectedText {
             collected.tool_uses.push(block);
         }
     }
+    let completed_by_id = collected
+        .tool_uses
+        .iter()
+        .filter_map(|tool| {
+            Some((tool.get("id")?.as_str()?.to_string(), tool.clone()))
+        })
+        .collect::<HashMap<_, _>>();
+    collected.ordered_content = collected
+        .ordered_content
+        .into_iter()
+        .filter_map(|part| {
+            if part.get("type").and_then(Value::as_str) != Some("native_tool_placeholder") {
+                return Some(part);
+            }
+            let id = part.get("id").and_then(Value::as_str)?;
+            completed_by_id.get(id).cloned()
+        })
+        .collect();
     if !collected.tool_uses.is_empty() || collected.stop_reason == "tool_use" {
         collected.stop_reason = normalize_stop_reason(
             &collected.stop_reason,
