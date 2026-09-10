@@ -881,6 +881,201 @@ fn recover_extra_brace(
     }
 }
 
+// ============ antml 参数块泄漏恢复 ============
+//
+// 观测到的真实泄漏形态（2026-09-10，claude-sonnet-5 经 Kiro 上游）：
+//   {"id":"toolu_bdrk_01Ryn6exXNJ3RVfxYA2j6akD">
+//   <parameter name="output_mode">content</parameter>
+//   <parameter name="path">C:\...\file.java</parameter>
+//   <parameter name="pattern">initContractNote\(</parameter>
+//   <parameter name="-n">true</parameter>
+//   </invoke>
+// 即 `<invoke name="X">` 开标签退化为只带 toolu_ id 的伪 JSON，工具名完全丢失；
+// 参数值可跨多行，以 `</invoke>` 收尾。工具名按请求声明的工具 schema 推断：
+// 必填字段齐全且属性命中数最高者当选，推断不出则保持原文不恢复。
+
+enum AntmlRecovery {
+    Complete { end: usize, block: Value },
+    Incomplete,
+    None,
+}
+
+/// 读取 `start` 处的双引号字符串，返回 (内容, 结束偏移)。转义按字符宽度推进，避免切进多字节字符。
+fn read_quoted(text: &str, start: usize) -> Option<(String, usize)> {
+    if text.as_bytes().get(start) != Some(&b'"') {
+        return None;
+    }
+    let mut pos = start + 1;
+    while let Some(ch) = text[pos..].chars().next() {
+        match ch {
+            '"' => return Some((text[start + 1..pos].to_string(), pos + 1)),
+            '\\' => pos += 1 + ch.len_utf8(),
+            _ => pos += ch.len_utf8(),
+        }
+    }
+    None
+}
+
+/// 解析开标签，返回 (开标签结束偏移, toolu id, 显式工具名)。
+/// 两种形态：`{"id":"toolu_xxx">`（id 必须以 toolu_ 开头）与 `<invoke name="X">`。
+fn parse_antml_opener(text: &str, start: usize) -> Option<(usize, Option<String>, Option<String>)> {
+    let rest = &text[start..];
+    if rest.starts_with("<invoke") {
+        let mut pos = start + "<invoke".len();
+        pos = skip_whitespace(text, pos);
+        let mut name = None;
+        if text[pos..].starts_with("name=") {
+            let (parsed, next) = read_quoted(text, pos + "name=".len())?;
+            name = Some(parsed);
+            pos = next;
+            pos = skip_whitespace(text, pos);
+        }
+        if text.as_bytes().get(pos) == Some(&b'>') {
+            return Some((pos + 1, None, name.filter(|n| !n.trim().is_empty())));
+        }
+        return None;
+    }
+    if rest.starts_with("{\"id\":") {
+        let mut pos = start + "{\"id\":".len();
+        pos = skip_whitespace(text, pos);
+        let (id, next) = read_quoted(text, pos)?;
+        if !id.starts_with("toolu_") {
+            return None;
+        }
+        pos = skip_whitespace(text, next);
+        if text.as_bytes().get(pos) == Some(&b'>') {
+            return Some((pos + 1, Some(id), None));
+        }
+    }
+    None
+}
+
+/// 解析 `<parameter name="k">value</parameter>` 序列直到 `</invoke>`，value 保持原文（可跨多行）。
+fn parse_antml_params(text: &str, mut pos: usize) -> Option<(Vec<(String, String)>, usize)> {
+    let mut params = Vec::new();
+    loop {
+        pos = skip_whitespace(text, pos);
+        if text[pos..].starts_with("</invoke>") {
+            return Some((params, pos + "</invoke>".len()));
+        }
+        if !text[pos..].starts_with("<parameter") {
+            return None;
+        }
+        pos += "<parameter".len();
+        pos = skip_whitespace(text, pos);
+        if !text[pos..].starts_with("name=") {
+            return None;
+        }
+        let (key, next) = read_quoted(text, pos + "name=".len())?;
+        pos = skip_whitespace(text, next);
+        if text.as_bytes().get(pos) != Some(&b'>') {
+            return None;
+        }
+        pos += 1;
+        let value_end = text[pos..].find("</parameter>")? + pos;
+        params.push((key, text[pos..value_end].to_string()));
+        pos = value_end + "</parameter>".len();
+    }
+}
+
+/// 按候选工具 schema 的属性类型对参数值做强转（antml 值全是文本，"true"/"3" 需还原为 bool/number）。
+fn antml_input_for_schema(params: &[(String, String)], schema: &Value) -> Value {
+    let properties = schema.get("properties").and_then(Value::as_object);
+    let mut map = Map::new();
+    for (key, raw) in params {
+        let expected_type = properties
+            .and_then(|p| p.get(key.as_str()))
+            .and_then(|s| s.get("type"))
+            .and_then(Value::as_str);
+        let value = match expected_type {
+            Some("boolean") => serde_json::from_str::<Value>(raw)
+                .ok()
+                .filter(Value::is_boolean)
+                .unwrap_or_else(|| json!(raw)),
+            Some("integer") | Some("number") => serde_json::from_str::<Value>(raw)
+                .ok()
+                .filter(Value::is_number)
+                .unwrap_or_else(|| json!(raw)),
+            _ => json!(raw),
+        };
+        map.insert(key.clone(), value);
+    }
+    Value::Object(map)
+}
+
+/// 推断工具名与入参：显式名字只校验不推断；否则在声明工具里选「校验通过且属性命中数最高」者。
+fn infer_antml_tool(
+    params: &[(String, String)],
+    explicit_name: Option<&str>,
+    spec: &ToolRecoverySpec,
+) -> Option<(String, Value)> {
+    if let Some(name) = explicit_name.map(str::trim).filter(|n| !n.is_empty()) {
+        let schema = spec.schemas.get(name)?;
+        let input = antml_input_for_schema(params, schema);
+        return spec
+            .validates_input(name, &input)
+            .then(|| (name.to_string(), input));
+    }
+    if params.is_empty() {
+        return None;
+    }
+    let mut names = spec.schemas.keys().collect::<Vec<_>>();
+    names.sort(); // 确定序，得分相同取字典序最小
+    let mut best: Option<(usize, String, Value)> = None;
+    for name in names {
+        let schema = &spec.schemas[name];
+        let input = antml_input_for_schema(params, schema);
+        if !spec.validates_input(name, &input) {
+            continue;
+        }
+        let properties = schema.get("properties").and_then(Value::as_object);
+        let score = params
+            .iter()
+            .filter(|(key, _)| properties.is_some_and(|p| p.contains_key(key.as_str())))
+            .count();
+        if best.as_ref().is_none_or(|(top, _, _)| score > *top) {
+            best = Some((score, name.clone(), input));
+        }
+    }
+    // 至少命中一个已声明属性才认，避免纯靠 schema 宽松校验瞎猜
+    let (score, name, input) = best?;
+    (score > 0).then_some((name, input))
+}
+
+fn recover_antml_invoke(text: &str, start: usize, spec: &ToolRecoverySpec, base: usize) -> AntmlRecovery {
+    if spec.is_empty() {
+        return AntmlRecovery::None;
+    }
+    let Some((pos, id, name)) = parse_antml_opener(text, start) else {
+        return AntmlRecovery::None;
+    };
+    match parse_antml_params(text, pos) {
+        Some((params, end)) => {
+            let Some((tool_name, input)) = infer_antml_tool(&params, name.as_deref(), spec) else {
+                return AntmlRecovery::None;
+            };
+            let block_id = id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| stable_tool_id(base + start, 0, &tool_name, &input));
+            AntmlRecovery::Complete {
+                end,
+                block: json!({ "type": "tool_use", "id": block_id, "name": tool_name, "input": input }),
+            }
+        }
+        None => {
+            // opener 之后仍有参数行但没等到 </invoke>：流被截断，按不完整工具处理
+            if text[pos..].contains("<parameter") {
+                AntmlRecovery::Incomplete
+            } else {
+                AntmlRecovery::None
+            }
+        }
+    }
+}
+
 fn recover_range(text: &str, spec: &ToolRecoverySpec, base: usize) -> ToolRecoveryResult {
     if spec.is_empty() || text.is_empty() {
         return ToolRecoveryResult {
@@ -917,6 +1112,28 @@ fn recover_range(text: &str, spec: &ToolRecoverySpec, base: usize) -> ToolRecove
         let Some(ch) = text[scan..].chars().next() else {
             break;
         };
+        // antml 参数块泄漏（<invoke …> 或 {"id":"toolu_…">）先于 JSON 探测尝试：
+        // 参数值里常含配平花括号（如 Java 代码），balanced_json_end 可能误判成功而跳过。
+        // antml 解析失败时回落到正常 JSON 路径，两种触发形态互不干扰。
+        let antml_candidate = (ch == '<' && text[scan..].starts_with("<invoke"))
+            || (ch == '{' && text[scan..].starts_with("{\"id\":"));
+        if antml_candidate {
+            match recover_antml_invoke(text, scan, spec, base) {
+                AntmlRecovery::Complete { end, block } => {
+                    push_text(&mut result.parts, &text[plain_start..scan]);
+                    result.parts.push(RecoveredContent::Tool(block));
+                    scan = end;
+                    plain_start = scan;
+                    continue;
+                }
+                AntmlRecovery::Incomplete => {
+                    push_text(&mut result.parts, &text[plain_start..scan]);
+                    result.incomplete_tool = true;
+                    return result;
+                }
+                AntmlRecovery::None => {}
+            }
+        }
         if ch != '{' && ch != '[' {
             scan += ch.len_utf8();
             continue;
@@ -1067,6 +1284,7 @@ impl TextToolRecoveryGuard {
             .into_iter()
             .filter_map(|needle| combined.find(needle))
             .chain(combined.find("```"))
+            .chain(combined.find("<invoke"))
             .min();
         if let Some(start) = candidate {
             self.buffering = true;
@@ -1886,11 +2104,15 @@ mod tests {
 
     impl MixedTextToolGuard {
         fn new(enabled: bool) -> Self {
-            Self(TextToolRecoveryGuard::new(if enabled {
+            Self::with_spec(if enabled {
                 recovery_spec()
             } else {
                 ToolRecoverySpec::default()
-            }))
+            })
+        }
+
+        fn with_spec(spec: ToolRecoverySpec) -> Self {
+            Self(TextToolRecoveryGuard::new(spec))
         }
 
         fn push(&mut self, chunk: &str) -> String {
@@ -2852,5 +3074,186 @@ mod tests {
         });
         let built = build_kiro_request_with_schema(&body, "gpt-5.6-luna", Some("arn"), &schema).unwrap();
         assert!(built.get("additionalModelRequestFields").is_none());
+    }
+
+    // ============ antml 参数块泄漏恢复 ============
+
+    fn antml_recovery_spec() -> ToolRecoverySpec {
+        ToolRecoverySpec::from_body(&json!({
+            "tools": [
+                {
+                    "name": "Grep",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["pattern"],
+                        "properties": {
+                            "pattern": { "type": "string" },
+                            "path": { "type": "string" },
+                            "output_mode": { "type": "string" },
+                            "-n": { "type": "boolean" }
+                        }
+                    }
+                },
+                {
+                    "name": "Read",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["file_path"],
+                        "properties": { "file_path": { "type": "string" } }
+                    }
+                },
+                {
+                    "name": "Edit",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["file_path", "old_string", "new_string"],
+                        "properties": {
+                            "file_path": { "type": "string" },
+                            "old_string": { "type": "string" },
+                            "new_string": { "type": "string" }
+                        }
+                    }
+                }
+            ]
+        }))
+    }
+
+    #[test]
+    fn recovers_antml_leak_with_id_opener_and_infers_name() {
+        // 真实泄漏样本（2026-09-10，claude-sonnet-5 经 Kiro 上游）：
+        // <invoke name="Grep"> 退化为 {"id":"toolu_...">，工具名完全丢失，需按 schema 推断。
+        let text = concat!(
+            "逐一过一遍。\n",
+            "{\"id\":\"toolu_bdrk_01Ryn6exXNJ3RVfxYA2j6akD\">\n",
+            "<parameter name=\"output_mode\">content</parameter>\n",
+            "<parameter name=\"path\">C:\\Users\\dev\\StockAccessRecordServiceImpl.java</parameter>\n",
+            "<parameter name=\"pattern\">initContractNote\\(</parameter>\n",
+            "<parameter name=\"-n\">true</parameter>\n",
+            "</invoke>"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        assert!(!recovered.incomplete_tool);
+        assert_eq!(recovered.visible_text(), "逐一过一遍。\n");
+        let blocks = recovered.tool_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["name"], "Grep");
+        assert_eq!(blocks[0]["id"], "toolu_bdrk_01Ryn6exXNJ3RVfxYA2j6akD");
+        assert_eq!(blocks[0]["input"]["pattern"], "initContractNote\\(");
+        assert_eq!(blocks[0]["input"]["-n"], true);
+        assert_eq!(blocks[0]["input"]["output_mode"], "content");
+    }
+
+    #[test]
+    fn recovers_antml_leak_with_multiline_params_and_infers_edit() {
+        // 真实泄漏样本 2：多行参数值（old_string/new_string 含换行），工具名按命中数推断为 Edit 而非 Read。
+        let text = concat!(
+            "需要转换逻辑。\n",
+            "{\"id\":\"toolu_bdrk_01Sk9BiVWaZ4dK9GJZAX2dTV\">\n",
+            "<parameter name=\"file_path\">C:\\Users\\dev\\ContractNoteNoticeServiceImpl.java</parameter>\n",
+            "<parameter name=\"old_string\">    @Override\n    public ContractNoteUrlRespVO view(ContractNoteNoticeReqVO req) {\n        ContractNoteNoticeDO record = contractNoteNoticeManager.view(req.getBizType(), req.getBizId(), req.getFundAccount());</parameter>\n",
+            "<parameter name=\"new_string\">    @Override\n    public ContractNoteUrlRespVO view(ContractNoteNoticeReqVO req) {\n        Long bizId = req.getBizId();\n        ContractNoteNoticeDO record = contractNoteNoticeManager.view(req.getBizType(), bizId, req.getFundAccount());</parameter>\n",
+            "</invoke>"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        assert!(!recovered.incomplete_tool);
+        assert_eq!(recovered.visible_text(), "需要转换逻辑。\n");
+        let blocks = recovered.tool_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["name"], "Edit");
+        assert_eq!(blocks[0]["id"], "toolu_bdrk_01Sk9BiVWaZ4dK9GJZAX2dTV");
+        assert_eq!(
+            blocks[0]["input"]["old_string"],
+            "    @Override\n    public ContractNoteUrlRespVO view(ContractNoteNoticeReqVO req) {\n        ContractNoteNoticeDO record = contractNoteNoticeManager.view(req.getBizType(), req.getBizId(), req.getFundAccount());"
+        );
+    }
+
+    #[test]
+    fn antml_leak_with_unmatched_params_stays_text() {
+        // 参数与任何声明工具都对不上时不恢复，保持原文可见。
+        let text = concat!(
+            "{\"id\":\"toolu_bdrk_01Unknown\">\n",
+            "<parameter name=\"bogus\">value</parameter>\n",
+            "</invoke>"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        assert!(recovered.tool_blocks().is_empty());
+        assert!(!recovered.incomplete_tool);
+        assert_eq!(recovered.visible_text(), text);
+    }
+
+    #[test]
+    fn antml_leak_truncated_mid_params_marks_incomplete() {
+        // 流在参数值中间被截断：标记 incomplete_tool（stop_reason 落 max_tokens），不虚构工具块。
+        let text = concat!(
+            "前文。\n",
+            "{\"id\":\"toolu_bdrk_01Trunc\">\n",
+            "<parameter name=\"pattern\">initContr"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        assert!(recovered.incomplete_tool);
+        assert!(recovered.tool_blocks().is_empty());
+        assert_eq!(recovered.visible_text(), "前文。\n");
+    }
+
+    #[test]
+    fn recovers_antml_leak_with_invoke_name_opener() {
+        // 变体：开标签保留 <invoke name="X"> 形态，名字直接可用但仍需通过 schema 校验。
+        let text = concat!(
+            "<invoke name=\"Grep\">\n",
+            "<parameter name=\"pattern\">RequiredArgsConstructor</parameter>\n",
+            "</invoke>"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        let blocks = recovered.tool_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["name"], "Grep");
+        assert!(blocks[0]["id"].as_str().unwrap().starts_with("call_recovered_"));
+    }
+
+    #[test]
+    fn mixed_guard_recovers_antml_leak_streaming() {
+        // 流式路径：opener 从 `{` 处开始缓冲，finish 时整体恢复。
+        let mut guard = MixedTextToolGuard::with_spec(antml_recovery_spec());
+        assert_eq!(
+            guard.push("需要转换逻辑。\n{\"id\":\"toolu_bdrk_01Sk9BiVWaZ4dK9GJZAX2dTV\">"),
+            "需要转换逻辑。\n"
+        );
+        assert_eq!(
+            guard.push(concat!(
+                "\n<parameter name=\"file_path\">C:\\dev\\A.java</parameter>",
+                "\n<parameter name=\"old_string\">old</parameter>",
+                "\n<parameter name=\"new_string\">new</parameter>",
+                "\n</invoke>"
+            )),
+            ""
+        );
+        let finish = guard.finish();
+        assert!(!finish.incomplete_tool);
+        // 正文已在首段 push 时吐出，pending 里只剩调用块，finish 侧不再有可见文本
+        assert_eq!(finish.visible_text, "");
+        assert_eq!(finish.tool_blocks.len(), 1);
+        assert_eq!(finish.tool_blocks[0]["name"], "Edit");
+        assert_eq!(finish.tool_blocks[0]["input"]["new_string"], "new");
+    }
+
+    #[test]
+    fn mixed_guard_marks_truncated_antml_leak_incomplete() {
+        // 流式路径被截断：正文保留、标记 incomplete_tool，不把半截调用当正文泄漏出去。
+        let mut guard = MixedTextToolGuard::with_spec(antml_recovery_spec());
+        assert_eq!(guard.push("正文。\n{\"id\":\"toolu_bdrk_01Cut\">"), "正文。\n");
+        assert_eq!(guard.push("\n<parameter name=\"old_string\">half"), "");
+        let finish = guard.finish();
+        assert!(finish.incomplete_tool);
+        assert!(finish.tool_blocks.is_empty());
+    }
+
+    #[test]
+    fn guard_releases_prose_mentioning_invoke_tag() {
+        // 正文里只是提到 <invoke> 标签（无参数块结构）时必须原样放行。
+        let input = "可以参考 <invoke> 标签的用法，注意配对。完成。";
+        let mut guard = MixedTextToolGuard::new(true);
+        let mut visible = guard.push(input);
+        visible.push_str(&guard.finish().visible_text);
+        assert_eq!(visible, input);
     }
 }

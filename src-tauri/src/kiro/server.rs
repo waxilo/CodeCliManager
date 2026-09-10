@@ -561,6 +561,28 @@ pub fn start_proxy(mut config: ProxyConfig) -> Result<ProxyHandle, String> {
 
 // ============ 路由 ============
 
+/// 请求目标可能是 origin-form（`/v1/messages`）或 absolute-form
+/// （`http://127.0.0.1:39871/v1/messages`）。
+///
+/// 客户端配置了 HTTP 代理（`HTTP_PROXY`）时，reqwest 等库会按 RFC 9112 §3.2.2 发送
+/// absolute-form；同一规范要求服务端必须接受该形态。这里统一还原为 origin-form 再做路由匹配，
+/// 否则会因路径带 scheme/authority 而落到 404。
+fn normalize_request_target(url: &str) -> &str {
+    let bytes = url.as_bytes();
+    let scheme_len = [b"http://" as &[u8], b"https://"]
+        .into_iter()
+        .find(|scheme| bytes.len() > scheme.len() && bytes[..scheme.len()].eq_ignore_ascii_case(scheme))
+        .map(<[u8]>::len);
+    let Some(scheme_len) = scheme_len else {
+        return url;
+    };
+    match url[scheme_len..].find('/') {
+        Some(index) => &url[scheme_len + index..],
+        // 只有 authority、没有路径（如 "http://127.0.0.1:39871"）等价于根路径
+        None => "/",
+    }
+}
+
 fn handle_request(
     request: Request,
     config: &ProxyConfig,
@@ -598,7 +620,8 @@ fn handle_request(
 
     let method = request.method().clone();
     let url = request.url().to_string();
-    let path = url.split('?').next().unwrap_or(&url).to_string();
+    let target = normalize_request_target(&url);
+    let path = target.split('?').next().unwrap_or(target).to_string();
 
     if method == Method::Options {
         let mut response = Response::from_string("")
@@ -2198,6 +2221,28 @@ fn handle_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn normalize_request_target_accepts_origin_and_absolute_forms() {
+        // origin-form 原样返回
+        assert_eq!(normalize_request_target("/v1/messages"), "/v1/messages");
+        assert_eq!(normalize_request_target("/health?x=1"), "/health?x=1");
+        // absolute-form：客户端经 HTTP 代理发送时出现（RFC 9112 要求服务端接受）
+        assert_eq!(
+            normalize_request_target("http://127.0.0.1:39871/v1/messages"),
+            "/v1/messages"
+        );
+        assert_eq!(
+            normalize_request_target("https://example.com/health?x=1"),
+            "/health?x=1"
+        );
+        // scheme 大小写不敏感；只有 authority 时等价于根路径
+        assert_eq!(normalize_request_target("HTTP://127.0.0.1:1/"), "/");
+        assert_eq!(normalize_request_target("http://127.0.0.1:39871"), "/");
+        // 普通相对路径（非 absolute-form）不受影响
+        assert_eq!(normalize_request_target("v1/messages"), "v1/messages");
+        assert_eq!(normalize_request_target("httpnot://x/y"), "httpnot://x/y");
+    }
 
     #[test]
     fn concurrency_permit_enforces_limit_and_releases() {
