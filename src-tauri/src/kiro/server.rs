@@ -1042,31 +1042,34 @@ fn update_native_tool(
     }
 }
 
-/// 原生工具入参校验：直接合法就用原值；被 antml 残片污染时尝试重建后再校验。
-/// 返回 false 表示重建也救不回来，调用方按「不完整工具调用」处理。
-fn accept_native_tool_input(spec: &ToolRecoverySpec, tool: &mut Value) -> bool {
+/// 原生工具入参归一化：直接合法就用原值；被 antml 残片污染时尝试重建后再校验。
+///
+/// **不会因为「入参不合规」丢掉整轮**。本校验器对 schema 的理解永远可能落后于客户端
+/// （新关键字、新工具），而客户端自己会做权威校验：单条工具报错是可恢复的（模型能读到错误并
+/// 重试），整轮被替换成 "model returned an incomplete tool call" 则不可恢复。
+/// 因此这里只做「能修就修、修不了就原样放行」，结构性残缺（JSON 解析不出对象、上游没给 stop、
+/// 工具名未声明）仍在调用方按不完整工具处理。
+fn normalize_native_tool_input(spec: &ToolRecoverySpec, tool: &mut Value) {
     let name = tool.get("name").and_then(Value::as_str).unwrap_or("").to_string();
     let input = tool.get("input").cloned().unwrap_or(Value::Null);
     if spec.validates_input(&name, &input) {
-        return true;
+        return;
     }
     if !spec.analyzes_schema(&name) {
-        // 声明里的 schema 用了本校验器不认识的写法（元组/扩张关键字等）：无法断言入参非法。
-        // 放行给 Claude Code 自己校验 —— 客户端报错可恢复，好过把整轮工具调用换成错误文本。
+        // 声明里的 schema 用了本校验器不认识的写法（未知关键字等）：无法断言入参非法。
         diag_log(&format!("[tool-schema-unsupported] name={name}"));
-        return true;
+        return;
     }
-    let Some(repaired) = spec.repair_polluted_input(&name, &input) else {
-        diag_log(&format!(
-            "[tool-invalid] name={name} input={}",
-            truncate_for_log(&input.to_string(), 600)
-        ));
-        return false;
-    };
-    if let Some(object) = tool.as_object_mut() {
-        object.insert("input".to_string(), repaired);
+    if let Some(repaired) = spec.repair_polluted_input(&name, &input) {
+        if let Some(object) = tool.as_object_mut() {
+            object.insert("input".to_string(), repaired);
+        }
+        return;
     }
-    true
+    diag_log(&format!(
+        "[tool-input-unverified] name={name} input={}",
+        truncate_for_log(&input.to_string(), 600)
+    ));
 }
 
 fn emit_fallback_text_block_sse(
@@ -1169,11 +1172,8 @@ fn emit_buffered_kiro_events_to_anthropic_sse(
                 match update_native_tool(block, event.payload.get("input"), is_stop) {
                     NativeToolUpdate::Pending => {}
                     NativeToolUpdate::Complete(mut tool) => {
-                        if accept_native_tool_input(&recovery_spec, &mut tool) {
-                            completed_tools.insert(id.to_string(), tool);
-                        } else {
-                            invalid_tool = true;
-                        }
+                        normalize_native_tool_input(&recovery_spec, &mut tool);
+                        completed_tools.insert(id.to_string(), tool);
                     }
                     NativeToolUpdate::Invalid => invalid_tool = true,
                 }
@@ -1507,11 +1507,8 @@ fn pipe_kiro_body_to_anthropic_sse(
                     match update_native_tool(block, event.payload.get("input"), is_stop) {
                         NativeToolUpdate::Pending => {}
                         NativeToolUpdate::Complete(mut tool) => {
-                            if accept_native_tool_input(&recovery_spec, &mut tool) {
-                                completed_native_tools.insert(tool_id.clone(), tool);
-                            } else {
-                                invalid_native_tool = true;
-                            }
+                            normalize_native_tool_input(&recovery_spec, &mut tool);
+                            completed_native_tools.insert(tool_id.clone(), tool);
                         }
                         NativeToolUpdate::Invalid => invalid_native_tool = true,
                     }
@@ -1568,11 +1565,8 @@ fn pipe_kiro_body_to_anthropic_sse(
         if block.open {
             match block.finish() {
                 Some(mut tool) => {
-                    if accept_native_tool_input(&recovery_spec, &mut tool) {
-                        completed_native_tools.insert(tool_id.clone(), tool);
-                    } else {
-                        invalid_native_tool = true;
-                    }
+                    normalize_native_tool_input(&recovery_spec, &mut tool);
+                    completed_native_tools.insert(tool_id.clone(), tool);
                 }
                 None => invalid_native_tool = true,
             }
@@ -2791,6 +2785,90 @@ mod tests {
         assert!(!out.contains("incomplete tool call"), "schema 读不懂时应放行: {out}");
         assert!(out.contains("toolu_bdrk_opaque"));
         assert_eq!(first_tool_input(&out), json!({ "anything": 1 }));
+    }
+
+    #[test]
+    fn buffered_tool_events_pass_through_schema_violating_input() {
+        // 真实 case（2026-09-10 17:16，会话 75fd38f7）：入参对不上 schema 时，旧行为会把整轮
+        // 替换成 "model returned an incomplete tool call"。客户端自己会做权威校验 ——
+        // 单条工具报错可恢复（模型能读到错误并重试），整轮报废不可恢复，所以必须放行。
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Bash",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": { "command": { "type": "string" } },
+                    "additionalProperties": false
+                }
+            }]
+        }));
+        let wrong_key = json!({ "cmd": "ls" });
+        let events = vec![KiroEvent {
+            event_type: "toolUseEvent".to_string(),
+            payload: json!({
+                "toolUseId": "call_schema_bad",
+                "name": "Bash",
+                "input": wrong_key.clone(),
+                "stop": true
+            }),
+        }];
+        let mut out = String::new();
+        assert!(emit_buffered_kiro_events_to_anthropic_sse(
+            events,
+            spec,
+            |chunk| out.push_str(&chunk),
+        ));
+        assert!(!out.contains("incomplete tool call"), "不应整轮失败: {out}");
+        assert!(out.contains("call_schema_bad"));
+        assert!(out.contains("\"stop_reason\":\"tool_use\""));
+        assert_eq!(first_tool_input(&out), wrong_key);
+    }
+
+    #[test]
+    fn buffered_tool_events_accept_real_ask_user_question_schema() {
+        // 端到端复刻 16:07 / 17:16 的 AskUserQuestion 故障：用从本地 CLI 抓到的**真实** schema，
+        // 正常的入参必须原样透出成 tool_use，而不是整轮错误文本。
+        let tool: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/ask_user_question_tool.json"))
+                .unwrap();
+        let questions = json!({
+            "questions": [{
+                "header": "重构范围",
+                "multiSelect": false,
+                "options": [
+                    {
+                        "description": "只给 AssetAdminReqVO 补上 fundAccount 字段，让 queryStockAssetProfitForAdminV1 优先用传入的 fundAccount，不用 userId 反查；其余接口保持用 userId，不动。",
+                        "label": "仅这一个接口 query-stockAssetInfo/v1"
+                    },
+                    {
+                        "description": "把 accountCacheService.getAccountList(userId)/holdCacheService.getHoldList(userId) 这两个查询入口，从按 userId 改造成按 fundAccount 查询，所有调用方统一收敛到 fundAccount 语义。",
+                        "label": "整个 SecAssetFirstServiceV1 计算内核都改成主用 fundAccount"
+                    }
+                ],
+                "question": "这次重构的范围选哪个？"
+            }]
+        });
+        let spec = ToolRecoverySpec::from_body(&json!({ "tools": [tool] }));
+        let events = vec![KiroEvent {
+            event_type: "toolUseEvent".to_string(),
+            payload: json!({
+                "toolUseId": "toolu_bdrk_ask_real",
+                "name": "AskUserQuestion",
+                "input": questions.clone(),
+                "stop": true
+            }),
+        }];
+        let mut out = String::new();
+        assert!(emit_buffered_kiro_events_to_anthropic_sse(
+            events,
+            spec,
+            |chunk| out.push_str(&chunk),
+        ));
+        assert!(!out.contains("incomplete tool call"), "不应整轮失败: {out}");
+        assert!(out.contains("toolu_bdrk_ask_real"));
+        assert!(out.contains("\"stop_reason\":\"tool_use\""));
+        assert_eq!(first_tool_input(&out), questions);
     }
 
     #[test]

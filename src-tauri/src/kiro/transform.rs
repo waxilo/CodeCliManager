@@ -202,17 +202,28 @@ fn schema_shape_valid(schema: &Value, depth: usize) -> bool {
         _ => return false,
     };
     const SUPPORTED: &[&str] = &[
-        "$defs", "$id", "$ref", "$schema", "additionalItems", "additionalProperties", "allOf",
-        "anyOf", "const", "default", "definitions", "deprecated", "description", "enum",
+        "$comment", "$defs", "$id", "$ref", "$schema", "additionalItems",
+        "additionalProperties", "allOf", "anyOf", "const", "contentEncoding",
+        "contentMediaType", "default", "definitions", "deprecated", "description", "enum",
         "examples", "exclusiveMaximum", "exclusiveMinimum", "format", "items", "maxItems",
         "maxLength", "maxProperties", "maximum", "minItems", "minLength", "minProperties",
         "minimum", "multipleOf", "not", "oneOf", "pattern", "prefixItems", "properties",
-        "readOnly", "required", "title", "type", "uniqueItems", "writeOnly",
+        "propertyNames", "readOnly", "required", "title", "type", "uniqueItems", "writeOnly",
     ];
     if object.keys().any(|key| !SUPPORTED.contains(&key.as_str())) {
         return false;
     }
-    for key in ["$id", "$schema", "description", "format", "pattern", "title"] {
+    for key in [
+        "$comment",
+        "$id",
+        "$schema",
+        "contentEncoding",
+        "contentMediaType",
+        "description",
+        "format",
+        "pattern",
+        "title",
+    ] {
         if object.get(key).is_some_and(|value| !value.is_string()) {
             return false;
         }
@@ -282,7 +293,7 @@ fn schema_shape_valid(schema: &Value, depth: usize) -> bool {
             return false;
         }
     }
-    for key in ["additionalItems", "additionalProperties", "not"] {
+    for key in ["additionalItems", "additionalProperties", "not", "propertyNames"] {
         if object
             .get(key)
             .is_some_and(|schema| !schema_shape_valid(schema, depth + 1))
@@ -496,6 +507,14 @@ fn schema_accepts_inner(schema: &Value, value: &Value, root: &Value, depth: usiz
                     continue;
                 }
                 if !schema_accepts_inner(additional, property, root, depth + 1) {
+                    return false;
+                }
+            }
+        }
+        // `propertyNames` 约束键名本身；键在 JSON 里恒为字符串，按字符串校验即可。
+        if let Some(name_schema) = object.get("propertyNames") {
+            for key in map.keys() {
+                if !schema_accepts_inner(name_schema, &Value::String(key.clone()), root, depth + 1) {
                     return false;
                 }
             }
@@ -3716,5 +3735,87 @@ mod tests {
         let polluted = json!({ "-B": 3, "pattern": { "nested": true } });
         let spec = polluted_spec();
         assert!(spec.repair_polluted_input("Grep", &polluted).is_none());
+    }
+
+    #[test]
+    fn real_ask_user_question_schema_is_analyzable() {
+        // 真实 schema（Claude Code 2.1.252，2026-09-10 从本地 CLI 抓取，见 tests/fixtures）。
+        // 它的 answers / annotations 用了 `propertyNames`：旧校验器把该关键字当未知项，
+        // 于是整份 schema 被判「不可分析」——入参永远校验不了、input_fingerprint 恒为 None，
+        // antml 镜像去重也随之失效。这里锁定 propertyNames 已被正常支持。
+        let tool: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/ask_user_question_tool.json"))
+                .unwrap();
+        let spec = ToolRecoverySpec::from_body(&json!({ "tools": [tool] }));
+        assert!(spec.analyzes_schema("AskUserQuestion"));
+
+        let ok = json!({
+            "questions": [{
+                "header": "重构范围",
+                "multiSelect": false,
+                "options": [
+                    {
+                        "description": "只给 AssetAdminReqVO 补上 fundAccount 字段，让 queryStockAssetProfitForAdminV1 优先用传入的 fundAccount，不用 userId 反查。",
+                        "label": "仅这一个接口 query-stockAssetInfo/v1"
+                    },
+                    {
+                        "description": "把 accountCacheService.getAccountList(userId) 从按 userId 改造成按 fundAccount 查询，所有调用方统一收敛到 fundAccount 语义。",
+                        "label": "整个 SecAssetFirstServiceV1 计算内核都改成主用 fundAccount"
+                    }
+                ],
+                "question": "这次重构的范围选哪个？"
+            }]
+        });
+        assert!(spec.validates_input("AskUserQuestion", &ok));
+        assert!(spec.input_fingerprint(&json!({ "name": "AskUserQuestion", "input": ok })).is_some());
+
+        // 缺必填的 question → 确实非法（此时走「放行给客户端校验」兜底，而不是整轮失败）
+        let missing_question = json!({
+            "questions": [{
+                "header": "重构范围",
+                "multiSelect": false,
+                "options": [
+                    { "description": "a", "label": "A" },
+                    { "description": "b", "label": "B" }
+                ]
+            }]
+        });
+        assert!(!spec.validates_input("AskUserQuestion", &missing_question));
+
+        // 选项缺 description → 也非法
+        let missing_description = json!({
+            "questions": [{
+                "header": "重构范围",
+                "multiSelect": false,
+                "options": [
+                    { "description": "a", "label": "A" },
+                    { "label": "B" }
+                ],
+                "question": "选哪个？"
+            }]
+        });
+        assert!(!spec.validates_input("AskUserQuestion", &missing_description));
+    }
+
+    #[test]
+    fn property_names_constraint_is_enforced() {
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Mapped",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "bag": {
+                            "type": "object",
+                            "propertyNames": { "pattern": "^[a-z]+$" },
+                            "additionalProperties": { "type": "string" }
+                        }
+                    }
+                }
+            }]
+        }));
+        assert!(spec.analyzes_schema("Mapped"));
+        assert!(spec.validates_input("Mapped", &json!({ "bag": { "abc": "1" } })));
+        assert!(!spec.validates_input("Mapped", &json!({ "bag": { "ABC": "1" } })));
     }
 }
