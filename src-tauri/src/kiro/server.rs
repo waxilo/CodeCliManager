@@ -1042,6 +1042,27 @@ fn update_native_tool(
     }
 }
 
+/// 原生工具入参校验：直接合法就用原值；被 antml 残片污染时尝试重建后再校验。
+/// 返回 false 表示重建也救不回来，调用方按「不完整工具调用」处理。
+fn accept_native_tool_input(spec: &ToolRecoverySpec, tool: &mut Value) -> bool {
+    let name = tool.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+    let input = tool.get("input").cloned().unwrap_or(Value::Null);
+    if spec.validates_input(&name, &input) {
+        return true;
+    }
+    let Some(repaired) = spec.repair_polluted_input(&name, &input) else {
+        diag_log(&format!(
+            "[tool-invalid] name={name} input={}",
+            truncate_for_log(&input.to_string(), 600)
+        ));
+        return false;
+    };
+    if let Some(object) = tool.as_object_mut() {
+        object.insert("input".to_string(), repaired);
+    }
+    true
+}
+
 fn emit_fallback_text_block_sse(
     block_counter: &mut usize,
     text: &str,
@@ -1141,9 +1162,8 @@ fn emit_buffered_kiro_events_to_anthropic_sse(
                 let is_stop = event.payload.get("stop").and_then(Value::as_bool).unwrap_or(false);
                 match update_native_tool(block, event.payload.get("input"), is_stop) {
                     NativeToolUpdate::Pending => {}
-                    NativeToolUpdate::Complete(tool) => {
-                        let input = tool.get("input").unwrap_or(&Value::Null);
-                        if recovery_spec.validates_input(name, input) {
+                    NativeToolUpdate::Complete(mut tool) => {
+                        if accept_native_tool_input(&recovery_spec, &mut tool) {
                             completed_tools.insert(id.to_string(), tool);
                         } else {
                             invalid_tool = true;
@@ -1480,10 +1500,8 @@ fn pipe_kiro_body_to_anthropic_sse(
                     }
                     match update_native_tool(block, event.payload.get("input"), is_stop) {
                         NativeToolUpdate::Pending => {}
-                        NativeToolUpdate::Complete(tool) => {
-                            let tool_name = tool.get("name").and_then(Value::as_str).unwrap_or("");
-                            let input = tool.get("input").unwrap_or(&Value::Null);
-                            if recovery_spec.validates_input(tool_name, input) {
+                        NativeToolUpdate::Complete(mut tool) => {
+                            if accept_native_tool_input(&recovery_spec, &mut tool) {
                                 completed_native_tools.insert(tool_id.clone(), tool);
                             } else {
                                 invalid_native_tool = true;
@@ -1543,10 +1561,8 @@ fn pipe_kiro_body_to_anthropic_sse(
         };
         if block.open {
             match block.finish() {
-                Some(tool) => {
-                    let name = tool.get("name").and_then(Value::as_str).unwrap_or("");
-                    let input = tool.get("input").unwrap_or(&Value::Null);
-                    if recovery_spec.validates_input(name, input) {
+                Some(mut tool) => {
+                    if accept_native_tool_input(&recovery_spec, &mut tool) {
                         completed_native_tools.insert(tool_id.clone(), tool);
                     } else {
                         invalid_native_tool = true;
@@ -2593,9 +2609,79 @@ mod tests {
         assert!(out.contains("\"stop_reason\":\"end_turn\""));
     }
 
+    /// 从 SSE 输出里取出首个 input_json_delta 的 partial_json 并解码成 JSON。
+    fn first_tool_input(out: &str) -> Value {
+        let mark = "\"partial_json\":\"";
+        let start = out.find(mark).expect("应存在 input_json_delta") + mark.len();
+        let bytes = out.as_bytes();
+        let mut end = start;
+        while end < bytes.len() {
+            match bytes[end] {
+                b'\\' => end += 2,
+                b'"' => break,
+                _ => end += 1,
+            }
+        }
+        let unescaped: String =
+            serde_json::from_str(&format!("\"{}\"", &out[start..end])).expect("partial_json 应可解码");
+        serde_json::from_str(&unescaped).expect("入参应是合法 JSON")
+    }
+
     #[test]
-    fn metadata_tool_use_without_complete_tool_downgrades_to_end_turn() {
-        let metadata_reason = map_kiro_stop_reason("TOOL_USE");
+    fn buffered_tool_events_repair_antml_polluted_input() {
+        // 真实样本（会话 791513c9 第 374 行）：上游把 antml 参数序列半解析成
+        // `{"-B":"3\">\n<parameter name=\"-n\">true", ...}`，`-B` 该是 number 却成了 string。
+        // 旧行为整轮报 "incomplete tool call"；现在应按 schema 重建出干净入参。
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Grep",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["pattern"],
+                    "properties": {
+                        "pattern": { "type": "string" },
+                        "output_mode": { "type": "string" },
+                        "-B": { "type": "number" },
+                        "-n": { "type": "boolean" }
+                    }
+                }
+            }]
+        }));
+        let events = vec![KiroEvent {
+            event_type: "toolUseEvent".to_string(),
+            payload: json!({
+                "toolUseId": "toolu_bdrk_polluted",
+                "name": "Grep",
+                "input": {
+                    "-B": "3\">\n<parameter name=\"-n\">true",
+                    "output_mode": "content",
+                    "pattern": "RequiredArgsConstructor\""
+                },
+                "stop": true
+            }),
+        }];
+        let mut out = String::new();
+        assert!(emit_buffered_kiro_events_to_anthropic_sse(
+            events,
+            spec,
+            |chunk| out.push_str(&chunk),
+        ));
+        assert!(!out.contains("incomplete tool call"), "不应再整轮失败: {out}");
+        assert!(out.contains("toolu_bdrk_polluted"));
+        assert!(out.contains("\"stop_reason\":\"tool_use\""));
+        assert_eq!(
+            first_tool_input(&out),
+            json!({
+                "-B": 3,
+                "-n": true,
+                "output_mode": "content",
+                "pattern": "RequiredArgsConstructor"
+            })
+        );
+    }
+
+    #[test]
+    fn metadata_tool_use_without_complete_tool_downgrades_to_end_turn() {        let metadata_reason = map_kiro_stop_reason("TOOL_USE");
         assert_eq!(
             normalize_stop_reason(&metadata_reason, false, false),
             "end_turn"

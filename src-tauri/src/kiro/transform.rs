@@ -97,6 +97,85 @@ impl ToolRecoverySpec {
             || (Self::is_generated_recovery_id(recovered)
                 && self.input_fingerprint(recovered) == self.input_fingerprint(native))
     }
+
+    /// 原生 toolUseEvent 的入参被 antml 残片污染时，尝试拆回真实参数并按 schema 重建。
+    ///
+    /// 上游把 `<parameter name="k">v</parameter>` 序列半解析成 JSON 对象时，若开标签也退化
+    /// （`{"-B":"3">` 这类），紧邻的参数名会被吞进前一个值里，形成
+    /// `{"-B":"3\">\n<parameter name=\"-n\">true", "output_mode":"content", ...}`。
+    /// 这种值类型对不上 schema（`-B` 该是 number 却是 string），会整轮被判为不完整工具。
+    /// 返回 None 表示「没有污染」或「重建后仍不合法」，调用方按原逻辑判定失败。
+    pub fn repair_polluted_input(&self, name: &str, input: &Value) -> Option<Value> {
+        let schema = self.schemas.get(name)?;
+        let map = input.as_object()?;
+        if !map
+            .values()
+            .any(|value| value.as_str().is_some_and(|text| text.contains(ANTML_PARAM_MARK)))
+        {
+            return None;
+        }
+        let mut params: Vec<(String, String)> = Vec::new();
+        for (key, value) in map {
+            // 非字符串值不参与重建：污染只出现在字符串值里，保持保守避免误改结构化入参。
+            let text = value.as_str()?;
+            if text.contains(ANTML_PARAM_MARK) {
+                let (head, extra) = split_polluted_value(text);
+                params.push((key.clone(), head));
+                params.extend(extra);
+            } else {
+                // 退化形态把值也按 JSON 引号包了一层（`"..ServiceImpl"`），末尾会多一个 `"`
+                params.push((key.clone(), clean_polluted_scalar(text)));
+            }
+        }
+        let rebuilt = antml_input_for_schema(&params, schema);
+        self.validates_input(name, &rebuilt).then_some(rebuilt)
+    }
+}
+
+/// 退化开标签后紧跟的参数标签前缀；出现在值里即视为污染。
+const ANTML_PARAM_MARK: &str = "<parameter name=\"";
+
+/// 把 `3">\n<parameter name="-n">true` 这类残片切成 (真值, 后续参数对)。
+/// 输入已按 `ANTML_PARAM_MARK` 全局切分，因此每段都是 `键">值`，值到下一段之前为止。
+fn split_polluted_value(value: &str) -> (String, Vec<(String, String)>) {
+    let mut chunks = value.split(ANTML_PARAM_MARK);
+    let head = clean_polluted_scalar(chunks.next().unwrap_or(""));
+    let mut pairs = Vec::new();
+    for chunk in chunks {
+        let Some(quote) = chunk.find('"') else {
+            continue;
+        };
+        let key = chunk[..quote].trim();
+        if key.is_empty() {
+            continue;
+        }
+        let rest = chunk[quote + 1..].trim_start();
+        let after = rest.strip_prefix('>').unwrap_or(rest);
+        pairs.push((key.to_string(), clean_polluted_scalar(after)));
+    }
+    (head, pairs)
+}
+
+/// 去掉退化形态的收尾痕迹：`</parameter>` / `</invoke>`，以及被 JSON 引号包过的值末尾多出的 `">`、`"`。
+/// 仅对判定为污染的值调用，正常入参不会走到这里。
+fn clean_polluted_scalar(raw: &str) -> String {
+    let mut text = raw.trim();
+    for tag in ["</parameter>", "</invoke>"] {
+        if let Some(rest) = text.strip_suffix(tag) {
+            text = rest.trim_end();
+        }
+    }
+    // `3">`：先去掉闭合的尖括号，再剥掉它前面那层引号
+    if let Some(rest) = text.strip_suffix('>') {
+        let rest = rest.trim_end();
+        if let Some(inner) = rest.strip_suffix('"') {
+            text = inner;
+        }
+    }
+    if let Some(rest) = text.strip_suffix('"') {
+        text = rest;
+    }
+    text.trim_end().to_string()
 }
 
 fn schema_accepts(schema: &Value, value: &Value) -> bool {
@@ -3255,5 +3334,97 @@ mod tests {
         let mut visible = guard.push(input);
         visible.push_str(&guard.finish().visible_text);
         assert_eq!(visible, input);
+    }
+
+    // ============ 原生 toolUseEvent 入参的 antml 残片污染修复 ============
+
+    /// 真实请求里的 Grep schema 形态：`-B` 是 number，`-n` 是 boolean，
+    /// 因此污染值（string）会被 JSON Schema 校验拒绝。
+    fn polluted_spec() -> ToolRecoverySpec {
+        ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Grep",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["pattern"],
+                    "properties": {
+                        "pattern": { "type": "string" },
+                        "path": { "type": "string" },
+                        "output_mode": { "type": "string" },
+                        "-B": { "type": "number" },
+                        "-n": { "type": "boolean" }
+                    }
+                }
+            }]
+        }))
+    }
+
+    #[test]
+    fn repairs_polluted_native_input_from_real_sample() {
+        // 会话 791513c9 第 374 行的原始入参（2026-08-18 真实样本）
+        let polluted = json!({
+            "-B": "3\">\n<parameter name=\"-n\">true",
+            "output_mode": "content",
+            "pattern": "RequiredArgsConstructor\""
+        });
+        let spec = polluted_spec();
+        assert!(!spec.validates_input("Grep", &polluted), "污染入参本就不该通过校验");
+        let repaired = spec.repair_polluted_input("Grep", &polluted).expect("应能重建");
+        assert_eq!(
+            repaired,
+            json!({
+                "pattern": "RequiredArgsConstructor",
+                "output_mode": "content",
+                "-B": 3,
+                "-n": true
+            })
+        );
+        assert!(spec.validates_input("Grep", &repaired));
+    }
+
+    #[test]
+    fn repairs_polluted_native_input_sample_two() {
+        // 会话 791513c9 第 601 行：这次被吞进去的是 output_mode
+        let polluted = json!({
+            "-B": "3\">\n<parameter name=\"output_mode\">content",
+            "pattern": "class AssetAdminServiceImpl|class AssetNdAdminServiceImpl\""
+        });
+        let spec = polluted_spec();
+        assert!(!spec.validates_input("Grep", &polluted));
+        let repaired = spec.repair_polluted_input("Grep", &polluted).expect("应能重建");
+        assert_eq!(
+            repaired,
+            json!({
+                "-B": 3,
+                "output_mode": "content",
+                "pattern": "class AssetAdminServiceImpl|class AssetNdAdminServiceImpl"
+            })
+        );
+        assert!(spec.validates_input("Grep", &repaired));
+    }
+
+    #[test]
+    fn clean_native_input_is_left_alone() {
+        // 合法入参不进入重建路径，避免误改正常参数（含结尾引号的命令等）。
+        let clean = json!({ "pattern": "foo", "-B": 3, "-n": true });
+        let spec = polluted_spec();
+        assert!(spec.validates_input("Grep", &clean));
+        assert!(spec.repair_polluted_input("Grep", &clean).is_none());
+    }
+
+    #[test]
+    fn polluted_input_without_required_field_stays_invalid() {
+        // 重建后仍缺必填的 pattern：保守放弃，交给「不完整工具调用」处理。
+        let polluted = json!({ "-B": "3\">\n<parameter name=\"-n\">true" });
+        let spec = polluted_spec();
+        assert!(spec.repair_polluted_input("Grep", &polluted).is_none());
+    }
+
+    #[test]
+    fn polluted_input_with_non_string_value_is_not_rebuilt() {
+        // 结构化（非字符串）值不参与重建，避免把嵌套对象改坏。
+        let polluted = json!({ "-B": 3, "pattern": { "nested": true } });
+        let spec = polluted_spec();
+        assert!(spec.repair_polluted_input("Grep", &polluted).is_none());
     }
 }
