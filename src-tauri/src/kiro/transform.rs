@@ -127,7 +127,7 @@ impl ToolRecoverySpec {
                 params.push((key.clone(), clean_polluted_scalar(text)));
             }
         }
-        let rebuilt = antml_input_for_schema(&params, schema);
+        let rebuilt = antml_input_for_schema(&alias_params_for_schema(&params, schema), schema);
         self.validates_input(name, &rebuilt).then_some(rebuilt)
     }
 }
@@ -1057,6 +1057,58 @@ fn parse_antml_params(text: &str, mut pos: usize) -> Option<(Vec<(String, String
     }
 }
 
+/// 把参数键映射到 schema 属性名，兼容模型常见的非规范写法（如 `path` → `file_path`）。
+///
+/// 退化的 antml 开标签连 `<invoke name="X">` 一起丢掉时，工具名和参数键都可能被模型写歪，
+/// 例如 Read 的 `file_path` 被写成 `path`，导致任何声明工具都缺必填字段、校验全灭，
+/// 结果整块按正文泄漏。这里只在能**唯一**确定目标属性时改写，有歧义就返回 None。
+fn resolve_param_key<'a>(key: &str, properties: &'a Map<String, Value>) -> Option<&'a String> {
+    if let Some((name, _)) = properties.get_key_value(key) {
+        return Some(name);
+    }
+    // 忽略大小写与下划线后的同形匹配：`filePath` / `filepath` → `file_path`
+    let normalize = |text: &str| -> String {
+        text.chars()
+            .filter(|ch| *ch != '_')
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let normalized = normalize(key);
+    let by_shape = properties
+        .keys()
+        .filter(|name| normalize(name) == normalized)
+        .collect::<Vec<_>>();
+    if by_shape.len() == 1 {
+        return Some(by_shape[0]);
+    }
+    // 下划线后缀匹配：`path` → `file_path`（要求属性侧独占该后缀）
+    let suffix = format!("_{key}");
+    let by_suffix = properties
+        .keys()
+        .filter(|name| name.ends_with(&suffix))
+        .collect::<Vec<_>>();
+    if by_suffix.len() == 1 {
+        return Some(by_suffix[0]);
+    }
+    None
+}
+
+/// 按目标工具 schema 规范化参数键；命中不唯一或 schema 无属性表时原样保留。
+fn alias_params_for_schema(params: &[(String, String)], schema: &Value) -> Vec<(String, String)> {
+    let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
+        return params.to_vec();
+    };
+    params
+        .iter()
+        .map(|(key, value)| {
+            let resolved = resolve_param_key(key, properties)
+                .cloned()
+                .unwrap_or_else(|| key.clone());
+            (resolved, value.clone())
+        })
+        .collect()
+}
+
 /// 按候选工具 schema 的属性类型对参数值做强转（antml 值全是文本，"true"/"3" 需还原为 bool/number）。
 fn antml_input_for_schema(params: &[(String, String)], schema: &Value) -> Value {
     let properties = schema.get("properties").and_then(Value::as_object);
@@ -1090,7 +1142,8 @@ fn infer_antml_tool(
 ) -> Option<(String, Value)> {
     if let Some(name) = explicit_name.map(str::trim).filter(|n| !n.is_empty()) {
         let schema = spec.schemas.get(name)?;
-        let input = antml_input_for_schema(params, schema);
+        let aliased = alias_params_for_schema(params, schema);
+        let input = antml_input_for_schema(&aliased, schema);
         return spec
             .validates_input(name, &input)
             .then(|| (name.to_string(), input));
@@ -1103,12 +1156,13 @@ fn infer_antml_tool(
     let mut best: Option<(usize, String, Value)> = None;
     for name in names {
         let schema = &spec.schemas[name];
-        let input = antml_input_for_schema(params, schema);
+        let aliased = alias_params_for_schema(params, schema);
+        let input = antml_input_for_schema(&aliased, schema);
         if !spec.validates_input(name, &input) {
             continue;
         }
         let properties = schema.get("properties").and_then(Value::as_object);
-        let score = params
+        let score = aliased
             .iter()
             .filter(|(key, _)| properties.is_some_and(|p| p.contains_key(key.as_str())))
             .count();
@@ -3178,7 +3232,11 @@ mod tests {
                     "input_schema": {
                         "type": "object",
                         "required": ["file_path"],
-                        "properties": { "file_path": { "type": "string" } }
+                        "properties": {
+                            "file_path": { "type": "string" },
+                            "offset": { "type": "number" },
+                            "limit": { "type": "number" }
+                        }
                     }
                 },
                 {
@@ -3244,6 +3302,47 @@ mod tests {
             blocks[0]["input"]["old_string"],
             "    @Override\n    public ContractNoteUrlRespVO view(ContractNoteNoticeReqVO req) {\n        ContractNoteNoticeDO record = contractNoteNoticeManager.view(req.getBizType(), req.getBizId(), req.getFundAccount());"
         );
+    }
+
+    #[test]
+    fn recovers_antml_leak_when_param_key_is_non_canonical() {
+        // 真实泄漏样本（2026-09-10 14:32，会话 e84d073c，v0.2.83 上仍泄漏）：
+        // 模型把 Read 的 file_path 写成 path，任何声明工具都缺必填字段、校验全灭，
+        // 整块按正文泄漏（界面把 <parameter …> 当 HTML 吞掉，只显示裸值）。
+        let prose = "`StockAccessRecordNewDO`本身没有`tenantId`字段，需要看`AbstractContractNoteStrategy.process()`里`account`对象（`AccountBasicInfoDO`）是否带这个信息，或者需要额外查询。\n";
+        let text = concat!(
+            "`StockAccessRecordNewDO`本身没有`tenantId`字段，需要看`AbstractContractNoteStrategy.process()`里`account`对象（`AccountBasicInfoDO`）是否带这个信息，或者需要额外查询。\n",
+            "{\"id\":\"toolu_bdrk_01LqAvJmr5aJoNSb1JhVJz7C\">\n",
+            "<parameter name=\"path\">C:\\Users\\sloan.wang\\Documents\\Code\\Java\\ND\\broker-trade\\src\\main\\java\\com\\yxzq\\user\\account\\generate\\pojo\\AccountBasicInfoDO.java</parameter>\n",
+            "<parameter name=\"limit\">40</parameter>\n",
+            "</invoke>"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        assert!(!recovered.incomplete_tool);
+        assert_eq!(recovered.visible_text(), prose);
+        let blocks = recovered.tool_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["name"], "Read");
+        assert_eq!(blocks[0]["id"], "toolu_bdrk_01LqAvJmr5aJoNSb1JhVJz7C");
+        assert_eq!(
+            blocks[0]["input"]["file_path"],
+            "C:\\Users\\sloan.wang\\Documents\\Code\\Java\\ND\\broker-trade\\src\\main\\java\\com\\yxzq\\user\\account\\generate\\pojo\\AccountBasicInfoDO.java"
+        );
+        assert_eq!(blocks[0]["input"]["limit"], json!(40));
+    }
+
+    #[test]
+    fn antml_param_key_alias_requires_unique_target() {
+        // `string` 同时是 Edit 的 old_string/new_string 后缀 → 有歧义，不得改写，保持原文。
+        let text = concat!(
+            "{\"id\":\"toolu_bdrk_01Ambiguous\">\n",
+            "<parameter name=\"string\">x</parameter>\n",
+            "</invoke>"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        assert!(recovered.tool_blocks().is_empty());
+        assert!(!recovered.incomplete_tool);
+        assert_eq!(recovered.visible_text(), text);
     }
 
     #[test]
