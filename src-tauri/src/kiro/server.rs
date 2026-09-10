@@ -1050,6 +1050,12 @@ fn accept_native_tool_input(spec: &ToolRecoverySpec, tool: &mut Value) -> bool {
     if spec.validates_input(&name, &input) {
         return true;
     }
+    if !spec.analyzes_schema(&name) {
+        // 声明里的 schema 用了本校验器不认识的写法（元组/扩张关键字等）：无法断言入参非法。
+        // 放行给 Claude Code 自己校验 —— 客户端报错可恢复，好过把整轮工具调用换成错误文本。
+        diag_log(&format!("[tool-schema-unsupported] name={name}"));
+        return true;
+    }
     let Some(repaired) = spec.repair_polluted_input(&name, &input) else {
         diag_log(&format!(
             "[tool-invalid] name={name} input={}",
@@ -2678,6 +2684,113 @@ mod tests {
                 "pattern": "RequiredArgsConstructor"
             })
         );
+    }
+
+    #[test]
+    fn buffered_tool_events_accept_tuple_schema_and_tolerate_opaque_schema() {
+        // 真实样本（2026-09-10 16:07，会话 75fd38f7）：AskUserQuestion 的 schema 是元组形态
+        // （draft-7 序列化成数组形式的 `items`），旧校验器读不懂 → 任何入参都被判非法 →
+        // 整轮被替换成 "model returned an incomplete tool call"。
+        let questions = json!({
+            "questions": [{
+                "header": "实现方式",
+                "multiSelect": false,
+                "question": "采用哪种实现方式？",
+                "options": [
+                    { "description": "只用来发现子账户列表", "label": "复用现有 fundAccount→userId 查询（推荐）" },
+                    { "description": "内部直接初始化全部数据", "label": "新增 initAllDataBatchByFundAccountOnly" }
+                ]
+            }]
+        });
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "AskUserQuestion",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["questions"],
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "items": [{
+                                "type": "object",
+                                "required": ["question", "header", "options", "multiSelect"],
+                                "properties": {
+                                    "question": { "type": "string" },
+                                    "header": { "type": "string" },
+                                    "multiSelect": { "type": "boolean" },
+                                    "options": {
+                                        "type": "array",
+                                        "items": [
+                                            {
+                                                "type": "object",
+                                                "required": ["label", "description"],
+                                                "properties": {
+                                                    "label": { "type": "string" },
+                                                    "description": { "type": "string" }
+                                                }
+                                            },
+                                            {
+                                                "type": "object",
+                                                "required": ["label", "description"],
+                                                "properties": {
+                                                    "label": { "type": "string" },
+                                                    "description": { "type": "string" }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }]
+        }));
+        let events = vec![KiroEvent {
+            event_type: "toolUseEvent".to_string(),
+            payload: json!({
+                "toolUseId": "toolu_bdrk_ask",
+                "name": "AskUserQuestion",
+                "input": questions.clone(),
+                "stop": true
+            }),
+        }];
+        let mut out = String::new();
+        assert!(emit_buffered_kiro_events_to_anthropic_sse(
+            events,
+            spec,
+            |chunk| out.push_str(&chunk),
+        ));
+        assert!(!out.contains("incomplete tool call"), "不应整轮失败: {out}");
+        assert!(out.contains("toolu_bdrk_ask"));
+        assert!(out.contains("\"stop_reason\":\"tool_use\""));
+        assert_eq!(first_tool_input(&out), questions);
+
+        // 兜底：schema 带本校验器不认识的写法时，也不能把整轮打成错误（放行给客户端校验）
+        let opaque = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Opaque",
+                "input_schema": { "type": "object", "x-vendor-extension": true }
+            }]
+        }));
+        let events = vec![KiroEvent {
+            event_type: "toolUseEvent".to_string(),
+            payload: json!({
+                "toolUseId": "toolu_bdrk_opaque",
+                "name": "Opaque",
+                "input": { "anything": 1 },
+                "stop": true
+            }),
+        }];
+        let mut out = String::new();
+        assert!(emit_buffered_kiro_events_to_anthropic_sse(
+            events,
+            opaque,
+            |chunk| out.push_str(&chunk),
+        ));
+        assert!(!out.contains("incomplete tool call"), "schema 读不懂时应放行: {out}");
+        assert!(out.contains("toolu_bdrk_opaque"));
+        assert_eq!(first_tool_input(&out), json!({ "anything": 1 }));
     }
 
     #[test]

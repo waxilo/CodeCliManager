@@ -67,6 +67,16 @@ impl ToolRecoverySpec {
             && self.schemas.get(name).is_some_and(|schema| schema_accepts(schema, input))
     }
 
+    /// 请求声明的 schema 是否能被本校验器分析。
+    ///
+    /// 含未知关键字（如 OpenAPI 扩展）或非法形态时返回 false —— 此时 `validates_input` 的
+    /// 否定结果**不代表入参非法**，只是我们读不懂这份 schema，不能据此丢弃工具调用。
+    pub fn analyzes_schema(&self, name: &str) -> bool {
+        self.schemas
+            .get(name)
+            .is_some_and(|schema| schema_shape_valid(schema, 0))
+    }
+
     fn looks_like_protocol(&self, text: &str) -> bool {
         text.contains("\"tool_use\"")
             || (text.contains("\"id\"") && text.contains("\"input\""))
@@ -192,12 +202,12 @@ fn schema_shape_valid(schema: &Value, depth: usize) -> bool {
         _ => return false,
     };
     const SUPPORTED: &[&str] = &[
-        "$defs", "$id", "$ref", "$schema", "additionalProperties", "allOf", "anyOf",
-        "const", "default", "deprecated", "description", "enum", "examples", "exclusiveMaximum",
-        "exclusiveMinimum", "format", "items", "maxItems", "maxLength", "maxProperties",
-        "maximum", "minItems", "minLength", "minProperties", "minimum", "multipleOf", "not",
-        "oneOf", "pattern", "properties", "readOnly", "required", "title", "type", "uniqueItems",
-        "writeOnly",
+        "$defs", "$id", "$ref", "$schema", "additionalItems", "additionalProperties", "allOf",
+        "anyOf", "const", "default", "definitions", "deprecated", "description", "enum",
+        "examples", "exclusiveMaximum", "exclusiveMinimum", "format", "items", "maxItems",
+        "maxLength", "maxProperties", "maximum", "minItems", "minLength", "minProperties",
+        "minimum", "multipleOf", "not", "oneOf", "pattern", "prefixItems", "properties",
+        "readOnly", "required", "title", "type", "uniqueItems", "writeOnly",
     ];
     if object.keys().any(|key| !SUPPORTED.contains(&key.as_str())) {
         return false;
@@ -272,7 +282,7 @@ fn schema_shape_valid(schema: &Value, depth: usize) -> bool {
             return false;
         }
     }
-    for key in ["additionalProperties", "items", "not"] {
+    for key in ["additionalItems", "additionalProperties", "not"] {
         if object
             .get(key)
             .is_some_and(|schema| !schema_shape_valid(schema, depth + 1))
@@ -280,7 +290,17 @@ fn schema_shape_valid(schema: &Value, depth: usize) -> bool {
             return false;
         }
     }
-    for key in ["$defs", "properties"] {
+    // 元组：draft-7 用数组形式的 `items`，draft-2020-12 用 `prefixItems`；两种形态都可能是
+    // 单个 schema 或 schema 数组。Claude Code 的 AskUserQuestion 等工具正是元组 schema。
+    for key in ["items", "prefixItems"] {
+        if object
+            .get(key)
+            .is_some_and(|value| !schema_or_tuple_shape_valid(value, depth + 1))
+        {
+            return false;
+        }
+    }
+    for key in ["$defs", "definitions", "properties"] {
         if object.get(key).is_some_and(|value| {
             value.as_object().is_none_or(|schemas| {
                 schemas.values().any(|schema| !schema_shape_valid(schema, depth + 1))
@@ -293,6 +313,14 @@ fn schema_shape_valid(schema: &Value, depth: usize) -> bool {
         .get("pattern")
         .and_then(Value::as_str)
         .is_none_or(|pattern| regex::Regex::new(pattern).is_ok())
+}
+
+/// `items` / `prefixItems`：单个 schema 或 schema 数组（元组校验）都合法。
+fn schema_or_tuple_shape_valid(value: &Value, depth: usize) -> bool {
+    match value {
+        Value::Array(schemas) => schemas.iter().all(|schema| schema_shape_valid(schema, depth)),
+        other => schema_shape_valid(other, depth),
+    }
 }
 
 fn is_json_schema_type(kind: &str) -> bool {
@@ -486,12 +514,42 @@ fn schema_accepts_inner(schema: &Value, value: &Value, root: &Value, depth: usiz
                 return false;
             }
         }
-        if let Some(items) = object.get("items") {
-            if array
-                .iter()
-                .any(|item| !schema_accepts_inner(items, item, root, depth + 1))
-            {
-                return false;
+        // 逐位约束：draft-7 的 `items` 数组与 draft-2020-12 的 `prefixItems` 都按位置校验；
+        // 超出元组长度的元素由 `additionalItems`（draft-7）或对象形式的 `items` 约束，
+        // 两者都缺省时按 draft-7 语义放行剩余元素。
+        let positional: Option<Vec<&Value>> = match (
+            object.get("prefixItems").and_then(Value::as_array),
+            object.get("items").and_then(Value::as_array),
+        ) {
+            (Some(prefix), Some(tuple)) => Some(prefix.iter().chain(tuple.iter()).collect()),
+            (Some(prefix), None) => Some(prefix.iter().collect()),
+            (None, Some(tuple)) => Some(tuple.iter().collect()),
+            (None, None) => None,
+        };
+        match positional {
+            Some(schemas) => {
+                let rest = object.get("additionalItems").or_else(|| {
+                    object
+                        .get("items")
+                        .filter(|schema| schema.is_object() || schema.is_boolean())
+                });
+                for (index, item) in array.iter().enumerate() {
+                    if let Some(schema) = schemas.get(index).copied().or(rest) {
+                        if !schema_accepts_inner(schema, item, root, depth + 1) {
+                            return false;
+                        }
+                    }
+                }
+            }
+            None => {
+                if let Some(items) = object.get("items") {
+                    if array
+                        .iter()
+                        .any(|item| !schema_accepts_inner(items, item, root, depth + 1))
+                    {
+                        return false;
+                    }
+                }
             }
         }
     }
@@ -2567,6 +2625,139 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    #[test]
+    fn tuple_items_schema_accepts_and_rejects_inputs() {
+        // Claude Code 的 AskUserQuestion 是元组 schema，draft-7 下序列化成**数组形式的 `items`**。
+        // 旧校验器把数组形式 items 当非法形态，于是该工具任何入参都通不过校验，
+        // 整轮工具调用被打成 "model returned an incomplete tool call"。
+        let item = json!({
+            "type": "object",
+            "required": ["label", "description"],
+            "properties": {
+                "label": { "type": "string" },
+                "description": { "type": "string" }
+            }
+        });
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "AskUserQuestion",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["questions"],
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "minItems": 1,
+                            "maxItems": 4,
+                            "items": [{
+                                "type": "object",
+                                "required": ["question", "header", "options", "multiSelect"],
+                                "properties": {
+                                    "question": { "type": "string" },
+                                    "header": { "type": "string" },
+                                    "multiSelect": { "type": "boolean" },
+                                    "options": {
+                                        "type": "array",
+                                        "minItems": 2,
+                                        "maxItems": 4,
+                                        "items": [item.clone(), item.clone()]
+                                    }
+                                }
+                            }]
+                        }
+                    }
+                }
+            }]
+        }));
+        assert!(spec.analyzes_schema("AskUserQuestion"));
+        // 真实样本形态（2026-09-10 16:07，会话 75fd38f7）：入参完整合法，必须通过
+        let ok = json!({
+            "questions": [{
+                "header": "实现方式",
+                "multiSelect": false,
+                "question": "采用哪种实现方式？",
+                "options": [
+                    { "description": "只用来发现子账户列表", "label": "复用现有 fundAccount→userId 查询（推荐）" },
+                    { "description": "内部直接初始化全部数据", "label": "新增 initAllDataBatchByFundAccountOnly" }
+                ]
+            }]
+        });
+        assert!(spec.validates_input("AskUserQuestion", &ok));
+        // 第二个选项缺 description → 仍应判非法
+        let bad = json!({
+            "questions": [{
+                "header": "实现方式",
+                "multiSelect": false,
+                "question": "采用哪种实现方式？",
+                "options": [
+                    { "description": "复用现有查询", "label": "A" },
+                    { "label": "B" }
+                ]
+            }]
+        });
+        assert!(!spec.validates_input("AskUserQuestion", &bad));
+    }
+
+    #[test]
+    fn prefix_items_and_draft7_definitions_are_supported() {
+        // draft-2020-12 的 prefixItems 与 draft-7 的 definitions（zod 在 draft-7 下用它替代 $defs）
+        // 同样不能被当成未知关键字整份否决。
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [
+                {
+                    "name": "Pair",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["pair"],
+                        "properties": {
+                            "pair": {
+                                "type": "array",
+                                "prefixItems": [
+                                    { "type": "string" },
+                                    { "type": "number" }
+                                ]
+                            }
+                        }
+                    }
+                },
+                {
+                    "name": "Run",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["step"],
+                        "properties": { "step": { "$ref": "#/definitions/Step" } },
+                        "definitions": {
+                            "Step": {
+                                "type": "object",
+                                "required": ["command"],
+                                "properties": { "command": { "type": "string" } }
+                            }
+                        }
+                    }
+                }
+            ]
+        }));
+        assert!(spec.validates_input("Pair", &json!({ "pair": ["a", 1] })));
+        assert!(!spec.validates_input("Pair", &json!({ "pair": [1, "a"] })));
+        assert!(spec.validates_input("Run", &json!({ "step": { "command": "ls" } })));
+        assert!(!spec.validates_input("Run", &json!({ "step": { "command": 1 } })));
+    }
+
+    #[test]
+    fn unknown_keyword_schema_is_not_analyzable() {
+        // 读不懂的 schema 不得用来断言入参非法：server 侧据此放行给客户端校验。
+        let spec = ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Weird",
+                "input_schema": { "type": "object", "x-vendor-extension": true }
+            }]
+        }));
+        assert!(!spec.analyzes_schema("Weird"));
+        assert!(!spec.validates_input("Weird", &json!({})));
+        // 未声明的工具同样不可分析（放行由上游的 declares 检查负责）
+        assert!(!spec.analyzes_schema("Nope"));
     }
 
     #[test]
