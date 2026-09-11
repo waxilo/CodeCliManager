@@ -8,7 +8,7 @@ use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Manager, State};
 
-use crate::claude::runtime::apply_cli_runtime_env;
+use crate::claude::runtime::{apply_cli_runtime_env, npm_prefix_bin_dir, npm_prefix_lib_dir};
 use crate::claude::updater::{
     apply_create_no_window, run_update_child_with_progress, CLAUDE_INSTALL_TIMEOUT,
 };
@@ -68,13 +68,18 @@ fn is_http_ready(port: u16) -> bool {
     }
 }
 
-/// 候选的 CLI 可执行目录（npm / dsh 常见安装位置；与 apply_cli_runtime_env 对齐）
+/// 候选的 CLI 可执行目录（npm / dsh 常见安装位置；与 apply_cli_runtime_env / extended_path_for_cli 对齐）。
+///
+/// 所有目录都由 `npm_prefix_bin_dir()` 按平台统一推导，不再为 Windows 写死特例分支：
+/// - Unix：`<prefix>/bin`
+/// - Windows：`<prefix>` 根（npm --prefix 把 shim 直接放到 `<prefix>/<bin>.cmd`）
 fn cli_bin_dirs() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut dirs: Vec<PathBuf> = vec![
-        home.join(".local/bin"),
-        home.join(".npm-global/bin"),
-        home.join("bin"),
+        // 用户目录安装优先（CCM 固定装到 ~/.local）
+        npm_prefix_bin_dir(&home.join(".local")),
+        npm_prefix_bin_dir(&home.join(".npm-global")),
+        npm_prefix_bin_dir(&home.join("bin")),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
     ];
@@ -191,16 +196,17 @@ fn build_quick_status() -> DshStatusData {
 /// 候选的 npm 全局包目录（node_modules 根）。不依赖 npm 命令——
 /// dsh/npm 是 node shebang 脚本，GUI 环境 PATH 不含 node 时（nvm/volta/fnm 用户）直接失败。
 ///
-/// 顺序与 cli_bin_dirs() / extended_path_for_cli() 保持一致：用户目录安装优先。
-/// ccm 的 dsh_install 固定装到 ~/.local，dsh_start 也优先解析 ~/.local/bin/dsh；
-/// 若系统目录（/usr/local 等）里还有旧版残留，必须先读用户目录的新版，
-/// 否则会出现「更新成功但已装版本永远显示旧版、一直提示发现新版本」。
+/// 所有目录都由 `npm_prefix_lib_dir()` 按平台统一推导（Unix `<prefix>/lib/node_modules`，
+/// Windows `<prefix>/node_modules`）。顺序与 cli_bin_dirs() / extended_path_for_cli() 一致：
+/// 用户目录安装（~/.local）优先，否则系统目录（/usr/local、AppData/Roaming/npm 等）里的旧版残留
+/// 会盖过 CCM 装到 ~/.local 的新版，导致「更新成功却一直显示旧版本」。
 fn npm_global_node_modules_candidates() -> Vec<PathBuf> {
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut candidates: Vec<PathBuf> = vec![
-        home.join(".local/lib/node_modules"),
-        home.join(".npm-global/lib/node_modules"),
-        home.join("bin/node_modules"),
+        // 用户目录安装优先（CCM 固定装到 ~/.local）
+        npm_prefix_lib_dir(&home.join(".local")),
+        npm_prefix_lib_dir(&home.join(".npm-global")),
+        npm_prefix_lib_dir(&home.join("bin")),
         PathBuf::from("/opt/homebrew/lib/node_modules"),
         PathBuf::from("/usr/local/lib/node_modules"),
     ];
@@ -211,20 +217,20 @@ fn npm_global_node_modules_candidates() -> Vec<PathBuf> {
             .join("npm/node_modules"),
         dirs::data_dir().unwrap_or_default().join("npm/node_modules"),
     ]);
-    // nvm 用户：~/.nvm/versions/node/<v*/lib/node_modules（版本目录逐个展开）
+    // nvm 用户：~/.nvm/versions/node/<v*>/lib/node_modules（版本目录逐个展开）
     if let Ok(versions_dir) = fs::read_dir(home.join(".nvm/versions/node")) {
         for entry in versions_dir.flatten() {
             if entry.path().is_dir() {
-                candidates.push(entry.path().join("lib/node_modules"));
+                candidates.push(npm_prefix_lib_dir(&entry.path()));
             }
         }
     }
-    // fnm：~/.local/share/fnm/node-versions/<v*/installation/lib/node_modules
+    // fnm：~/.local/share/fnm/node-versions/<v*>/installation/lib/node_modules
     if let Ok(versions_dir) = fs::read_dir(home.join(".local/share/fnm/node-versions")) {
         for entry in versions_dir.flatten() {
             let p = entry.path();
             if p.is_dir() {
-                candidates.push(p.join("installation/lib/node_modules"));
+                candidates.push(npm_prefix_lib_dir(&p.join("installation")));
             }
         }
     }
@@ -338,14 +344,19 @@ fn filter_npm_summary_output(output: &str) -> String {
         .join("\n")
 }
 
+/// CCM 固定的 DSH 全局安装前缀（== dsh_install 的 --prefix）。
+/// 安装、版本探测、启动解析三处都从这里取，避免前缀被改后各函数不一致。
+fn dsh_install_prefix() -> PathBuf {
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".local")
+}
+
 async fn run_npm_dsh_install(app: &AppHandle) -> Result<String, String> {
     let npm = resolve_executable("npm")
         .ok_or_else(|| "未找到 npm：请先安装 Node.js/npm（或确认其已在 PATH 中）".to_string())?;
-    let home = dirs::home_dir().ok_or_else(|| "无法定位用户主目录".to_string())?;
     // 用户目录前缀全局安装（-g --prefix ~/.local）：
     // - 保持「全局安装」语义（系统级 npm 全局，所有终端可用）
     // - 装在用户可写目录，无需 sudo（/usr/local 不可写时不会失败）
-    let prefix = home.join(".local");
+    let prefix = dsh_install_prefix();
     let mut cmd = Command::new(npm);
     apply_cli_runtime_env(&mut cmd);
     // Windows：抑制 npm.cmd 弹出的控制台黑框
@@ -375,7 +386,13 @@ async fn run_npm_dsh_install(app: &AppHandle) -> Result<String, String> {
     // 例如 node-domexception 弃用提示会让人误以为安装报错。
     let combined = filter_npm_summary_output(&raw_combined);
     if status.success() {
-        let bin = prefix.join("bin").join("dsh");
+        // 安装位置即 dsh_install_prefix 下的二进制 shim：
+        // Windows 为 <prefix>/dsh.cmd，Unix 为 <prefix>/bin/dsh（由 npm_prefix_bin_dir 表达）。
+        let bin = npm_prefix_bin_dir(&prefix).join(if cfg!(target_os = "windows") {
+            "dsh.cmd"
+        } else {
+            "dsh"
+        });
         let hint = if combined.is_empty() {
             "DSH 已安装/更新".to_string()
         } else {
@@ -702,12 +719,12 @@ mod tests {
         // 检测必须先命中用户目录的新版，否则「更新成功但一直显示旧版本」。
         let candidates = npm_global_node_modules_candidates();
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let user_local = home.join(".local/lib/node_modules");
+        let user_local = npm_prefix_lib_dir(&home.join(".local"));
         let system_local = PathBuf::from("/usr/local/lib/node_modules");
         let user_pos = candidates.iter().position(|p| *p == user_local);
         let system_pos = candidates.iter().position(|p| *p == system_local);
         if let (Some(u), Some(s)) = (user_pos, system_pos) {
-            assert!(u < s, "~/.local/lib/node_modules 必须在 /usr/local 之前：{candidates:?}");
+            assert!(u < s, "用户目录候选必须在 /usr/local 之前：{candidates:?}");
         } else {
             assert!(user_pos.is_some(), "缺少用户目录候选: {candidates:?}");
         }
@@ -721,5 +738,40 @@ mod tests {
         assert!(!filtered.contains("npm notice"));
         assert!(filtered.contains("changed 455 packages in 7s"));
         assert!(filtered.contains("added 1 package"));
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn cli_bin_dirs_windows_prefers_local_root() {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let bin_dirs = cli_bin_dirs();
+        assert_eq!(
+            bin_dirs.first(),
+            Some(&home.join(".local")),
+            "Windows 下 cli_bin_dirs 首项应为 ~/.local，以命中 npm --prefix 生成的 dsh.cmd: {bin_dirs:?}"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn npm_global_candidates_windows_prefers_local_node_modules() {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let candidates = npm_global_node_modules_candidates();
+        let local_pos = candidates
+            .iter()
+            .position(|p| *p == home.join(".local/node_modules"));
+        let roaming_pos = candidates
+            .iter()
+            .position(|p| *p == home.join("AppData/Roaming/npm/node_modules"));
+        assert!(
+            local_pos.is_some(),
+            "Windows 下必须包含 ~/.local/node_modules: {candidates:?}"
+        );
+        if let Some(r) = roaming_pos {
+            assert!(
+                local_pos.unwrap() < r,
+                "~/.local/node_modules 必须在 AppData/Roaming/npm/node_modules 之前，避免读到旧版: {candidates:?}"
+            );
+        }
     }
 }

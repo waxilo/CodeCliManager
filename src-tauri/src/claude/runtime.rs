@@ -1,8 +1,30 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::updater::is_user_home_install;
+
+/// 某 npm 全局 prefix 下的「可执行文件目录」：
+/// - Unix：`<prefix>/bin`
+/// - Windows：`<prefix>` 本身（npm `--prefix <p>` 直接把 shim 生成到 `<p>/<bin>.cmd`，不进 `bin/`）
+pub(crate) fn npm_prefix_bin_dir(prefix: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        prefix.to_path_buf()
+    } else {
+        prefix.join("bin")
+    }
+}
+
+/// 某 npm 全局 prefix 下的「node_modules 根目录」：
+/// - Unix：`<prefix>/lib/node_modules`
+/// - Windows：`<prefix>/node_modules`
+pub(crate) fn npm_prefix_lib_dir(prefix: &Path) -> PathBuf {
+    if cfg!(target_os = "windows") {
+        prefix.join("node_modules")
+    } else {
+        prefix.join("lib/node_modules")
+    }
+}
 
 /// macOS GUI 应用从 Finder 启动时 PATH 很窄，通常找不到 /usr/local/bin/claude。
 pub(crate) fn extended_path_for_cli() -> String {
@@ -15,9 +37,10 @@ pub(crate) fn extended_path_for_cli() -> String {
 
     let mut segments: Vec<PathBuf> = if cfg!(target_os = "windows") {
         vec![
+            // 用户目录优先：ccm 的 dsh_install 固定装到 ~/.local
+            npm_prefix_bin_dir(&home.join(".local")),
             // npm 全局路径（Windows）
             home.join("AppData").join("Roaming").join("npm"),
-            home.join(".local").join("bin"),
             home.join("AppData").join("Local").join("Programs").join("nodejs"),
             PathBuf::from("C:\\Program Files\\nodejs"),
         ]
