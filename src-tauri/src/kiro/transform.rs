@@ -1049,6 +1049,15 @@ fn recover_extra_brace(
 // 即 `<invoke name="X">` 开标签退化为只带 toolu_ id 的伪 JSON，工具名完全丢失；
 // 参数值可跨多行，以 `</invoke>` 收尾。工具名按请求声明的工具 schema 推断：
 // 必填字段齐全且属性命中数最高者当选，推断不出则保持原文不恢复。
+//
+// 混血变体（2026-09-11，同一会话 e84d073c，v0.2.86 上仍泄漏）：
+//   {"id":"toolu_bdrk_01SUR4Nx6iQb1B4yQVv2FJnk","input":{"file_path":"C:\\…Strategy.java","new_string">
+//   …new_string 原文…
+//   }</parameter>
+//   <parameter name="old_string">…</parameter>
+//   </invoke>
+// 即退化发生在 JSON input 写到一半：已写对的键值对保持 JSON 形态（值带 `\\` 转义），
+// 最后一个键退化为 `"key">`、值落在开标签之后的原文里，之后又是标准 antml 参数块。
 
 enum AntmlRecovery {
     Complete { end: usize, block: Value },
@@ -1072,9 +1081,23 @@ fn read_quoted(text: &str, start: usize) -> Option<(String, usize)> {
     None
 }
 
-/// 解析开标签，返回 (开标签结束偏移, toolu id, 显式工具名)。
-/// 两种形态：`{"id":"toolu_xxx">`（id 必须以 toolu_ 开头）与 `<invoke name="X">`。
-fn parse_antml_opener(text: &str, start: usize) -> Option<(usize, Option<String>, Option<String>)> {
+struct AntmlOpener {
+    end: usize,
+    id: Option<String>,
+    name: Option<String>,
+    /// 开标签内已写完整的参数（混血形态 input 里的 JSON 键值对，值按 JSON 转义解码）。
+    inline_params: Vec<(String, String)>,
+    /// 混血形态的悬空键：只写了 `"key">` 就退化，值在开标签之后的原文里直到 `</parameter>`。
+    dangling_key: Option<String>,
+}
+
+/// 解析开标签。三种形态：
+/// 1. `{"id":"toolu_xxx">`（id 必须以 toolu_ 开头）
+/// 2. `<invoke name="X">`
+/// 3. `{"id":"toolu_xxx","input":{"k":"v",…,"dangling">` —— 退化发生在 JSON input 写到一半：
+///    已写对的键值对保持 JSON 形态（字符串值带转义，需解码），最后一个键退化成 `"key">`，
+///    其值落在开标签之后的原文里（见 recover_antml_invoke）。
+fn parse_antml_opener(text: &str, start: usize) -> Option<AntmlOpener> {
     let rest = &text[start..];
     if rest.starts_with("<invoke") {
         let mut pos = start + "<invoke".len();
@@ -1087,7 +1110,13 @@ fn parse_antml_opener(text: &str, start: usize) -> Option<(usize, Option<String>
             pos = skip_whitespace(text, pos);
         }
         if text.as_bytes().get(pos) == Some(&b'>') {
-            return Some((pos + 1, None, name.filter(|n| !n.trim().is_empty())));
+            return Some(AntmlOpener {
+                end: pos + 1,
+                id: None,
+                name: name.filter(|n| !n.trim().is_empty()),
+                inline_params: Vec::new(),
+                dangling_key: None,
+            });
         }
         return None;
     }
@@ -1100,7 +1129,68 @@ fn parse_antml_opener(text: &str, start: usize) -> Option<(usize, Option<String>
         }
         pos = skip_whitespace(text, next);
         if text.as_bytes().get(pos) == Some(&b'>') {
-            return Some((pos + 1, Some(id), None));
+            return Some(AntmlOpener {
+                end: pos + 1,
+                id: Some(id),
+                name: None,
+                inline_params: Vec::new(),
+                dangling_key: None,
+            });
+        }
+        // 混血形态：严格按观测结构解析，任何不符都回落到 None（JSON 探测路径接管）。
+        if text.as_bytes().get(pos) != Some(&b',') {
+            return None;
+        }
+        pos = skip_whitespace(text, pos + 1);
+        if !text[pos..].starts_with("\"input\"") {
+            return None;
+        }
+        pos = skip_whitespace(text, pos + "\"input\"".len());
+        if text.as_bytes().get(pos) != Some(&b':') {
+            return None;
+        }
+        pos = skip_whitespace(text, pos + 1);
+        if text.as_bytes().get(pos) != Some(&b'{') {
+            return None;
+        }
+        pos += 1;
+        let mut inline_params = Vec::new();
+        loop {
+            pos = skip_whitespace(text, pos);
+            if text.as_bytes().get(pos) != Some(&b'"') {
+                return None;
+            }
+            let (key, key_next) = read_quoted(text, pos)?;
+            pos = skip_whitespace(text, key_next);
+            match text.as_bytes().get(pos) {
+                Some(b':') => {
+                    pos = skip_whitespace(text, pos + 1);
+                    if text.as_bytes().get(pos) != Some(&b'"') {
+                        return None;
+                    }
+                    let (_, value_next) = read_quoted(text, pos)?;
+                    // 值是 JSON 字符串字面量（如 Windows 路径的 `\\`），需按 JSON 解码成真实值
+                    let Ok(decoded) = serde_json::from_str::<String>(&text[pos..value_next]) else {
+                        return None;
+                    };
+                    inline_params.push((key, decoded));
+                    pos = skip_whitespace(text, value_next);
+                    if text.as_bytes().get(pos) != Some(&b',') {
+                        return None;
+                    }
+                    pos = skip_whitespace(text, pos + 1);
+                }
+                Some(b'>') => {
+                    return Some(AntmlOpener {
+                        end: pos + 1,
+                        id: Some(id),
+                        name: None,
+                        inline_params,
+                        dangling_key: Some(key),
+                    });
+                }
+                _ => return None,
+            }
         }
     }
     None
@@ -1256,15 +1346,39 @@ fn recover_antml_invoke(text: &str, start: usize, spec: &ToolRecoverySpec, base:
     if spec.is_empty() {
         return AntmlRecovery::None;
     }
-    let Some((pos, id, name)) = parse_antml_opener(text, start) else {
+    let Some(opener) = parse_antml_opener(text, start) else {
         return AntmlRecovery::None;
     };
+    let mut pos = opener.end;
+    let mut params = opener.inline_params;
+    if let Some(key) = &opener.dangling_key {
+        // 悬空键的值是开标签之后的原文（可跨多行），直到第一个 </parameter>
+        match text[pos..].find("</parameter>") {
+            Some(relative) => {
+                let mut value = &text[pos..pos + relative];
+                // 值按惯例写在开标签的下一行，剥掉一个前导换行（\r\n 或 \n）
+                if let Some(stripped) = value.strip_prefix("\r\n") {
+                    value = stripped;
+                } else if let Some(stripped) = value.strip_prefix('\n') {
+                    value = stripped;
+                }
+                params.push((key.clone(), value.to_string()));
+                pos += relative + "</parameter>".len();
+            }
+            None => {
+                // 值尚未流完（截断）：按不完整工具缓冲，不把半截调用当正文泄漏
+                return AntmlRecovery::Incomplete;
+            }
+        }
+    }
     match parse_antml_params(text, pos) {
-        Some((params, end)) => {
-            let Some((tool_name, input)) = infer_antml_tool(&params, name.as_deref(), spec) else {
+        Some((more, end)) => {
+            params.extend(more);
+            let Some((tool_name, input)) = infer_antml_tool(&params, opener.name.as_deref(), spec) else {
                 return AntmlRecovery::None;
             };
-            let block_id = id
+            let block_id = opener
+                .id
                 .as_deref()
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -3584,6 +3698,70 @@ mod tests {
     }
 
     #[test]
+    fn recovers_antml_leak_with_hybrid_json_input_opener() {
+        // 真实泄漏样本（2026-09-11，会话 e84d073c，v0.2.86 上仍泄漏）：
+        // 开标签退化发生在 JSON input 写到一半 —— file_path 保持 JSON 键值对（值带 \\ 转义），
+        // new_string 退化为 "new_string"> + 裸值原文，之后又是标准 antml 参数块，</invoke> 收尾。
+        let prose = "之前的Edit调用没有正常执行（被打断），import已经加好了但方法体没改。现在补上。\n";
+        let text = concat!(
+            "之前的Edit调用没有正常执行（被打断），import已经加好了但方法体没改。现在补上。\n",
+            "{\"id\":\"toolu_bdrk_01SUR4Nx6iQb1B4yQVv2FJnk\",\"input\":{\"file_path\":\"C:\\\\Users\\\\dev\\\\broker-trade\\\\StockAccessContractNoteStrategy.java\",\"new_string\">\n",
+            "    @Override\n    protected void processAfterSuccess() {\n        sendMessage();\n    }\n}</parameter>\n",
+            "<parameter name=\"old_string\">    @Override\n    protected void processAfterSuccess() {\n    }</parameter>\n",
+            "</invoke>"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        assert!(!recovered.incomplete_tool);
+        assert_eq!(recovered.visible_text(), prose);
+        let blocks = recovered.tool_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["name"], "Edit");
+        assert_eq!(blocks[0]["id"], "toolu_bdrk_01SUR4Nx6iQb1B4yQVv2FJnk");
+        // JSON 转义值必须解码成真实路径（单反斜杠）
+        assert_eq!(
+            blocks[0]["input"]["file_path"],
+            "C:\\Users\\dev\\broker-trade\\StockAccessContractNoteStrategy.java"
+        );
+        assert_eq!(
+            blocks[0]["input"]["new_string"],
+            "    @Override\n    protected void processAfterSuccess() {\n        sendMessage();\n    }\n}"
+        );
+        assert_eq!(
+            blocks[0]["input"]["old_string"],
+            "    @Override\n    protected void processAfterSuccess() {\n    }"
+        );
+    }
+
+    #[test]
+    fn hybrid_antml_leak_truncated_mid_dangling_value_marks_incomplete() {
+        // 混血形态在悬空键的值流到一半被截断：缓冲等待，不泄漏半截调用。
+        let text = concat!(
+            "前文。\n",
+            "{\"id\":\"toolu_bdrk_01Hybrid\",\"input\":{\"file_path\":\"C:\\\\dev\\\\A.java\",\"new_string\">\n",
+            "    @Override\n    public void partial() {"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        assert!(recovered.incomplete_tool);
+        assert!(recovered.tool_blocks().is_empty());
+        assert_eq!(recovered.visible_text(), "前文。\n");
+    }
+
+    #[test]
+    fn complete_json_tool_use_with_input_object_still_uses_json_path() {
+        // 完整的 JSON tool_use 对象（括号配平、无退化 `>`）不归 antml 路径管，仍走 JSON 探测。
+        let text = concat!(
+            "前文。\n",
+            "{\"type\":\"tool_use\",\"id\":\"toolu_bdrk_01Native\",\"name\":\"Edit\",\"input\":{\"file_path\":\"C:\\\\dev\\\\A.java\",\"old_string\":\"a\",\"new_string\":\"b\"}}\n"
+        );
+        let recovered = recover_tool_calls_from_text(text, &antml_recovery_spec());
+        assert!(!recovered.incomplete_tool);
+        let blocks = recovered.tool_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["name"], "Edit");
+        assert_eq!(blocks[0]["id"], "toolu_bdrk_01Native");
+    }
+
+    #[test]
     fn recovers_antml_leak_with_invoke_name_opener() {
         // 变体：开标签保留 <invoke name="X"> 形态，名字直接可用但仍需通过 schema 校验。
         let text = concat!(
@@ -3622,6 +3800,37 @@ mod tests {
         assert_eq!(finish.tool_blocks.len(), 1);
         assert_eq!(finish.tool_blocks[0]["name"], "Edit");
         assert_eq!(finish.tool_blocks[0]["input"]["new_string"], "new");
+    }
+
+    #[test]
+    fn mixed_guard_recovers_hybrid_json_input_leak_streaming() {
+        // 流式路径的混血形态：悬空键的值跨多个 chunk 到达，finish 时整体恢复。
+        let mut guard = MixedTextToolGuard::with_spec(antml_recovery_spec());
+        assert_eq!(
+            guard.push(
+                "现在补上。\n{\"id\":\"toolu_bdrk_01Hybrid\",\"input\":{\"file_path\":\"C:\\\\dev\\\\A.java\",\"new_string\">"
+            ),
+            "现在补上。\n"
+        );
+        assert_eq!(guard.push("\n    @Override\n    void go() {\n        work();\n    }\n}"), "");
+        assert_eq!(
+            guard.push(concat!(
+                "</parameter>\n",
+                "<parameter name=\"old_string\">    @Override\n    void go() {\n    }</parameter>\n",
+                "</invoke>"
+            )),
+            ""
+        );
+        let finish = guard.finish();
+        assert!(!finish.incomplete_tool);
+        assert_eq!(finish.visible_text, "");
+        assert_eq!(finish.tool_blocks.len(), 1);
+        assert_eq!(finish.tool_blocks[0]["name"], "Edit");
+        assert_eq!(finish.tool_blocks[0]["input"]["file_path"], "C:\\dev\\A.java");
+        assert_eq!(
+            finish.tool_blocks[0]["input"]["new_string"],
+            "    @Override\n    void go() {\n        work();\n    }\n}"
+        );
     }
 
     #[test]
