@@ -1,17 +1,25 @@
 import { appState } from '../../state';
 import * as api from '../../api';
 import { shellApi } from '../../app/shell/api';
-import { showToast } from '../../ui';
-import type { FetchedModel, KiroModelsStateData, KiroStatusData } from '../../types';
+import { showConfirmDialog, showToast } from '../../ui';
+import type {
+  FetchedModel,
+  KiroAccessCopyKind,
+  KiroAccessData,
+  KiroModelsStateData,
+  KiroStatusData,
+} from '../../types';
 import { formatKiroExpiry, formatKiroUsageText } from '../api-config/balance-helpers';
 import { getActiveChatModel, loadChatModelOptions, updateChatModelPicker } from '../chat/model-picker';
 import { openDisplayModelsPicker } from '../models/display-models-picker';
 import { scheduleMainBalanceBar } from '../status-bar';
 
 let cachedKiroModels: KiroModelsStateData | null = null;
+let cachedKiroAccess: KiroAccessData | null = null;
 let kiroStatusRequest: Promise<KiroStatusData> | null = null;
 let kiroModelsRequest: Promise<void> | null = null;
 let kiroUsageRequest: Promise<void> | null = null;
+let kiroAccessRequest: Promise<void> | null = null;
 let kiroUsageTimer: number | null = null;
 /** 模块级互斥：防止连点启动/停止与 render 重绘后按钮重新可点导致并发 invoke */
 let isTogglingKiroProxy = false;
@@ -152,6 +160,126 @@ export async function refreshKiroModels(): Promise<void> {
     await kiroModelsRequest;
   } finally {
     kiroModelsRequest = null;
+  }
+}
+
+/** 复制按钮对应的文案（用于 toast 说明复制了什么） */
+const KIRO_COPY_TITLES: Record<KiroAccessCopyKind, string> = {
+  base_url: '接口地址',
+  api_key: '代理密钥',
+  model: '模型名称',
+  env: '环境变量配置',
+  json: 'settings.json 片段',
+};
+
+/** 只有运行中才有可复制内容；密钥缺失时禁用依赖密钥的复制项 */
+function isKiroCopyEnabled(access: KiroAccessData | null, kind: string): boolean {
+  if (!access?.running) return false;
+  if (kind === 'api_key' || kind === 'env' || kind === 'json') return access.hasApiKey;
+  return true;
+}
+
+function syncKiroCopyButtons(access: KiroAccessData | null) {
+  const card = document.querySelector('#kiro-card');
+  if (!card) return;
+  card.querySelectorAll<HTMLButtonElement>('[data-kiro-copy]').forEach((btn) => {
+    btn.disabled = !isKiroCopyEnabled(access, btn.dataset.kiroCopy || '');
+  });
+}
+
+/** 把后端 kiro_proxy_access 结果渲染到「外部接入」区块 */
+export function renderKiroAccess(access: KiroAccessData | null) {
+  cachedKiroAccess = access;
+  const card = document.querySelector('#kiro-card');
+  if (!card) return;
+
+  const running = Boolean(access?.running);
+  const baseEl = card.querySelector('[data-kiro-access-base]') as HTMLElement | null;
+  const keyEl = card.querySelector('[data-kiro-access-key]') as HTMLElement | null;
+  const modelEl = card.querySelector('[data-kiro-access-model]') as HTMLElement | null;
+  const descEl = card.querySelector('[data-kiro-access-desc]') as HTMLElement | null;
+
+  if (baseEl) {
+    baseEl.textContent = running && access?.baseUrl ? access.baseUrl : '未运行';
+    baseEl.title = running && access?.baseUrl ? access.baseUrl : '';
+  }
+  if (keyEl) {
+    keyEl.textContent = access?.apiKeyMasked || (running ? '获取中…' : '启动代理后生成');
+  }
+  if (modelEl) {
+    const model = (access?.model || '').trim();
+    modelEl.textContent = model || '—';
+    modelEl.title = model;
+  }
+  if (descEl) {
+    descEl.textContent = running
+      ? '复制下面字段到其它 Agent，即可复用本机 Kiro 额度'
+      : '启动代理后即可复制到其它 Agent 复用本机额度';
+  }
+
+  syncKiroCopyButtons(access);
+}
+
+export async function refreshKiroAccess(): Promise<void> {
+  if (kiroAccessRequest) return kiroAccessRequest;
+
+  kiroAccessRequest = (async () => {
+    try {
+      const access = await api.kiroProxyAccess();
+      if (appState.isKiroViewActive) renderKiroAccess(access);
+    } catch (e) {
+      console.error('获取 Kiro 接入信息失败:', e);
+      if (appState.isKiroViewActive) renderKiroAccess(null);
+    }
+  })();
+
+  try {
+    await kiroAccessRequest;
+  } finally {
+    kiroAccessRequest = null;
+  }
+}
+
+/** 复制接入信息：明文密钥由后端直接写入系统剪贴板，不经过渲染层 */
+export async function copyKiroAccess(kind: KiroAccessCopyKind): Promise<void> {
+  const title = KIRO_COPY_TITLES[kind] || '接入信息';
+  if (!isKiroCopyEnabled(cachedKiroAccess, kind)) {
+    showToast(`${title}暂不可复制，请先启动 Kiro 代理`);
+    return;
+  }
+  try {
+    const ok = await api.kiroCopyAccess(kind);
+    if (ok) {
+      showToast(`已复制${title}`, 'success');
+    } else {
+      showToast('没有可复制的内容');
+    }
+  } catch (e) {
+    console.error('复制 Kiro 接入信息失败:', e);
+    showToast('复制失败: ' + String(e));
+  }
+}
+
+/** 重置代理密钥：旧密钥立即失效，需重新复制到其它 Agent */
+export async function resetKiroProxyKey(): Promise<void> {
+  if (cachedKiroAccess?.running) {
+    showToast('请先停止 Kiro 代理，再重置密钥');
+    return;
+  }
+  const confirmed = await showConfirmDialog({
+    title: '重置代理密钥',
+    message: '确定要重置 Kiro 代理密钥吗？',
+    sub: '重置后已复制到其它 Agent 的旧密钥立即失效，需要重新复制；代理运行中无法重置。',
+    confirmLabel: '重置',
+  });
+  if (!confirmed) return;
+  try {
+    const access = await api.kiroResetProxyKey();
+    renderKiroAccess(access);
+    showToast('已重置代理密钥', 'success');
+  } catch (e) {
+    console.error('重置 Kiro 代理密钥失败:', e);
+    showToast('重置密钥失败: ' + String(e));
   }
 }
 
@@ -400,6 +528,7 @@ export async function toggleKiroProxy(): Promise<void> {
     }
     await refreshKiroStatus();
     await refreshKiroModels();
+    await refreshKiroAccess();
     await loadChatModelOptions();
     scheduleMainBalanceBar();
   } catch (e) {

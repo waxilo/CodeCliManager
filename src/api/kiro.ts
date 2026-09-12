@@ -1,9 +1,16 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { KiroModelsStateData, KiroStatusData, KiroUsageData } from '../types';
+import type {
+  KiroAccessCopyKind,
+  KiroAccessData,
+  KiroModelsStateData,
+  KiroStatusData,
+  KiroUsageData,
+} from '../types';
 
 let statusRequest: Promise<KiroStatusData> | null = null;
 let usageRequest: Promise<KiroUsageData> | null = null;
 let modelsStateRequest: Promise<KiroModelsStateData> | null = null;
+let accessRequest: Promise<KiroAccessData> | null = null;
 
 export function kiroStatus(): Promise<KiroStatusData> {
   if (statusRequest) return statusRequest;
@@ -60,4 +67,23 @@ export function kiroSetDefaultModel(model: string): Promise<KiroModelsStateData>
 /** 发送前确认已启用的 Kiro 代理与凭据可用，必要时自动恢复。 */
 export function kiroPrepareSend(): Promise<KiroStatusData> {
   return invoke<KiroStatusData>('kiro_prepare_send');
+}
+
+/** 外部接入信息：把本机代理接到其它 Agent 时要复制的地址 / 密钥 / 模型。 */
+export function kiroProxyAccess(): Promise<KiroAccessData> {
+  if (accessRequest) return accessRequest;
+  accessRequest = invoke<KiroAccessData>('kiro_proxy_access').finally(() => {
+    accessRequest = null;
+  });
+  return accessRequest;
+}
+
+/** 复制接入信息到系统剪贴板（明文密钥不经过前端）。 */
+export function kiroCopyAccess(kind: KiroAccessCopyKind): Promise<boolean> {
+  return invoke<boolean>('kiro_copy_access', { kind });
+}
+
+/** 重置代理密钥；代理运行中会被后端拒绝。 */
+export function kiroResetProxyKey(): Promise<KiroAccessData> {
+  return invoke<KiroAccessData>('kiro_reset_proxy_key');
 }

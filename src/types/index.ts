@@ -46,6 +46,8 @@ export type {
   KiroStatusData,
   KiroModelsStateData,
   KiroUsageData,
+  KiroAccessData,
+  KiroAccessCopyKind,
 } from './kiro';
 
 export type {

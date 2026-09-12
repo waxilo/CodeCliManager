@@ -309,7 +309,121 @@
   color: var(--color-text-muted);
 }
 
-.kiro-footnote code {
+/* ── 外部接入：给其它 Agent 复制的地址 / 密钥 / 模型 ── */
+.kiro-access {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--color-bg-surface);
+}
+
+.kiro-access-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kiro-access-head-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.kiro-access-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--color-text);
+}
+
+.kiro-access-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--color-text-muted);
+}
+
+.kiro-access-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated, var(--color-bg-base));
+}
+
+.kiro-access-label {
+  font-size: 12px;
+  color: var(--color-text-muted);
+}
+
+.kiro-access-value {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+
+.kiro-copy-btn {
+  flex-shrink: 0;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md, 8px);
+  background: var(--color-bg-surface);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+
+.kiro-copy-btn:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.kiro-copy-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.kiro-access-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.kiro-access-actions .settings-btn-secondary {
+  height: 30px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+.kiro-access-actions .kiro-key-reset {
+  margin-left: auto;
+}
+
+.kiro-access-hint {
+  margin: 0;
+  padding: 0 2px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-muted);
+}
+
+.kiro-footnote code,
+.kiro-access-hint code {
   font-size: 11px;
 }
 
@@ -330,5 +444,13 @@
 
   .kiro-toggle-btn {
     width: 100%;
+  }
+
+  .kiro-access-row {
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+  }
+
+  .kiro-access-actions .kiro-key-reset {
+    margin-left: 0;
   }
 }

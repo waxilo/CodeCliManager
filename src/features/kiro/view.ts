@@ -4,7 +4,7 @@ export function renderKiroViewHtml(): string {
       <div class="settings-header">
         <div>
           <h3 class="settings-title">Kiro 代理</h3>
-          <p class="settings-subtitle">将本地 Kiro 额度暴露为 Anthropic API，供 Claude Code 使用</p>
+          <p class="settings-subtitle">将本地 Kiro 额度暴露为 Anthropic API，供 Claude Code 及其它 Agent 使用</p>
         </div>
         <button type="button" class="settings-close-btn" aria-label="返回聊天">✕</button>
       </div>
@@ -66,6 +66,50 @@ export function renderKiroViewHtml(): string {
             <span class="kiro-model-entry-chevron" aria-hidden="true">›</span>
           </button>
           <p class="kiro-models-hint" data-kiro-models-hint>同步后可在聊天输入框快捷选择模型。</p>
+        </section>
+
+        <section class="kiro-access" aria-label="外部接入">
+          <div class="kiro-access-head">
+            <div class="kiro-access-head-copy">
+              <span class="kiro-access-title">外部接入</span>
+              <span class="kiro-access-desc" data-kiro-access-desc>
+                启动代理后复制到其它 Agent，即可复用本机 Kiro 额度
+              </span>
+            </div>
+            <button type="button" class="kiro-link-btn kiro-access-refresh" title="刷新接入信息">刷新</button>
+          </div>
+
+          <div class="kiro-access-row">
+            <span class="kiro-access-label">接口地址</span>
+            <code class="kiro-access-value" data-kiro-access-base>未运行</code>
+            <button type="button" class="kiro-copy-btn" data-kiro-copy="base_url" disabled>复制</button>
+          </div>
+
+          <div class="kiro-access-row">
+            <span class="kiro-access-label">密钥</span>
+            <code class="kiro-access-value" data-kiro-access-key>启动代理后生成</code>
+            <button type="button" class="kiro-copy-btn" data-kiro-copy="api_key" disabled>复制</button>
+          </div>
+
+          <div class="kiro-access-row">
+            <span class="kiro-access-label">模型</span>
+            <code class="kiro-access-value" data-kiro-access-model>—</code>
+            <button type="button" class="kiro-copy-btn" data-kiro-copy="model" disabled>复制</button>
+          </div>
+
+          <div class="kiro-access-actions">
+            <button type="button" class="settings-btn-secondary kiro-copy-preset" data-kiro-copy="env" disabled>
+              复制环境变量
+            </button>
+            <button type="button" class="settings-btn-secondary kiro-copy-preset" data-kiro-copy="json" disabled>
+              复制 settings.json 片段
+            </button>
+            <button type="button" class="kiro-link-btn kiro-key-reset">重置密钥</button>
+          </div>
+
+          <p class="kiro-access-hint">
+            仅监听 <code>127.0.0.1</code>，供本机 Agent 使用；密钥保存在本机、重启后不变，重置后旧配置立即失效。
+          </p>
         </section>
 
         <p class="kiro-footnote">

@@ -7,7 +7,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 
 use crate::config::{
-    apply_save_config_to_settings, env_string, load_kiro_proxy_prefs,
+    apply_save_config_to_settings, env_string, load_kiro_proxy_prefs, mask_api_key_for_display,
     purge_kiro_named_profiles, read_claude_settings_json, restore_api_profile_or_official,
     set_env_string, update_api_profiles_store, update_claude_settings, update_kiro_proxy_prefs,
     SaveClaudeCodeApiConfig,
@@ -214,6 +214,40 @@ pub(crate) fn has_kiro_credential_file() -> bool {
     kiro_sso_cache_dir().join("kiro-auth-token.json").is_file()
 }
 
+/// 生成新的本地代理密钥。
+pub(crate) fn generate_kiro_proxy_api_key() -> String {
+    format!("ccm-kiro-{}", uuid::Uuid::new_v4().simple())
+}
+
+/// 读取持久化的代理密钥；缺失时生成并写回偏好文件。
+/// 密钥持久化是为了让复制到其它 Agent 的配置在代理重启 / 应用重启后依然可用。
+pub(crate) fn ensure_kiro_proxy_api_key() -> Result<String, String> {
+    update_kiro_proxy_prefs(|prefs| {
+        if let Some(existing) = prefs
+            .proxy_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+        {
+            return Ok(existing.to_string());
+        }
+        let key = generate_kiro_proxy_api_key();
+        prefs.proxy_api_key = Some(key.clone());
+        Ok(key)
+    })
+}
+
+/// 当前生效的代理密钥：运行中取内存副本，未运行取持久化值。
+fn current_kiro_proxy_key(state: &KiroProxyState) -> Option<String> {
+    if is_proxy_running(state) {
+        return state.key.lock().ok().and_then(|key| key.clone());
+    }
+    load_kiro_proxy_prefs()
+        .proxy_api_key
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
 // `is_kiro_locally_available` 定义在上方，与 KiroStatus 相邻便于阅读。
 
 /// 启动 Kiro 反代核心逻辑（命令与自动启动共用）。
@@ -260,8 +294,8 @@ pub(crate) fn start_kiro_proxy(
         .pick_available_default_model()
         .unwrap_or_else(|| KIRO_DEFAULT_MODEL.to_string());
 
-    // 生成代理密钥并启动
-    let key = format!("ccm-kiro-{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
+    // 生成或复用代理密钥并启动（持久化密钥便于外部 Agent 长期复用）
+    let key = ensure_kiro_proxy_api_key()?;
     let config = super::server::ProxyConfig {
         host: "127.0.0.1".to_string(),
         port: port.unwrap_or(5050),
@@ -692,6 +726,125 @@ pub fn kiro_status(state: tauri::State<'_, KiroProxyState>) -> KiroStatus {
     build_kiro_status(&state)
 }
 
+/// 外部接入信息：把本机 Kiro 代理接到其它 Agent（Claude Code CLI / Cline / Roo 等）时要复制的字段。
+/// 明文密钥不经过前端：这里只回传脱敏串，复制动作由 [`kiro_copy_access`] 直接写入系统剪贴板。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KiroProxyAccess {
+    pub(crate) running: bool,
+    /// 代理实际监听端口；未运行时为 None（端口被占会自动 +1，无法预测）
+    pub(crate) port: Option<u16>,
+    /// 仅在代理运行时有值
+    pub(crate) base_url: String,
+    pub(crate) api_key_masked: String,
+    pub(crate) has_api_key: bool,
+    pub(crate) model: String,
+}
+
+pub(crate) fn build_kiro_proxy_access(
+    state: &KiroProxyState,
+) -> Result<KiroProxyAccess, String> {
+    let running = is_proxy_running(state);
+    let port = if running {
+        *state.port.lock().map_err(|_| "lock failed".to_string())?
+    } else {
+        None
+    };
+    let key = current_kiro_proxy_key(state);
+    Ok(KiroProxyAccess {
+        running,
+        port,
+        base_url: port
+            .map(|port| format!("http://127.0.0.1:{port}"))
+            .unwrap_or_default(),
+        api_key_masked: key.as_deref().map(mask_api_key_for_display).unwrap_or_default(),
+        has_api_key: key.is_some(),
+        model: build_kiro_models_state(running).default_model,
+    })
+}
+
+/// 读取外部接入信息（地址 / 脱敏密钥 / 模型），供 Kiro 页展示与复制。
+#[tauri::command]
+pub fn kiro_proxy_access(
+    state: tauri::State<'_, KiroProxyState>,
+) -> Result<KiroProxyAccess, String> {
+    build_kiro_proxy_access(&state)
+}
+
+/// 组装要写入剪贴板的接入文本（密钥明文只在后端流转）。
+/// kind: base_url | api_key | model | env | json
+fn build_kiro_access_text(state: &KiroProxyState, kind: &str) -> Result<String, String> {
+    let access = build_kiro_proxy_access(state)?;
+    if !access.running {
+        return Err("请先启动 Kiro 代理，再复制接入信息".to_string());
+    }
+    let key = current_kiro_proxy_key(state)
+        .ok_or_else(|| "Kiro 代理密钥不可用，请重新启动代理".to_string())?;
+    format_kiro_access_text(kind, &access.base_url, &key, &access.model)
+}
+
+/// 纯文本格式化（与代理状态解耦，便于单测）。
+fn format_kiro_access_text(
+    kind: &str,
+    base_url: &str,
+    key: &str,
+    model: &str,
+) -> Result<String, String> {
+    Ok(match kind {
+        "base_url" => base_url.to_string(),
+        "api_key" => key.to_string(),
+        "model" => model.to_string(),
+        // 通用 .env / shell 变量形式，多数 CLI Agent 可直接使用
+        "env" => format!(
+            "ANTHROPIC_BASE_URL={base_url}\nANTHROPIC_AUTH_TOKEN={key}\nANTHROPIC_MODEL={model}"
+        ),
+        // Claude Code settings.json 的 env 片段
+        "json" => serde_json::to_string_pretty(&serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": base_url,
+                "ANTHROPIC_AUTH_TOKEN": key,
+                "ANTHROPIC_MODEL": model,
+            }
+        }))
+        .map_err(|error| format!("生成配置片段失败: {error}"))?,
+        other => return Err(format!("不支持的复制类型: {other}")),
+    })
+}
+
+/// 复制外部接入信息到系统剪贴板。
+#[tauri::command]
+pub fn kiro_copy_access(
+    state: tauri::State<'_, KiroProxyState>,
+    kind: String,
+) -> Result<bool, String> {
+    let text = build_kiro_access_text(&state, kind.trim())?;
+    if text.trim().is_empty() {
+        return Ok(false);
+    }
+    let mut clipboard =
+        arboard::Clipboard::new().map_err(|e| format!("无法访问系统剪贴板: {e}"))?;
+    clipboard
+        .set_text(text)
+        .map_err(|e| format!("写入剪贴板失败: {e}"))?;
+    Ok(true)
+}
+
+/// 重置代理密钥（旧密钥立即失效）。代理运行中不允许重置，避免正在使用的 Agent 突然失配。
+#[tauri::command]
+pub fn kiro_reset_proxy_key(
+    state: tauri::State<'_, KiroProxyState>,
+) -> Result<KiroProxyAccess, String> {
+    if is_proxy_running(&state) {
+        return Err("请先停止 Kiro 代理，再重置密钥".to_string());
+    }
+    let key = generate_kiro_proxy_api_key();
+    update_kiro_proxy_prefs(|prefs| {
+        prefs.proxy_api_key = Some(key);
+        Ok(())
+    })?;
+    build_kiro_proxy_access(&state)
+}
+
 /// 查询 Kiro 账户 Credits 额度（后台线程阻塞 HTTP，不卡住 UI）。
 #[tauri::command]
 pub async fn kiro_usage() -> Result<super::auth::KiroUsageInfo, String> {
@@ -970,4 +1123,67 @@ pub fn kiro_set_default_model(
     }
 
     Ok(build_kiro_models_state(is_proxy_running(&state)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASE_URL: &str = "http://127.0.0.1:5050";
+    const KEY: &str = "ccm-kiro-test1234";
+    const MODEL: &str = "claude-opus-5";
+
+    #[test]
+    fn format_access_text_single_fields() {
+        assert_eq!(
+            format_kiro_access_text("base_url", BASE_URL, KEY, MODEL).unwrap(),
+            BASE_URL
+        );
+        assert_eq!(
+            format_kiro_access_text("api_key", BASE_URL, KEY, MODEL).unwrap(),
+            KEY
+        );
+        assert_eq!(
+            format_kiro_access_text("model", BASE_URL, KEY, MODEL).unwrap(),
+            MODEL
+        );
+    }
+
+    #[test]
+    fn format_access_text_env_snippet() {
+        let text = format_kiro_access_text("env", BASE_URL, KEY, MODEL).unwrap();
+        assert_eq!(
+            text,
+            "ANTHROPIC_BASE_URL=http://127.0.0.1:5050\nANTHROPIC_AUTH_TOKEN=ccm-kiro-test1234\nANTHROPIC_MODEL=claude-opus-5"
+        );
+    }
+
+    #[test]
+    fn format_access_text_json_snippet_is_valid_json() {
+        let text = format_kiro_access_text("json", BASE_URL, KEY, MODEL).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["env"]["ANTHROPIC_BASE_URL"], BASE_URL);
+        assert_eq!(parsed["env"]["ANTHROPIC_AUTH_TOKEN"], KEY);
+        assert_eq!(parsed["env"]["ANTHROPIC_MODEL"], MODEL);
+    }
+
+    #[test]
+    fn format_access_text_rejects_unknown_kind() {
+        let error = format_kiro_access_text("oauth", BASE_URL, KEY, MODEL).unwrap_err();
+        assert!(error.contains("oauth"));
+    }
+
+    #[test]
+    fn generated_key_is_prefixed_and_unique() {
+        let first = generate_kiro_proxy_api_key();
+        let second = generate_kiro_proxy_api_key();
+        assert!(first.starts_with("ccm-kiro-"));
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn mask_api_key_hides_middle() {
+        assert!(mask_api_key_for_display(KEY).contains('•'));
+        assert!(!mask_api_key_for_display(KEY).contains(KEY));
+    }
 }

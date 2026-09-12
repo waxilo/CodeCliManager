@@ -310,6 +310,9 @@ pub(crate) struct KiroProxyPrefs {
     /// 用户在 Kiro 页选中的默认模型。
     #[serde(default)]
     pub(crate) default_model: String,
+    /// 本地代理密钥。持久化后，复制到其它 Agent 的配置在代理重启 / 应用重启后依然可用。
+    #[serde(default)]
+    pub(crate) proxy_api_key: Option<String>,
 }
 
 pub(crate) fn get_kiro_proxy_prefs_path() -> PathBuf {

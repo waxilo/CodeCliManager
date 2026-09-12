@@ -22,6 +22,7 @@
 - **模型列表同步**：从当前 API 服务获取可用模型，也支持手动选择和保存默认模型。
 - **配置导入**：支持从 `cc-switch` 导入 Claude 相关配置方案。
 - **Kiro 本地代理**：读取已登录 Kiro IDE 的凭据，在本地启动兼容 Anthropic Messages API 的 Kiro 代理，并同步 Kiro 模型列表。
+- **Kiro 外部接入**：在 Kiro 页一键复制代理地址、密钥（支持环境变量 / `settings.json` 片段），供其它兼容 Anthropic 协议的 Agent 复用本机 Kiro 额度；密钥持久化保存，重启后依然有效，可随时重置。
 - **用量与余额信息**：在支持的服务上显示余额或用量；Kiro 和 DeepSeek 等服务的状态可在配置页查看。
 
 > Kiro 功能需要先在本机完成 Kiro IDE 登录。CodeCliManager 不提供或绕过 Kiro 账号登录。

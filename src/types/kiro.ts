@@ -36,3 +36,19 @@ export interface KiroUsageData {
   currency: string | null;
   email: string | null;
 }
+
+/** 后端 kiro_proxy_access / kiro_reset_proxy_key 返回值：给其它 Agent 复用的接入字段 */
+export interface KiroAccessData {
+  running: boolean;
+  /** 代理实际监听端口；未运行时为 null */
+  port: number | null;
+  /** 仅在代理运行时有值 */
+  baseUrl: string;
+  /** 脱敏密钥（明文只在后端写入剪贴板） */
+  apiKeyMasked: string;
+  hasApiKey: boolean;
+  model: string;
+}
+
+/** 可复制的接入内容：单字段 + 整段配置 */
+export type KiroAccessCopyKind = 'base_url' | 'api_key' | 'model' | 'env' | 'json';

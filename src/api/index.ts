@@ -88,6 +88,9 @@ export {
   kiroSaveModelsConfig,
   kiroSetDefaultModel,
   kiroPrepareSend,
+  kiroProxyAccess,
+  kiroCopyAccess,
+  kiroResetProxyKey,
 } from './kiro';
 
 export {

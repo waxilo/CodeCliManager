@@ -1,12 +1,16 @@
 import { appState, app } from '../../state';
 import { shellApi } from '../../app/shell/api';
+import type { KiroAccessCopyKind } from '../../types';
 import { startMainBalanceBarAutoRefresh } from '../status-bar';
 import { renderKiroViewHtml } from './view';
 import {
+  copyKiroAccess,
   openKiroModelConfigDialog,
+  refreshKiroAccess,
   refreshKiroStatus,
   refreshKiroModels,
   refreshKiroToken,
+  resetKiroProxyKey,
   scheduleKiroUsage,
   toggleKiroProxy,
 } from './panel';
@@ -130,10 +134,23 @@ export async function mountKiroView() {
   view.querySelector('[data-kiro-model-summary-btn]')?.addEventListener('click', () => {
     openKiroModelConfigDialog();
   });
+  view.querySelectorAll<HTMLButtonElement>('[data-kiro-copy]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const kind = btn.dataset.kiroCopy as KiroAccessCopyKind | undefined;
+      if (kind) void copyKiroAccess(kind);
+    });
+  });
+  view.querySelector('.kiro-key-reset')?.addEventListener('click', () => {
+    void resetKiroProxyKey();
+  });
+  view.querySelector('.kiro-access-refresh')?.addEventListener('click', () => {
+    void refreshKiroAccess();
+  });
 
   await refreshKiroStatus();
   if (!isMountCurrent()) return;
   await refreshKiroModels();
   // 连点打开/关闭时，过期 mount 的异步刷新不得继续触发后续副作用
   if (!isMountCurrent()) return;
+  await refreshKiroAccess();
 }
