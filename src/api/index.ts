@@ -104,4 +104,8 @@ export {
   openTerminalResume,
   getGitBranch,
   getCurrentPlatform,
+  setCloseBehavior,
+  hideToTray,
+  quitApp,
+  type CloseBehavior,
 } from './system';

@@ -83,6 +83,13 @@ fn is_proxy_running(state: &KiroProxyState) -> bool {
         .unwrap_or(false)
 }
 
+/// 轻量读取代理运行态与端口，供托盘常驻轮询使用。
+/// 不走 [`build_kiro_status_from`]：后者每次都要解析 SSO 凭据与偏好文件，轮询代价过大。
+pub(crate) fn kiro_proxy_summary(state: &KiroProxyState) -> (bool, Option<u16>) {
+    let port = state.port.lock().ok().and_then(|value| *value);
+    (is_proxy_running(state), port)
+}
+
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct KiroStatus {

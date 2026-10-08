@@ -70,6 +70,7 @@ import { newChat } from '../features/chat/send';
 import { refreshSettingsModal } from '../features/api-config';
 import { refreshModelInfo } from '../features/chat/model-picker';
 import { checkClaudeCodeUpdate, initAppUpdate, setupClaudeUpdateProgressListener } from '../features/updates';
+import { initResident } from '../features/resident';
 import { setupEventListeners } from '../events/session-events';
 
 /** 将各 feature 实现注册到 shellApi，打破循环依赖。 */
@@ -203,6 +204,8 @@ export async function init(): Promise<void> {
   // 避免它们阻塞窗口首次可见与输入区可操作。
   render();
   setupEventListeners();
+  // 常驻托盘的关闭询问：尽早注册，避免用户在初始化阶段点关闭时无人应答
+  void initResident();
   setupClaudeUpdateProgressListener();
   setupExternalLinkInterceptor();
   bindSidebarResponsive();

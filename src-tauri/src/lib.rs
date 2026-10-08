@@ -14,6 +14,7 @@ mod model_fetch;
 mod paths;
 mod proc_guard;
 mod protocol_guard;
+mod resident;
 mod session;
 mod shell;
 mod updater_manifest;
@@ -31,6 +32,7 @@ use claude_project_config::{
 use dsh::{dsh_install, dsh_start, dsh_status, dsh_stop};
 use commands::*;
 use kiro::KiroProxyState;
+use resident::ResidentState;
 use session::{active_session_keys, session_stop_graceful};
 use window::apply_responsive_window_size;
 
@@ -43,11 +45,16 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(KiroProxyState::default())
         .manage(dsh::DshState::default())
+        .manage(ResidentState::default())
         .setup(|app| {
             updater_manifest::start_updater_manifest_proxy();
             apply_responsive_window_size(app);
             let kiro_state = app.state::<KiroProxyState>().inner().clone();
             kiro::spawn_kiro_autostart(app.handle().clone(), kiro_state);
+            // 托盘失败不致命：应用照常可用，只是关闭窗口后无处唤回，所以只告警。
+            if let Err(e) = resident::setup_tray(app.handle()) {
+                eprintln!("[resident] 托盘初始化失败: {e}");
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -125,13 +132,26 @@ pub fn run() {
             dsh_install,
             dsh_start,
             dsh_stop,
+            resident::resident_set_close_behavior,
+            resident::resident_hide_to_tray,
+            resident::resident_quit_app,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if let tauri::RunEvent::Exit = event {
+        .run(|app, event| match event {
+            // 关闭主窗口不再直接退出：交给常驻模块决定「最小化到托盘 / 直接退出 / 询问」。
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } => {
+                if label == resident::MAIN_WINDOW && resident::on_close_requested(app) {
+                    api.prevent_close();
+                }
+            }
+            tauri::RunEvent::Exit => {
                 // 兜底：应用退出前优雅关闭所有常驻 claude 进程，
-                // 覆盖手动退出 / macOS relaunch（Windows 更新走 stop_all_sessions 命令 + process::exit）。
+                // 覆盖手动退出 / 托盘退出 / macOS relaunch（Windows 更新走 stop_all_sessions 命令 + process::exit）。
                 let keys = active_session_keys();
                 if !keys.is_empty() {
                     eprintln!("[exit] 应用退出，优雅关闭 {} 个常驻会话", keys.len());
@@ -142,5 +162,6 @@ pub fn run() {
                 dsh::shutdown_dsh_process(&app);
                 let _ = app;
             }
+            _ => {}
         })
 }
