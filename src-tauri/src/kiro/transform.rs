@@ -915,10 +915,151 @@ fn skip_whitespace(text: &str, mut offset: usize) -> usize {
     offset
 }
 
+/// 修复键值分隔符退化的 JSON：`:` 被上游写成 `>`（2026-10-09 观测：
+/// `{"id":"toolu_…","input">{…}}`，花括号配平但 serde 拒收，整块当正文泄漏）。
+/// 只在「键字符串之后、值开始之前」的分隔位把 `>` 视作 `:`；字符串值内部的
+/// `>`（如 shell 重定向 `2>/dev/null`）在原样拷贝中不受影响。
+/// 结构仍对不上时返回 None，走原有的泄漏路径。
+fn repair_degenerate_separators(text: &str, start: usize, end: usize) -> Option<String> {
+    fn copy_string(text: &str, pos: usize, out: &mut String) -> Option<usize> {
+        if text.as_bytes().get(pos) != Some(&b'"') {
+            return None;
+        }
+        let mut i = pos + 1;
+        while let Some(&ch) = text.as_bytes().get(i) {
+            if ch == b'\\' {
+                i += 2;
+            } else if ch == b'"' {
+                out.push_str(&text[pos..i + 1]);
+                return Some(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+        None
+    }
+    fn copy_literal(text: &str, pos: usize, out: &mut String) -> Option<usize> {
+        let mut i = pos;
+        while text
+            .as_bytes()
+            .get(i)
+            .is_some_and(|ch| !matches!(ch, b',' | b'}' | b']') && !ch.is_ascii_whitespace())
+        {
+            i += 1;
+        }
+        (i > pos).then(|| {
+            out.push_str(&text[pos..i]);
+            i
+        })
+    }
+    fn parse_value(text: &str, pos: usize, out: &mut String) -> Option<usize> {
+        match text.as_bytes().get(pos)? {
+            b'"' => copy_string(text, pos, out),
+            b'{' => parse_object(text, pos, out),
+            b'[' => parse_array(text, pos, out),
+            _ => copy_literal(text, pos, out),
+        }
+    }
+    fn parse_array(text: &str, mut pos: usize, out: &mut String) -> Option<usize> {
+        out.push('[');
+        pos += 1;
+        loop {
+            pos = skip_whitespace(text, pos);
+            if text.as_bytes().get(pos) == Some(&b']') {
+                out.push(']');
+                return Some(pos + 1);
+            }
+            pos = parse_value(text, pos, out)?;
+            pos = skip_whitespace(text, pos);
+            match text.as_bytes().get(pos)? {
+                b',' => {
+                    out.push(',');
+                    pos += 1;
+                }
+                b']' => {
+                    out.push(']');
+                    return Some(pos + 1);
+                }
+                _ => return None,
+            }
+        }
+    }
+    fn parse_object(text: &str, mut pos: usize, out: &mut String) -> Option<usize> {
+        out.push('{');
+        pos += 1;
+        loop {
+            pos = skip_whitespace(text, pos);
+            match text.as_bytes().get(pos)? {
+                b'}' => {
+                    out.push('}');
+                    return Some(pos + 1);
+                }
+                b'"' => {}
+                _ => return None,
+            }
+            pos = copy_string(text, pos, out)?;
+            pos = skip_whitespace(text, pos);
+            // 退化点：分隔位上的 `:` 可能写成 `>`；值内部的 `>` 不经过这个位置
+            match text.as_bytes().get(pos)? {
+                b':' | b'>' => out.push(':'),
+                _ => return None,
+            }
+            pos = parse_value(text, skip_whitespace(text, pos + 1), out)?;
+            pos = skip_whitespace(text, pos);
+            match text.as_bytes().get(pos)? {
+                b',' => {
+                    out.push(',');
+                    pos += 1;
+                }
+                b'}' => {
+                    out.push('}');
+                    return Some(pos + 1);
+                }
+                _ => return None,
+            }
+        }
+    }
+    let mut out = String::with_capacity(end - start);
+    let end_pos = parse_value(text, skip_whitespace(text, start), &mut out)?;
+    (skip_whitespace(text, end_pos) == end).then_some(out)
+}
+
 fn normalize_tool(value: &Value, spec: &ToolRecoverySpec, span: usize, ordinal: usize) -> Option<Value> {
     let object = value.as_object()?;
-    let name = object.get("name")?.as_str()?.trim();
-    if name.is_empty() || !spec.declares(name) {
+    let mut input = if let Some(input) = object.get("input") {
+        input.as_object()?.clone()
+    } else {
+        let mut flat = object.clone();
+        flat.remove("type");
+        flat.remove("id");
+        flat.remove("name");
+        if flat.is_empty() {
+            return None;
+        }
+        flat
+    };
+    // 信封残留：退化输出会把 tool_use 信封写进 input（…,"input">{…,"name":"Bash","type":"tool_use"}}）。
+    // input 里的 name（须为已声明工具）+ type=tool_use 提升为工具名，不再留在入参里。
+    let hoisted = match (object.get("name"), input.get("name"), input.get("type")) {
+        (None, Some(Value::String(name)), Some(Value::String(kind)))
+            if kind == "tool_use" && !name.trim().is_empty() =>
+        {
+            spec.declares(name.trim()).then(|| name.trim().to_string())
+        }
+        _ => None,
+    };
+    let name = match hoisted {
+        Some(name) => {
+            input.remove("name");
+            input.remove("type");
+            name
+        }
+        None => {
+            let name = object.get("name")?.as_str()?.trim();
+            (!name.is_empty()).then(|| name.to_string())?
+        }
+    };
+    if !spec.declares(&name) {
         return None;
     }
     if object
@@ -928,20 +1069,8 @@ fn normalize_tool(value: &Value, spec: &ToolRecoverySpec, span: usize, ordinal: 
     {
         return None;
     }
-    let input = if let Some(input) = object.get("input") {
-        input.as_object()?;
-        input.clone()
-    } else {
-        let mut flat = object.clone();
-        flat.remove("type");
-        flat.remove("id");
-        flat.remove("name");
-        if flat.is_empty() {
-            return None;
-        }
-        Value::Object(flat)
-    };
-    if !spec.validates_input(name, &input) {
+    let input = Value::Object(input);
+    if !spec.validates_input(&name, &input) {
         return None;
     }
     let id = object
@@ -950,7 +1079,7 @@ fn normalize_tool(value: &Value, spec: &ToolRecoverySpec, span: usize, ordinal: 
         .map(str::trim)
         .filter(|id| !id.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| stable_tool_id(span, ordinal, name, &input));
+        .unwrap_or_else(|| stable_tool_id(span, ordinal, &name, &input));
     Some(json!({ "type": "tool_use", "id": id, "name": name, "input": input }))
 }
 
@@ -1480,7 +1609,16 @@ fn recover_range(text: &str, spec: &ToolRecoverySpec, base: usize) -> ToolRecove
             scan = end;
             continue;
         }
-        let Ok(value) = serde_json::from_str::<Value>(candidate) else {
+        let parsed = serde_json::from_str::<Value>(candidate).ok().or_else(|| {
+            // 分隔符退化（`:`→`>`）的 tool_use 信封：括号配平但 serde 拒收，
+            // 按结构修复分隔位后重试。只在信封前缀上启用，避免误改正文里的普通 JSON。
+            if !(candidate.starts_with("{\"id\"") && candidate.contains("toolu_")) {
+                return None;
+            }
+            let repaired = repair_degenerate_separators(text, scan, end)?;
+            serde_json::from_str::<Value>(&repaired).ok()
+        });
+        let Some(value) = parsed else {
             scan += ch.len_utf8();
             continue;
         };
@@ -3852,6 +3990,78 @@ mod tests {
         let mut visible = guard.push(input);
         visible.push_str(&guard.finish().visible_text);
         assert_eq!(visible, input);
+    }
+
+    // ============ 分隔符退化（`:`→`>`）的 tool_use 信封修复 ============
+
+    fn bash_recovery_spec() -> ToolRecoverySpec {
+        ToolRecoverySpec::from_body(&json!({
+            "tools": [{
+                "name": "Bash",
+                "input_schema": {
+                    "type": "object",
+                    "required": ["command"],
+                    "properties": {
+                        "command": { "type": "string" },
+                        "description": { "type": "string" }
+                    }
+                }
+            }]
+        }))
+    }
+
+    #[test]
+    fn recovers_degenerate_separator_tool_use_envelope() {
+        // 真实泄漏样本（2026-10-09，Kiro 上游）：`"input":` 的 `:` 退化为 `>`，
+        // 花括号配平但 serde 拒收，整块当正文泄漏；input 里还混入了信封键 name/type。
+        let text = concat!(
+            "Final check on reachability.\n",
+            "{\"id\":\"toolu_bdrk_01HfLCwYsLYmZtKoNCT8RE3b\",\"input\">{\"command\":\"grep -rn market src/main.java 2>/dev/null | head -20\",\"description\":\"Check ant strategy market scope\",\"name\":\"Bash\",\"type\":\"tool_use\"}}"
+        );
+        let recovered = recover_tool_calls_from_text(text, &bash_recovery_spec());
+        assert!(!recovered.incomplete_tool);
+        assert_eq!(recovered.visible_text(), "Final check on reachability.\n");
+        let blocks = recovered.tool_blocks();
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0]["name"], "Bash");
+        assert_eq!(blocks[0]["id"], "toolu_bdrk_01HfLCwYsLYmZtKoNCT8RE3b");
+        assert_eq!(
+            blocks[0]["input"]["command"],
+            "grep -rn market src/main.java 2>/dev/null | head -20"
+        );
+        assert_eq!(
+            blocks[0]["input"]["description"],
+            "Check ant strategy market scope"
+        );
+        // 信封键已提升为工具名，不留在入参里
+        assert!(blocks[0]["input"].get("name").is_none());
+        assert!(blocks[0]["input"].get("type").is_none());
+    }
+
+    #[test]
+    fn degenerate_separator_repair_is_gated_to_toolu_envelope() {
+        // 非 tool_use 信封的退化 JSON 不修复，保持原文（避免误改正文里的普通 JSON）。
+        let text = "{\"count\">3,\"ok\":true}";
+        let recovered = recover_tool_calls_from_text(text, &bash_recovery_spec());
+        assert_eq!(recovered.visible_text(), "{\"count\">3,\"ok\":true}");
+        assert!(recovered.tool_blocks().is_empty());
+    }
+
+    #[test]
+    fn mixed_guard_recovers_degenerate_separator_leak_streaming() {
+        // 流式路径：退化信封跨 chunk 到达，finish 时整体恢复。
+        let mut guard = MixedTextToolGuard::with_spec(bash_recovery_spec());
+        assert_eq!(
+            guard.push("Final check.\n{\"id\":\"toolu_bdrk_01Stream\",\"input\">{\"command\":\"git status"),
+            "Final check.\n"
+        );
+        assert_eq!(guard.push("\",\"name\":\"Bash\",\"type\":\"tool_use\"}}"), "");
+        let finish = guard.finish();
+        assert!(!finish.incomplete_tool);
+        assert_eq!(finish.visible_text, "");
+        assert_eq!(finish.tool_blocks.len(), 1);
+        assert_eq!(finish.tool_blocks[0]["name"], "Bash");
+        assert_eq!(finish.tool_blocks[0]["input"]["command"], "git status");
     }
 
     // ============ 原生 toolUseEvent 入参的 antml 残片污染修复 ============
