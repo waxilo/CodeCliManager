@@ -1,7 +1,17 @@
-/* Kiro 代理独立页 */
+/* ══════════════════════════════════════════════════════════
+   Kiro 代理：整页视图，与 API 配置 / 设置 / 技能 共用同一套页面框架
+   ══════════════════════════════════════════════════════════ */
+
+/* 这一层是「替代整个主区」的整页容器，**不是**盖在页面之上的模态遮罩：
+   - 底色必须不透明（--color-bg-base），否则背后的聊天页会透出来；
+   - 绝不能进 theme-industrial.css 的遮罩选择器组，否则会被套上
+     --color-overlay + blur(5px)：浅色下整页压暗 42%、深色下压暗 72%，
+     背景还会被虚化，观感立刻从「一个页面」变成「一张糊掉的模态」。
+   - 顶部偏移与标题栏高度同源（同一个 --app-titlebar-height），
+     不再像原先那样在两个文件里各写一份 32px/28px。 */
 .kiro-overlay {
   position: absolute;
-  inset: var(--app-titlebar-height, 38px) 0 0;
+  inset: var(--app-titlebar-height) 0 0;
   z-index: 80;
   display: flex;
   min-height: 0;
@@ -10,51 +20,50 @@
   contain: layout paint;
 }
 
-.platform-macos .kiro-overlay {
-  inset-block-start: 28px;
-}
-
-.platform-windows .kiro-overlay {
-  inset-block-start: 32px;
-}
-
 .kiro-overlay > .kiro-view {
   flex: 1;
   min-width: 0;
 }
 
+/* 页面框架：内边距 / 内容列上限 / 页脚固定方式与 .api-config-view、.settings-update-view
+   共用 --page-padding 与 --page-max-width 两个令牌，四页切换时不再有跳变。 */
 .kiro-view {
   display: flex;
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  padding: 20px 24px 16px;
+  padding: var(--page-padding);
   box-sizing: border-box;
-  overflow: auto;
+  overflow: hidden;
 }
 
 .kiro-view .settings-header {
   flex-shrink: 0;
+  max-width: var(--page-max-width);
 }
 
+/* 内容区独立滚动、页脚固定 —— 与 API 配置页同一行为。
+   原先是 .kiro-view 整体 overflow:auto，页脚被推到内容之后、要滚到底才看得见。 */
 .kiro-layout {
-  width: min(720px, 100%);
-  margin-top: 18px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  width: 100%;
+  max-width: var(--page-max-width);
+  margin-top: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
-  flex-shrink: 0;
 }
 
+/* 卡片外观（边框 / 圆角 / 背景 / 阴影）统一由 theme-industrial.css 的卡片组提供，
+   这里只保留各自的内部布局，避免同一条属性在两处各写一份、值还不一样。 */
 .kiro-status-panel {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  padding: 16px 18px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  background: var(--color-bg-elevated, var(--color-bg-surface));
+  padding: var(--page-card-padding);
 }
 
 .kiro-status-main {
@@ -120,14 +129,12 @@
   color: var(--color-text-muted);
 }
 
+/* 高度/内边距/圆角/字号/最小宽度全部来自 .settings-btn-primary / -danger
+   （settings.css）；这里只保留本页特有的两点：不参与 flex 收缩，
+   以及「停止」态（.settings-btn-danger 未定义字重）也要维持 600 字重。
+   原先那几行是重复声明，值还和共用类不一致（min-width 84 vs 80，实际由后加载的共用类胜出）。 */
 .kiro-toggle-btn {
   flex-shrink: 0;
-  min-width: 84px;
-  height: 36px;
-  padding: 0 16px;
-  border: none;
-  border-radius: var(--radius-lg);
-  font-size: 14px;
   font-weight: 600;
 }
 
@@ -142,10 +149,7 @@
   flex-direction: column;
   gap: 8px;
   min-width: 0;
-  padding: 14px 14px 12px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  background: var(--color-bg-surface);
+  padding: var(--page-card-padding);
 }
 
 .kiro-metric-head {
@@ -200,10 +204,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px 14px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  background: var(--color-bg-surface);
+  padding: var(--page-card-padding);
 }
 
 .kiro-meta-row {
@@ -243,19 +244,10 @@
   justify-content: space-between;
   gap: 12px;
   width: 100%;
-  padding: 14px 16px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  background: var(--color-bg-elevated, var(--color-bg-surface));
+  padding: var(--page-card-padding);
   color: inherit;
   text-align: left;
   cursor: pointer;
-  transition: border-color 0.15s ease, background 0.15s ease;
-}
-
-.kiro-model-entry:hover {
-  border-color: var(--color-accent-ring, color-mix(in srgb, var(--color-accent) 35%, transparent));
-  background: color-mix(in srgb, var(--color-accent) 6%, var(--color-bg-elevated, var(--color-bg-surface)));
 }
 
 .kiro-model-entry-copy {
@@ -314,10 +306,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 14px;
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  background: var(--color-bg-surface);
+  padding: var(--page-card-padding);
 }
 
 .kiro-access-head {
@@ -346,6 +335,9 @@
   color: var(--color-text-muted);
 }
 
+/* 卡片内元素：按全局惯例用 --color-bg-surface（内嵌一档），
+   而不是像原先那样用 --color-bg-elevated —— 那会让「卡片里的行」比卡片本身更亮，
+   内外层级被倒置，正是截图里白/灰交替的来源。 */
 .kiro-access-row {
   display: grid;
   grid-template-columns: 52px minmax(0, 1fr) auto;
@@ -353,8 +345,8 @@
   align-items: center;
   padding: 8px 10px;
   border: 1px solid var(--color-border);
-  border-radius: var(--radius-lg);
-  background: var(--color-bg-elevated, var(--color-bg-base));
+  border-radius: var(--radius-md);
+  background: var(--color-bg-surface);
 }
 
 .kiro-access-label {
@@ -427,9 +419,11 @@
   font-size: 11px;
 }
 
+/* 页脚（固定在底部、不随内容滚动）的对齐方式、分隔线与间距都来自
+   settings.css 的 .settings-footer 基类；这里只补页面特有的宽度上限，
+   使页脚与页头、内容列共用同一个右缘。 */
 .kiro-view .settings-footer {
-  margin-top: auto;
-  padding-top: 16px;
+  max-width: var(--page-max-width);
 }
 
 @media (max-width: 720px) {

@@ -17,7 +17,6 @@ import {
 
 function removeKiroOverlay(): void {
   document.querySelector('#kiro-overlay')?.remove();
-  document.querySelector('.app-shell')?.classList.remove('has-kiro-overlay');
 }
 
 function mountKiroOverlay(): boolean {
@@ -33,7 +32,6 @@ function mountKiroOverlay(): boolean {
   overlay.setAttribute('aria-label', 'Kiro 代理');
   overlay.innerHTML = renderKiroViewHtml();
   shell.appendChild(overlay);
-  shell.classList.add('has-kiro-overlay');
   return true;
 }
 

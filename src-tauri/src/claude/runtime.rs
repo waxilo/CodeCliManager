@@ -2,6 +2,8 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+// 只在 Unix 分支（/bin/zsh 探测）里用得到，Windows 编译下会报未使用，故加条件编译保护。
+#[cfg(unix)]
 use super::updater::is_user_home_install;
 
 /// 某 npm 全局 prefix 下的「可执行文件目录」：

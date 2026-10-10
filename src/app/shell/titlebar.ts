@@ -2,7 +2,7 @@ import { escapeHtml } from '../../utils';
 import { appState } from '../../state';
 import { getThemeToggleTitle, getThemeToggleIcon } from '../../ui';
 import { shouldShowSettingsUpdateBadge } from '../../features/updates/app-update';
-export function renderApiConfigIcon(): string {
+function renderApiConfigIcon(): string {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4 4h16a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1zm0 8h16a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1zm2 2.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zm0-8a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3z"/>
@@ -10,7 +10,7 @@ export function renderApiConfigIcon(): string {
   `;
 }
 
-export function renderSkillsIcon(): string {
+function renderSkillsIcon(): string {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <rect x="2" y="3" width="20" height="14" rx="2"/>
@@ -21,7 +21,7 @@ export function renderSkillsIcon(): string {
   `;
 }
 
-export function renderSettingsIcon(): string {
+function renderSettingsIcon(): string {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <circle cx="12" cy="12" r="3"/>
@@ -30,7 +30,7 @@ export function renderSettingsIcon(): string {
   `;
 }
 
-export function renderKiroIcon(): string {
+function renderKiroIcon(): string {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M12 3v3"/>

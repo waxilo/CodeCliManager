@@ -17,6 +17,7 @@ mod protocol_guard;
 mod resident;
 mod session;
 mod shell;
+mod single_instance;
 mod updater_manifest;
 mod usage;
 mod window;
@@ -34,11 +35,13 @@ use commands::*;
 use kiro::KiroProxyState;
 use resident::ResidentState;
 use session::{active_session_keys, session_stop_graceful};
-use window::apply_responsive_window_size;
+use window::{apply_responsive_window_size, apply_undecorated, MAIN_WINDOW};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // 单实例必须是第一个插件：它要在窗口与其它插件建立之前判定本进程是不是「重复启动」。
+        .plugin(single_instance::plugin())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
@@ -48,6 +51,9 @@ pub fn run() {
         .manage(ResidentState::default())
         .setup(|app| {
             updater_manifest::start_updater_manifest_proxy();
+            // 早于布局与首次显示：窗口配置是 visible:false，此处改装饰不会闪现原生标题栏。
+            // 关闭按钮随之由前端自绘（见 src/app/shell/window-controls.ts）。
+            apply_undecorated(app.handle());
             apply_responsive_window_size(app);
             let kiro_state = app.state::<KiroProxyState>().inner().clone();
             kiro::spawn_kiro_autostart(app.handle().clone(), kiro_state);
@@ -145,10 +151,14 @@ pub fn run() {
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 ..
             } => {
-                if label == resident::MAIN_WINDOW && resident::on_close_requested(app) {
+                if label == MAIN_WINDOW && resident::on_close_requested(app) {
                     api.prevent_close();
                 }
             }
+            // macOS 的「打开已开启的应用」是点击 Dock 图标；此平台系统不会给出第二个进程，
+            // 走的是 Reopen 事件。窗口可能正藏在菜单栏图标后面，同样要唤起。
+            #[cfg(target_os = "macos")]
+            tauri::RunEvent::Reopen { .. } => window::show_main_window(app),
             tauri::RunEvent::Exit => {
                 // 兜底：应用退出前优雅关闭所有常驻 claude 进程，
                 // 覆盖手动退出 / 托盘退出 / macOS relaunch（Windows 更新走 stop_all_sessions 命令 + process::exit）。

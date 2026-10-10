@@ -17,6 +17,8 @@ use crate::model_fetch::is_deepseek_base_url;
 
 /// DSH Web UI 默认端口（与 dsh web 默认一致）
 pub(crate) const DSH_PORT: u16 = 3080;
+// 仅被 dsh_port_is_3080 测试断言使用，生产代码不引用 ⇒ 收进 test 配置，避免死常量。
+#[cfg(test)]
 pub(crate) const DSH_WEB_URL: &str = "http://127.0.0.1:3080";
 const DSH_START_WAIT: Duration = Duration::from_secs(20);
 const DSH_PROGRESS_EVENT: &str = "dsh-progress";

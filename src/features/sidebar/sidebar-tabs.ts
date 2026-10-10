@@ -11,7 +11,7 @@ import { scheduleHighlighting } from '../../markdown';
  * - 进行中的子代理在输入框上方实时展示（见 subagent-progress.ts），侧边栏不再有子代理页签。
  */
 
-export type SidebarTab = 'active' | 'archived';
+type SidebarTab = 'active' | 'archived';
 
 const SIDEBAR_TAB_STORAGE_KEY = 'codemanager-sidebar-tab';
 

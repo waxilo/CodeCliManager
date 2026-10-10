@@ -191,8 +191,9 @@
 }
 
 .message.user .message-content .markdown-body blockquote {
-  border-left-color: rgba(22, 101, 52, 0.35);
-  color: rgba(17, 24, 39, 0.75);
+  border-left-color: var(--color-bubble-user-border);
+  color: var(--color-bubble-user-text);
+  opacity: 0.9;
 }
 
 .message.user .message-content .markdown-body code {

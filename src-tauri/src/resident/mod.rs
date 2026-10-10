@@ -19,9 +19,7 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, Tray
 use tauri::{AppHandle, Emitter, Manager, Wry};
 
 use crate::kiro::{kiro_proxy_summary, KiroProxyState};
-
-/// 主窗口 label，与 `tauri.conf.json` 保持一致。
-pub(crate) const MAIN_WINDOW: &str = "main";
+use crate::window::{show_main_window, MAIN_WINDOW};
 
 const TRAY_ID: &str = "ccm-tray";
 
@@ -123,17 +121,6 @@ fn hide_main_window(app: &AppHandle) {
     if let Err(e) = window.hide() {
         eprintln!("[resident] 隐藏主窗口失败: {e}");
     }
-}
-
-fn show_main_window(app: &AppHandle) {
-    let Some(window) = main_window(app) else {
-        eprintln!("[resident] 未找到主窗口，无法显示");
-        return;
-    };
-    // 托盘唤起时窗口可能是「已最小化但未隐藏」，先恢复再聚焦。
-    let _ = window.unminimize();
-    let _ = window.show();
-    let _ = window.set_focus();
 }
 
 /// 托盘左键：可见且已聚焦 → 收起；可见但不在前台 → 拉到前台；隐藏 → 显示。

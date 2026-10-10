@@ -1,33 +1,3 @@
-/* ── Toast notification ── */
-.toast-notification {
-  position: fixed;
-  top: 48px;
-  left: 50%;
-  transform: translateX(-50%) translateY(-8px);
-  background: var(--color-bg-elevated, #323232);
-  color: var(--color-text, #fff);
-  padding: 10px 22px;
-  border-radius: var(--radius-lg);
-  font-size: 13px;
-  line-height: 1.5;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.18);
-  z-index: 100000;
-  pointer-events: none;
-  opacity: 0;
-  transition: opacity 0.25s ease, transform 0.25s ease;
-  max-width: 420px;
-  text-align: center;
-}
-.toast-notification.is-visible {
-  opacity: 1;
-  transform: translateX(-50%) translateY(0);
-}
-.toast-notification.is-toast-warning {
-  background: var(--color-warning-bg);
-  color: var(--color-warning-text);
-  box-shadow: 0 4px 16px color-mix(in srgb, var(--color-warning-text) 15%, transparent);
-}
-
 /* ── @file 引用下拉建议 ─────────────────────────────────────────── */
 .file-suggestions {
   position: absolute;
@@ -216,20 +186,21 @@
   opacity: 0.85;
 }
 
-/* 用户气泡内的芯片：适配淡绿底 */
+/* 用户气泡内的芯片：跟随气泡的强调色系（原先写死淡绿，是旧主题遗留） */
 .message.user .file-ref-chip {
-  background: rgba(0, 0, 0, 0.06);
-  border-color: rgba(22, 101, 52, 0.2);
+  background: var(--pill-bg);
+  border-color: var(--color-bubble-user-border);
   color: var(--color-bubble-user-text);
-  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
 }
 
 .message.user .file-ref-chip--image {
-  border-color: rgba(22, 101, 52, 0.28);
+  border-color: var(--color-bubble-user-border);
 }
 
 .message.user .file-ref-chip:hover {
-  background: rgba(0, 0, 0, 0.1);
+  background: var(--pill-bg-hover);
 }
 
 .message.user .file-ref-chip-icon {
@@ -241,7 +212,7 @@
 }
 
 .message.user .file-ref-chip-thumb {
-  border-color: rgba(22, 101, 52, 0.22);
+  border-color: var(--color-bubble-user-border);
 }
 
 /* ── 拖拽文件遮罩层 ─────────────────────────────────────────────── */
@@ -374,28 +345,6 @@
   overflow-x: auto;
 }
 
-.imported-file-thumb {
-  position: relative;
-  flex-shrink: 0;
-  width: 52px;
-  height: 52px;
-  border-radius: var(--radius-md);
-  overflow: hidden;
-  border: 2px solid transparent;
-  cursor: pointer;
-  background: transparent;
-}
-
-.imported-file-thumb img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.imported-file-thumb:hover {
-  border-color: var(--color-accent);
-}
-
 .imported-file-card {
   position: relative;
   display: inline-flex;
@@ -445,7 +394,6 @@
   transition: opacity 0.15s;
 }
 
-.imported-file-thumb:hover .imported-file-remove,
 .imported-file-card:hover .imported-file-remove {
   opacity: 1;
 }

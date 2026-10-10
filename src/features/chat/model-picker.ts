@@ -1,7 +1,7 @@
 import { appState } from '../../state';
 import * as api from '../../api';
 import { escapeHtml } from '../../utils';
-export function getActiveChatModelForRender(): string {
+function getActiveChatModelForRender(): string {
   // 优先使用配置文件中的默认模型；同步刷新时尽量保留页面上已选模型，避免跳回列表第一项
   if (appState.currentDefaultModel && appState.chatModelOptions.includes(appState.currentDefaultModel)) {
     return appState.currentDefaultModel;
@@ -79,7 +79,7 @@ export async function refreshModelInfo() {
   }
 }
 
-export function renderChatModelPickerListItems(filter: string): string {
+function renderChatModelPickerListItems(filter: string): string {
   const query = filter.trim().toLowerCase();
   const current = getActiveChatModelForRender();
   const models = appState.chatModelOptions.filter(
@@ -144,18 +144,18 @@ export function renderChatModelPickerHtml(): string {
   `;
 }
 
-export function resetChatModelPickerHighlight() {
+function resetChatModelPickerHighlight() {
   appState.chatModelPickerHighlightIndex = -1;
   document.querySelectorAll('.chat-model-picker-option.is-highlighted').forEach((element) => {
     element.classList.remove('is-highlighted');
   });
 }
 
-export function getVisibleChatModelOptions(): HTMLElement[] {
+function getVisibleChatModelOptions(): HTMLElement[] {
   return Array.from(document.querySelectorAll('#chat-model-picker-list .chat-model-picker-option'));
 }
 
-export function setChatModelPickerHighlight(index: number) {
+function setChatModelPickerHighlight(index: number) {
   const options = getVisibleChatModelOptions();
   resetChatModelPickerHighlight();
   if (options.length === 0) {
@@ -169,7 +169,7 @@ export function setChatModelPickerHighlight(index: number) {
   option.scrollIntoView({ block: 'nearest' });
 }
 
-export function selectHighlightedChatModelOption() {
+function selectHighlightedChatModelOption() {
   const options = getVisibleChatModelOptions();
   if (options.length === 0) {
     return;
@@ -185,7 +185,7 @@ export function selectHighlightedChatModelOption() {
   void applyChatModelSelection(model);
 }
 
-export function closeChatModelPicker() {
+function closeChatModelPicker() {
   const panel = document.querySelector('#chat-model-picker-panel');
   const picker = document.querySelector('#chat-model-picker');
   const trigger = document.querySelector('#chat-model-picker-trigger') as HTMLButtonElement | null;
@@ -197,7 +197,7 @@ export function closeChatModelPicker() {
   }
 }
 
-export function openChatModelPicker() {
+function openChatModelPicker() {
   const panel = document.querySelector('#chat-model-picker-panel');
   const picker = document.querySelector('#chat-model-picker');
   const trigger = document.querySelector('#chat-model-picker-trigger') as HTMLButtonElement | null;
@@ -223,7 +223,7 @@ export function openChatModelPicker() {
   search?.focus();
 }
 
-export function handleChatModelPickerOutsideClick(event: Event) {
+function handleChatModelPickerOutsideClick(event: Event) {
   const picker = document.querySelector('#chat-model-picker');
   if (picker && !picker.contains(event.target as Node)) {
     closeChatModelPicker();
@@ -333,7 +333,7 @@ export function updateChatModelPicker() {
   }
 }
 
-export async function applyChatModelSelection(model: string): Promise<void> {
+async function applyChatModelSelection(model: string): Promise<void> {
   const trimmed = model.trim();
   if (!trimmed || !appState.chatModelOptions.includes(trimmed)) {
     return;

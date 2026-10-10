@@ -38,7 +38,7 @@ export async function openPathInShell(path: string): Promise<void> {
   }
 }
 
-export async function handleSessionIdClick() {
+async function handleSessionIdClick() {
   const control = document.querySelector<HTMLButtonElement>('#session-id-copy');
   const sessionId = control?.dataset.sessionId?.trim();
   if (!sessionId || sessionId === '—') {
@@ -77,7 +77,7 @@ export function bindSessionIdCopyEvents() {
 /** 点击「刷新 / 重连会话」：强制后端重读会话并校准运行态（后端会回推 messages-updated）。
  *  若常驻进程空闲，后端会优雅停止它，使下次发送走 --resume 重连并重读全局提示词
  *  （`reload_session` 在 execute.rs）。正在执行一轮时不打断进程。 */
-export async function handleSessionReloadClick() {
+async function handleSessionReloadClick() {
   const cid = appState.activeConversationId;
   if (!cid) return;
   const btn = document.querySelector<HTMLButtonElement>('#session-reload-btn');
@@ -98,14 +98,14 @@ export async function handleSessionReloadClick() {
   }
 }
 
-export function bindSessionReloadEvents() {
+function bindSessionReloadEvents() {
   const btn = document.querySelector<HTMLButtonElement>('#session-reload-btn');
   if (!btn) return;
   btn.removeEventListener('click', handleSessionReloadClick);
   btn.addEventListener('click', handleSessionReloadClick);
 }
 
-export function renderSendButtonHtml(): string {
+function renderSendButtonHtml(): string {
   const disabled = canSendMessage() ? '' : ' disabled';
   return `
     <button class="send-btn" id="send-btn" type="button" aria-label="发送"${disabled}>
@@ -151,7 +151,7 @@ export function renderBalanceStatusBarHtml(): string {
   `;
 }
 
-export function renderQueuedPromptsHtml(): string {
+function renderQueuedPromptsHtml(): string {
   const conversationId = appState.activeConversationId;
   const items = conversationId ? appState.queuedPromptsBySession.get(conversationId) || [] : [];
   if (items.length === 0) return '';

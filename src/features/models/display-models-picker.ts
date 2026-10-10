@@ -2,12 +2,12 @@ import { escapeHtml } from '../../utils';
 import type { FetchedModel } from '../../types';
 import { showToast } from '../../ui';
 
-export interface DisplayModelsPickerSavePayload {
+interface DisplayModelsPickerSavePayload {
   display: string[];
   custom: string[];
 }
 
-export interface OpenDisplayModelsPickerOptions {
+interface OpenDisplayModelsPickerOptions {
   title?: string;
   syncLabel?: string;
   syncingLabel?: string;

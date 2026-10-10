@@ -5,13 +5,13 @@ import { toMillis } from '../../utils';
 import { showCopyToastMsg, showToast } from '../../ui';
 import type { Conversation } from '../../types';
 import { normalizeConversation } from './normalize';
-export function sanitizeFileName(name: string): string {
+function sanitizeFileName(name: string): string {
   const cleaned = name.replace(/[\\/:*?"<>|\r\n]+/g, '_').replace(/\s+/g, ' ').trim();
   return (cleaned || 'conversation').slice(0, 80);
 }
 
 /** 把会话内容拼成 Markdown 文本 */
-export function buildConversationMarkdown(c: Conversation): string {
+function buildConversationMarkdown(c: Conversation): string {
   const lines: string[] = [`# ${c.title || '未命名会话'}`, ''];
 
   lines.push(`- 会话 ID: \`${c.id}\``);

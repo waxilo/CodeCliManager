@@ -78,13 +78,13 @@ export function newChat() {
 }
 
 /** 关闭 New Chat 下拉框 */
-export function closeNewChatDropdown() {
+function closeNewChatDropdown() {
   document.querySelector('.new-chat-overlay')?.remove();
   document.querySelector('.new-chat-dropdown')?.remove();
 }
 
 /** 切换 New Chat 下拉框显示/隐藏 */
-export function toggleNewChatDropdown() {
+function toggleNewChatDropdown() {
   if (document.querySelector('.new-chat-dropdown')) {
     closeNewChatDropdown();
     return;
@@ -177,7 +177,7 @@ export async function pickNewWorkspaceDirectory(): Promise<void> {
 }
 
 /** 渲染 New Chat 下拉框内容 */
-export function renderNewChatDropdownContent(workspaces: WorkspaceGroup[]): string {
+function renderNewChatDropdownContent(workspaces: WorkspaceGroup[]): string {
   const plusSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
   const folderSvg = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>`;
 
@@ -290,7 +290,7 @@ export async function sendMessage() {
 }
 
 /** 立即执行一条已准备好的指令（新建会话时 conversationId 可为 null） */
-export async function executePreparedCommand(
+async function executePreparedCommand(
   conversationId: string | null,
   command: PreparedCommand,
   projectDir = '',

@@ -77,7 +77,7 @@ async function refreshDshEmbedBalance(): Promise<void> {
 }
 
 /** 退出 DSH 模式：恢复 CCM 界面 */
-export function exitDshMode(): void {
+function exitDshMode(): void {
   if (!appState.dshModeActive) return;
   appState.dshModeActive = false;
   shellApi.render();

@@ -18,7 +18,7 @@
   display: flex;
   align-items: center;
   flex-shrink: 0;
-  height: 38px;
+  height: var(--app-titlebar-height);
   padding: 0 12px 0 0;
   background: var(--color-titlebar);
   border-bottom: 1px solid var(--color-titlebar-border);
@@ -26,12 +26,14 @@
   -webkit-app-region: drag;
 }
 
-.platform-macos .app-titlebar {
-  height: 28px;
+/* 标题栏高度只有这一个来源：整页视图（.kiro-overlay 等）的顶部偏移也读同一个变量，
+   避免「改了标题栏高度、盖在上面的整页视图没跟着动」这种两处硬编码的老问题。 */
+.platform-macos {
+  --app-titlebar-height: 28px;
 }
 
-.platform-windows .app-titlebar {
-  height: 32px;
+.platform-windows {
+  --app-titlebar-height: 32px;
 }
 
 .app-titlebar-leading {
@@ -84,6 +86,64 @@
   flex-shrink: 0;
   margin-left: auto;
   -webkit-app-region: no-drag;
+}
+
+/* ---- 自绘窗口控制（仅 Windows；原生装饰已由 Rust 侧 apply_undecorated 取消）
+   尺寸/圆角/配色刻意与 .app-titlebar .toolbar-icon-btn 对齐，保证与标题栏其它图标按钮同源，
+   不引入第二套按钮语言。 ---- */
+.app-titlebar-window-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex-shrink: 0;
+  margin-left: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.window-control-btn {
+  width: 28px;
+  height: 28px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-icon);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  transition: background 0.2s, color 0.2s;
+}
+
+.window-control-btn:hover {
+  background: var(--color-bg-surface);
+  color: var(--color-text);
+}
+
+.window-control-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+/* 最大化后换成「叠层方框」；两个图标都在 DOM 里，靠类切换显隐，避免同步状态时改 innerHTML */
+.window-control-btn .wc-icon-restore {
+  display: none;
+}
+
+.window-control-btn.is-maximized .wc-icon-max {
+  display: none;
+}
+
+.window-control-btn.is-maximized .wc-icon-restore {
+  display: inline-flex;
+}
+
+/* 关闭是唯一使用危险色的控件，且静止时保持同一套克制 —— 只在 hover 时上色。
+   浅色下 --color-danger 偏深，配白字对比度足够；深色下同理。 */
+.window-control-btn.window-control-close:hover {
+  background: var(--color-danger);
+  color: #fff;
 }
 
 .app-titlebar .toolbar-icon-btn {

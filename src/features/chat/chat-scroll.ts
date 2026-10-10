@@ -118,17 +118,8 @@ export function requestMainChatFollow(): void {
   ensureMainChatScroll()?.requestFollow();
 }
 
-export function notifyMainChatIntrinsicLayoutChange(): void {
-  ensureMainChatScroll()?.notifyIntrinsicLayoutChange();
-}
-
 export function getMainChatScrollMode(): ChatScrollMode | null {
   return coordinator?.mode ?? null;
-}
-
-export function destroyMainChatScroll(): void {
-  rememberAndDestroyCoordinator();
-  pendingSessionKey = null;
 }
 
 export function resetMainChatScrollForTests(): void {

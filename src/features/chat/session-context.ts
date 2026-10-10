@@ -12,7 +12,7 @@ export function getActiveSessionKey(): string {
   return appState.activeConversationId || appState.activePendingSessionKey;
 }
 
-export function isNewChatSession(): boolean {
+function isNewChatSession(): boolean {
   return !appState.activeConversationId && !appState.activePendingSessionKey;
 }
 
@@ -24,7 +24,7 @@ export function getEffectiveProjectDir(): string {
   return appState.pendingProjectDir?.trim() || '';
 }
 
-export function hasRequiredProjectDir(): boolean {
+function hasRequiredProjectDir(): boolean {
   return getEffectiveProjectDir().length > 0;
 }
 
@@ -184,7 +184,7 @@ export function setSendButtonLoading(loading: boolean) {
 }
 
 /** 流式「待回复」占位已移除：状态改由输入框下方状态条承载。保留空实现兼容调用方。 */
-export function removePendingAssistantIndicator() {
+function removePendingAssistantIndicator() {
   document.querySelector('#pending-assistant')?.remove();
 }
 

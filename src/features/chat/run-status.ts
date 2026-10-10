@@ -28,7 +28,7 @@ export function formatElapsed(ms: number): string {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
-export interface RunStatusInfo {
+interface RunStatusInfo {
   status: string;
   /** 本轮运行已耗时（无计时锚点时为 null） */
   elapsedMs: number | null;

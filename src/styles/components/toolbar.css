@@ -132,18 +132,6 @@
   opacity: 0.75;
 }
 
-.toolbar-update-btn-icon {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-
-.toolbar-update-btn-icon svg {
-  width: 13px;
-  height: 13px;
-}
-
 .toolbar-update-btn.is-checking .toolbar-update-btn-icon {
   animation: claude-update-spin 1s linear infinite;
 }
@@ -252,20 +240,11 @@
   color: var(--color-text-secondary);
 }
 
-.claude-update-popover-hint,
 .claude-update-popover-status {
   margin: 0 0 10px;
   font-size: 12px;
   color: var(--color-text-secondary);
   line-height: 1.5;
-}
-
-.claude-update-popover-hint code {
-  font-size: 11px;
-  padding: 1px 5px;
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-surface);
-  color: var(--color-code);
 }
 
 .claude-update-popover-error {

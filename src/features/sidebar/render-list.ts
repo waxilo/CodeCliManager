@@ -9,19 +9,19 @@ import { refreshActiveTabContent } from './sidebar-tabs';
 export const UNCATEGORIZED_WORKSPACE_KEY = '__uncategorized__';
 
 /** 活跃会话的时间窗口：updated_at 在最近 N 小时内 */
-export const RECENT_HOURS = 24;
+const RECENT_HOURS = 24;
 
 /** 活跃列表至少展示的最近会话数 */
-export const MIN_ACTIVE_CONVERSATIONS = 10;
+const MIN_ACTIVE_CONVERSATIONS = 10;
 
 /** 判定会话是否属于「活跃」（最近 RECENT_HOURS 小时内有更新） */
-export function isRecentConversation(conv: Conversation, now = Date.now()): boolean {
+function isRecentConversation(conv: Conversation, now = Date.now()): boolean {
   // updated_at 后端为秒级（timestamp()），本地乐观气泡可能为毫秒；统一经 toMillis 归一化
   return toMillis(conv.updated_at) >= now - RECENT_HOURS * 3600 * 1000;
 }
 
 /** 活跃会话列表：近 24 小时内全部会话，且至少包含最近 10 条 */
-export function getRecentConversations(now = Date.now()): Conversation[] {
+function getRecentConversations(now = Date.now()): Conversation[] {
   const sorted = [...appState.conversations]
     .sort((a, b) => toMillis(b.updated_at) - toMillis(a.updated_at));
 
@@ -31,7 +31,7 @@ export function getRecentConversations(now = Date.now()): Conversation[] {
   );
 }
 
-export interface SidebarWorkspaceView {
+interface SidebarWorkspaceView {
   key: string;
   path: string;
   displayName: string;
@@ -42,7 +42,7 @@ export interface SidebarWorkspaceView {
   isUncategorized: boolean;
 }
 
-export function renderConversationItemHtml(c: Conversation): string {
+function renderConversationItemHtml(c: Conversation): string {
   const isActive = isConversationInstance(
     c,
     appState.activeConversationId,
@@ -98,7 +98,7 @@ export function renderConversationItemHtml(c: Conversation): string {
   `;
 }
 
-export function buildSidebarWorkspaceViews(
+function buildSidebarWorkspaceViews(
   convs: Conversation[] = appState.conversations,
 ): SidebarWorkspaceView[] {
   const { workspaces, uncategorized } = groupConversationsByWorkspace(convs);
@@ -167,7 +167,7 @@ const CONVERSATION_STATE_ICON =
   `<span class="conversation-state-icon">${CONVERSATION_RUNNING_DOT_HTML}</span>`;
 
 /** 渲染单个工作区卡片 */
-export function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: boolean): string {
+function renderWorkspaceCardHtml(ws: SidebarWorkspaceView, isExpanded: boolean): string {
   const key = escapeHtml(ws.key);
   const cardClasses = [
     'workspace-card',

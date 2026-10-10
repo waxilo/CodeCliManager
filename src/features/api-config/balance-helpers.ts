@@ -1,4 +1,4 @@
-import type { ApiProfileItem, DeepSeekBalanceData, KiroUsageData } from '../../types';
+import type { DeepSeekBalanceData, KiroUsageData } from '../../types';
 export function formatKiroExpiry(expiresAt: string | null): string {
   if (!expiresAt) return '—';
   const ms = Date.parse(expiresAt);
@@ -23,7 +23,7 @@ export function isDeepSeekBaseUrl(baseUrl: string): boolean {
   return baseUrl.trim().toLowerCase().includes('deepseek.com');
 }
 
-export function formatUsageNumber(value: number): string {
+function formatUsageNumber(value: number): string {
   if (!Number.isFinite(value)) return '0';
   if (Number.isInteger(value)) return String(value);
   return value.toFixed(2).replace(/\.?0+$/, '');
@@ -64,10 +64,6 @@ export function formatKiroUsageText(usage: KiroUsageData): string {
 export function formatDeepSeekBalanceText(balance: DeepSeekBalanceData): string {
   const avail = balance.isAvailable ? '可用' : '不足';
   return `${balance.totalBalance} ${balance.currency}（赠送 ${balance.grantedBalance} / 充值 ${balance.toppedUpBalance} · ${avail}）`;
-}
-
-export function isKiroProfile(profile: ApiProfileItem | undefined): boolean {
-  return Boolean(profile && profile.name === 'Kiro');
 }
 
 /** 当前是否走 Kiro 本地代理（不依赖 API 列表里的「Kiro」项） */

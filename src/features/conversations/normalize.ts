@@ -31,7 +31,7 @@ export function normalizeSessionEventPayload(raw: SessionEventPayload): SessionE
   };
 }
 
-export function resolveConversationProjectDir(
+function resolveConversationProjectDir(
   incoming: string | null | undefined,
   existing: string | null | undefined,
 ): string | null {

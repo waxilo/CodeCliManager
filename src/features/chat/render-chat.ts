@@ -301,17 +301,11 @@ export function renderMessageListShellHtml(messagesHtml = ''): string {
   `;
 }
 
-export function renderChatContent(): string {
-  const conversation = getActiveConversation();
-  const messages = buildDisplayMessages(conversation);
-  return renderMessageListShellHtml(renderConversationMessagesInnerHtml(messages));
-}
-
 // ── 统一渲染管线：流式块 / 实时工具卡 → chunk（与历史消息同构，供同一 diff 挂载） ──
 
 /** 合并后的流式块：rawStart/rawEnd 记录覆盖的原始块索引区间，
  *  供工具卡（blockIndexAtStart 为原始序号）换算到合并后的插入位置。 */
-export interface MergedStreamBlock extends StreamBlock {
+interface MergedStreamBlock extends StreamBlock {
   rawStart: number;
   rawEnd: number;
 }
@@ -535,7 +529,7 @@ export function renderChatAreaHtml(opts: { shellOnly?: boolean } = {}): string {
   `;
 }
 
-export function renderEmptyState(): string {
+function renderEmptyState(): string {
   return `
     <div class="empty-chat">
       <div class="empty-icon">💬</div>

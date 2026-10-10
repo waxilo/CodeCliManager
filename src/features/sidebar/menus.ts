@@ -130,7 +130,7 @@ export function closeWorkspaceContextMenu() {
  * - 由 ⋮ 按钮触发时锚定按钮右下角
  * - 由右键触发时锚定鼠标位置
  */
-export function toggleWorkspaceMenu(workspacePath: string, anchorEl: HTMLElement, event?: MouseEvent) {
+function toggleWorkspaceMenu(workspacePath: string, anchorEl: HTMLElement, event?: MouseEvent) {
   const existing = document.querySelector<HTMLElement>('.ws-menu-overlay');
   if (existing?.dataset.wsPath === workspacePath) {
     return closeWorkspaceContextMenu();
@@ -231,7 +231,7 @@ export function closeConversationMenu() {
  * - 由 ⋮ 按钮触发时锚定按钮右下角
  * - 由右键触发时锚定鼠标位置
  */
-export function toggleConversationMenu(
+function toggleConversationMenu(
   conversationId: string,
   sourcePath: string | null,
   anchorEl: HTMLElement,

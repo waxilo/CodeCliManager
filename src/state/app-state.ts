@@ -33,13 +33,13 @@ export const PERMISSION_MODE_STORAGE_KEY = 'codemanager-permission-mode';
 /** 侧边栏工作区展开状态持久化（localStorage key） */
 export const EXPANDED_WORKSPACES_KEY = 'expandedWorkspaces';
 
-export interface MainBalanceCache {
+interface MainBalanceCache {
   profileId: string;
   label: string;
   value: string;
 }
 
-export interface GitBranchCache {
+interface GitBranchCache {
   projectDir: string;
   branch: string;
 }
@@ -63,19 +63,19 @@ export interface ComposerDraft {
   importedFileRefs: ImportedFileRef[];
 }
 
-export interface StreamRefreshState {
+interface StreamRefreshState {
   rafId: number | null;
   pending: boolean;
   lastTime: number;
 }
 
-export interface ActiveInteractionPanel {
+interface ActiveInteractionPanel {
   conversationId: string;
   element: HTMLElement;
   cleanup: (result: 'allow' | 'deny') => void;
 }
 
-export interface PendingUserMessage {
+interface PendingUserMessage {
   content: string;
   refs?: FileRef[];
 }

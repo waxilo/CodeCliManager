@@ -3,7 +3,7 @@ import * as api from '../../api';
 import { getEffectiveProjectDir } from '../chat/session-context';
 import { syncStatusBarSections } from './balance';
 import { getMainBalanceBarEl } from './balance';
-export function setGitBranchContent(projectDir: string, branch: string): void {
+function setGitBranchContent(projectDir: string, branch: string): void {
   appState.gitBranchCache = { projectDir, branch };
   const bar = getMainBalanceBarEl();
   if (!bar) return;

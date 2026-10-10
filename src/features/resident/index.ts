@@ -8,9 +8,9 @@ import {
 } from './close-behavior';
 
 /** 后端 → 前端：主窗口收到关闭请求，需要用户裁决 */
-export const EVENT_CLOSE_REQUESTED = 'resident:close-requested';
+const EVENT_CLOSE_REQUESTED = 'resident:close-requested';
 /** 后端 → 前端：关闭行为在托盘菜单里被改过，需要回写本地 */
-export const EVENT_BEHAVIOR_CHANGED = 'resident:behavior-changed';
+const EVENT_BEHAVIOR_CHANGED = 'resident:behavior-changed';
 
 /** 关闭询问同一时刻只允许一个：连点关闭按钮不应叠出多个弹窗 */
 let closeDialogOpen = false;

@@ -7,7 +7,7 @@ import { getSettingsProfileListEl } from '../settings/view';
 
 const refreshGenerationByOverlay = new WeakMap<HTMLElement, number>();
 
-export function setSettingsFormEditable(overlay: HTMLElement, editable: boolean) {
+function setSettingsFormEditable(overlay: HTMLElement, editable: boolean) {
   for (const name of ['profileName', 'baseUrl', 'apiKey']) {
     const el = overlay.querySelector(`input[name="${name}"]`) as HTMLInputElement | null;
     if (el) el.disabled = !editable;
@@ -38,23 +38,12 @@ export function fillOfficialView(overlay: HTMLElement) {
   setProviderBalanceVisible(overlay, false);
 }
 
-/** 将完整 API Key 转换为首尾可见的脱敏字符串，例如 `sk-a••••••••••wxyz`。 */
-export function maskApiKey(key: string): string {
-  const trimmed = (key || '').trim();
-  if (!trimmed) return '';
-  if (trimmed.length <= 8) return '•'.repeat(trimmed.length);
-  const head = trimmed.slice(0, 4);
-  const tail = trimmed.slice(-4);
-  const dots = Math.max(6, Math.min(12, trimmed.length - 8));
-  return `${head}${'•'.repeat(dots)}${tail}`;
-}
-
 /** API Key 输入框三种模式：
  *  - empty：未保存密钥，纯输入框
  *  - view ：已保存密钥，显示脱敏 + [编辑][复制]
  *  - edit ：编辑中，显示输入框 + [取消]
  */
-export type ApiKeyBoxMode = 'empty' | 'view' | 'edit';
+type ApiKeyBoxMode = 'empty' | 'view' | 'edit';
 
 export function setApiKeyBoxMode(overlay: HTMLElement, mode: ApiKeyBoxMode) {
   const box = overlay.querySelector('.settings-apikey-box') as HTMLElement | null;
@@ -74,7 +63,7 @@ export function setApiKeyBoxMode(overlay: HTMLElement, mode: ApiKeyBoxMode) {
 }
 
 /** 重置 API Key 输入框（清空输入与脱敏缓存），常用于切换 profile 时。 */
-export function resetApiKeyBox(overlay: HTMLElement) {
+function resetApiKeyBox(overlay: HTMLElement) {
   const box = overlay.querySelector('.settings-apikey-box') as HTMLElement | null;
   if (!box) return;
   const valueEl = box.querySelector('.settings-apikey-display-value') as HTMLElement | null;
@@ -89,7 +78,7 @@ export function resetApiKeyBox(overlay: HTMLElement) {
 }
 
 /** 根据 profile 拉取脱敏密钥并展示首尾。明文密钥不进入前端，仅在用户点击复制时由后端写入剪贴板。 */
-export async function loadApiKeyPreview(overlay: HTMLElement, profileId: string | null) {
+async function loadApiKeyPreview(overlay: HTMLElement, profileId: string | null) {
   resetApiKeyBox(overlay);
   if (!profileId || profileId === OFFICIAL_PROFILE_ID) return;
   try {

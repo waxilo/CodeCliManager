@@ -12,7 +12,7 @@ export function getApiProfilesState(): Promise<ApiProfilesState> {
 }
 
 /** upsert_api_profile 参数：结构化类型，字段拼错在编译期暴露 */
-export interface UpsertApiProfileArgs extends Record<string, unknown> {
+interface UpsertApiProfileArgs extends Record<string, unknown> {
   profileId: string | null;
   name: string;
   config: {

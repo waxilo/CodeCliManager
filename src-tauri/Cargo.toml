@@ -1,6 +1,6 @@
 [package]
 name = "codecli-manager"
-version = "0.2.91"
+version = "0.2.92"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -19,6 +19,9 @@ tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
+# 下限 2.4.5：Windows 上从该版本起，第二个实例退出前会把「允许置前」权限移交给第一个实例，
+# 否则唤起窗口时 SetForegroundWindow 会被系统拒绝（只剩任务栏闪烁）。
+tauri-plugin-single-instance = "2.4.5"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["arbitrary_precision"] }
 chrono = { version = "0.4", features = ["serde"] }

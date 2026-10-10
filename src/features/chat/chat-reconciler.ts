@@ -7,7 +7,7 @@ const LOAD_EARLIER_KEY = 'aux:load-earlier';
 const EMPTY_KEY = 'aux:empty';
 
 /** A non-message root which participates in the same keyed reconciliation. */
-export interface ChatReconcilePlanItem {
+interface ChatReconcilePlanItem {
   html: string;
   revision: string;
 }
@@ -16,7 +16,7 @@ export interface ChatReconcilePlanItem {
  * `string` is accepted so refresh.ts can pass its existing HTML fields directly.
  * In that form the HTML itself is the revision.
  */
-export type ChatAuxiliaryPlanItem = string | ChatReconcilePlanItem;
+type ChatAuxiliaryPlanItem = string | ChatReconcilePlanItem;
 
 export interface ChatReconcileRequest {
   /** Stable parent whose direct children are owned by this reconciler. */
@@ -28,14 +28,14 @@ export interface ChatReconcileRequest {
   empty?: ChatAuxiliaryPlanItem | null;
 }
 
-export interface ChatReconcileResult {
+interface ChatReconcileResult {
   reused: number;
   inserted: number;
   replaced: number;
   removed: number;
 }
 
-export interface ChatReconcileStageOptions {
+interface ChatReconcileStageOptions {
   /** Number of new roots parsed between frame yields. Defaults to 20. */
   batchSize?: number;
   /** Injectable frame boundary, primarily useful to hosts and deterministic tests. */
@@ -50,7 +50,7 @@ export interface ChatReconcileStageOptions {
   onStageBatch?: (nodes: readonly HTMLElement[]) => void;
 }
 
-export type StagedChatReconcileResult =
+type StagedChatReconcileResult =
   | { status: 'committed'; generation: number; result: ChatReconcileResult }
   | { status: 'cancelled'; generation: number };
 

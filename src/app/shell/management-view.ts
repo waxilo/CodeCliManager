@@ -32,7 +32,7 @@ import {
   getCurrentCommittedChatRenderKey,
 } from '../../features/chat/refresh';
 
-export type ManagementViewKind = 'api-config' | 'settings' | 'skills';
+type ManagementViewKind = 'api-config' | 'settings' | 'skills';
 
 interface StashedMainDom {
   sidebar: HTMLElement | null;

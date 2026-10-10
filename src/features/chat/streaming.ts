@@ -78,7 +78,7 @@ function resolvePendingSessionKey(runId?: string | null): string | null {
   return pendingKeys.length === 1 ? pendingKeys[0] : null;
 }
 
-export function transferPendingSessionState(from: string, to: string): boolean {
+function transferPendingSessionState(from: string, to: string): boolean {
   if (!from || from === to) return false;
   const wasViewing = appState.activePendingSessionKey === from;
   const pendingRefresh = appState.streamRefreshBySession.get(from);
@@ -160,7 +160,7 @@ function isFailedTaskStatus(status: string): boolean {
 /** 子代理「启动成功」元数据结果（新版 Claude Code 的 Task/Agent 异步启动时，
  *  主链立即收到 "Async agent launched successfully" 这类 tool_result）。
  *  它不是子代理的完成结果：不能作为「完成」信号（实时卡 / reconcile 均需排除）。 */
-export function isSubagentLaunchMetadata(text: string): boolean {
+function isSubagentLaunchMetadata(text: string): boolean {
   const t = (text || '').trim();
   return (
     t.includes('Async agent launched successfully') ||
@@ -430,7 +430,7 @@ function createStreamBlock(state: StreamingState, type: 'thinking' | 'text'): St
   };
 }
 
-export function getStreamingState(sessionId: string): StreamingState {
+function getStreamingState(sessionId: string): StreamingState {
   if (!appState.streamingBySession.has(sessionId)) {
     appState.streamingBySession.set(sessionId, {
       blocks: [],
@@ -554,7 +554,7 @@ export function ensureAssistantPresent(sessionId: string, streamedText: string):
 }
 
 /** 将当前缓冲的文本追加到当前 text 块的 content */
-export function flushPendingTextDelta(sessionId: string) {
+function flushPendingTextDelta(sessionId: string) {
   const pending = appState.pendingTextDelta.get(sessionId);
   if (!pending) return;
   const state = getStreamingState(sessionId);
@@ -928,7 +928,7 @@ export function ensureChatViewVisible(): boolean {
   return false;
 }
 
-export function removeStreamingElements(sessionId?: string) {
+function removeStreamingElements(sessionId?: string) {
   // DOM 清理由最终 render plan 的 cursor reconcile 统一提交，禁止在状态清理时先缩短列表。
   if (sessionId && sessionId !== appState.activeConversationId) return;
   scheduleUiRefresh({ chat: true });

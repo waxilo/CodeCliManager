@@ -87,14 +87,6 @@
 }
 
 .session-id,
-.session-cwd {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  max-width: 100%;
-  line-height: 1.4;
-}
 
 .session-id-copy {
   display: inline-flex;
@@ -171,10 +163,6 @@
 
 .session-id {
   color: var(--color-text-secondary);
-}
-
-.session-cwd {
-  color: var(--color-text-muted);
 }
 
 /* 输入框外下方：上下文环形指示器 */

@@ -8,7 +8,7 @@ import { markSessionRunStart } from './run-status';
 import { canSendMessage, getActiveSessionKey, isPendingSessionKey, isSendButtonLoading } from './session-context';
 import { refreshConversationFromBackend } from '../conversations/load';
 import { updateConversationListSpinner } from '../sidebar/render-list';
-export async function invokeRetryMessage(mode: 'regenerate' | 'undo') {
+async function invokeRetryMessage(mode: 'regenerate' | 'undo') {
   if (!appState.activeConversationId) {
     showCopyToastMsg(mode === 'regenerate' ? '无法重新生成' : '无法撤回');
     return;

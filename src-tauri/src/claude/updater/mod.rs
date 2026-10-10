@@ -67,6 +67,8 @@ pub(crate) fn is_version_newer(latest: &str, installed: &str) -> bool {
 pub(crate) const CLAUDE_VERSION_TIMEOUT: Duration = Duration::from_secs(10);
 pub(crate) const CLAUDE_UPDATE_TIMEOUT: Duration = Duration::from_secs(300);
 pub(crate) const CLAUDE_INSTALL_TIMEOUT: Duration = Duration::from_secs(600);
+// 只被非 Windows 的 bash 安装分支使用（Windows 走下面的 CLAUDE_INSTALL_PS1_URL）。
+#[cfg(not(target_os = "windows"))]
 pub(crate) const CLAUDE_INSTALL_SH_URL: &str = "https://claude.ai/install.sh";
 #[cfg(windows)]
 pub(crate) const CLAUDE_INSTALL_PS1_URL: &str = "https://claude.ai/install.ps1";
@@ -111,6 +113,8 @@ pub(crate) fn is_user_home_install(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+// 只被 macOS 提权分支（osascript do shell script）使用。
+#[cfg(target_os = "macos")]
 pub(crate) fn shell_escape_double_quoted(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
@@ -311,7 +315,7 @@ pub(crate) fn run_update_child_with_progress(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (tx, rx) = std::sync::mpsc::channel::<String>();
-    let mut spawn_reader = |stream: Option<Box<dyn std::io::Read + Send>>| {
+    let spawn_reader = |stream: Option<Box<dyn std::io::Read + Send>>| {
         if let Some(stream) = stream {
             let tx = tx.clone();
             std::thread::spawn(move || {
@@ -723,6 +727,8 @@ pub(crate) fn run_claude_code_update_silent_blocking(
     let latest = fetch_latest_claude_version().ok();
     let can_silent = claude_install_allows_silent(&path);
 
+    // used_elevation 只在 macOS 分支被置真；其他平台不需要 mut。
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut used_elevation = false;
     let mut errors: Vec<String> = Vec::new();
     let mut message: Option<String> = None;

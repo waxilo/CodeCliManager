@@ -2,6 +2,10 @@ use std::time::Duration;
 use tauri::{AppHandle, LogicalSize, Manager, PhysicalPosition, Position, Size, WebviewWindow};
 
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
+
+/// 主窗口 label，与 `tauri.conf.json` 的 `app.windows[0]` 对应。
+pub(crate) const MAIN_WINDOW: &str = "main";
+
 pub(crate) const WINDOW_ASPECT_WIDTH: f64 = 16.0;
 pub(crate) const WINDOW_ASPECT_HEIGHT: f64 = 10.0;
 pub(crate) const WINDOW_MAX_SCREEN_RATIO: f64 = 0.85;
@@ -171,10 +175,53 @@ pub(crate) fn schedule_main_window_layout(window: WebviewWindow, app: AppHandle)
 }
 
 pub(crate) fn apply_responsive_window_size(app: &tauri::App) {
-    let Some(window) = app.get_webview_window("main") else {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
         eprintln!("[window] main window not found");
         return;
     };
 
     schedule_main_window_layout(window, app.handle().clone());
+}
+
+/// 去掉原生窗口装饰（标题栏 + 系统最小化/最大化/关闭按钮），改由前端自绘。
+///
+/// 平台差异整个收在本函数内，调用点不需要 `cfg`：只作用于 Windows。
+/// macOS 的红绿灯是平台惯例，且 `app-shell.css` 已为它在标题栏左侧预留 72px 留白，
+/// 移除后窗口会失去关闭入口，因此保持原样。
+///
+/// 调用时机必须早于窗口首次 `show()`：窗口在配置里是 `visible: false`（延迟到布局完成后才显示），
+/// 所以这里调用不会出现「原生标题栏一闪」。
+///
+/// 无边框后仍可缩放：Tauri 在 `set_decorations(false)` 时会自动为 Windows 挂载
+/// `undecorated_resizing` 处理器；拖动与双击最大化由前端的 `data-tauri-drag-region` 负责。
+pub(crate) fn apply_undecorated(app: &AppHandle) {
+    #[cfg(target_os = "windows")]
+    {
+        let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+            eprintln!("[window] 未找到主窗口 {MAIN_WINDOW}，无法取消系统窗口装饰");
+            return;
+        };
+        if let Err(e) = window.set_decorations(false) {
+            eprintln!("[window] 取消系统窗口装饰失败: {e}");
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    let _ = app;
+}
+
+/// 唤起主窗口：把「隐藏在托盘 / 已最小化 / 被其它窗口挡住」的窗口恢复到前台。
+///
+/// 顺序不可交换：tao 的 `set_focus` 会先看窗口标志，只要窗口处于隐藏或最小化就**直接跳过**
+/// 聚焦动作，所以必须先 `unminimize` + `show`，否则窗口被显示出来却仍停在别的窗口后面。
+///
+/// 这是「用户想打开应用」的统一落点，被三处复用：托盘菜单/左键、单实例转交（重复启动）、
+/// macOS 点击 Dock 图标。
+pub(crate) fn show_main_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
+        eprintln!("[window] 未找到主窗口 {MAIN_WINDOW}，无法唤起");
+        return;
+    };
+    let _ = window.unminimize();
+    let _ = window.show();
+    let _ = window.set_focus();
 }

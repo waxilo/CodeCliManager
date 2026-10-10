@@ -7,7 +7,7 @@ export function closeProfileContextMenu() {
   document.querySelector('.profile-context-menu-overlay')?.remove();
 }
 
-export interface ProfileContextMenuOptions {
+interface ProfileContextMenuOptions {
   x: number;
   y: number;
   profileId: string;

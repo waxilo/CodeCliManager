@@ -1,6 +1,6 @@
-export type CloseChoice = 'tray' | 'exit';
+type CloseChoice = 'tray' | 'exit';
 
-export interface CloseDialogResult {
+interface CloseDialogResult {
   choice: CloseChoice;
   /** 用户勾了「记住我的选择」 */
   remember: boolean;

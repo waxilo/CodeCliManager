@@ -205,7 +205,6 @@
   color: var(--color-danger);
 }
 
-.display-models-selected-list,
 .display-models-api-list,
 .display-models-custom-list {
   display: grid;
@@ -351,10 +350,6 @@
   color: var(--color-text);
 }
 
-.model-picker-toolbar {
-  display: flex;
-}
-
 .model-picker-search {
   flex: 1;
   width: 100%;
@@ -424,75 +419,10 @@
   color: var(--color-text-muted);
 }
 
-.model-picker-item {
-  width: 100%;
-  border: 1px solid transparent;
-  border-radius: var(--radius-md);
-  background: var(--color-bg-elevated);
-  color: var(--color-text);
-  padding: 8px 10px;
-  text-align: left;
-  cursor: pointer;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.model-picker-item:hover {
-  border-color: var(--color-bg-surface-hover);
-  background: var(--color-bg-surface);
-}
-
-.model-picker-item-id {
-  font-size: 12px;
-  font-weight: 600;
-  word-break: break-all;
-}
-
-.model-picker-item-owner {
-  font-size: 11px;
-  color: var(--color-text-muted);
-}
-
 .model-picker-tip {
   margin: 0;
   font-size: 11px;
   color: var(--color-text-muted);
-}
-
-.model-picker-footer {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  padding-top: 4px;
-}
-
-.model-picker-cancel,
-.model-picker-confirm {
-  border: none;
-  border-radius: var(--radius-lg);
-  font-size: 13px;
-  padding: 8px 14px;
-  cursor: pointer;
-}
-
-.model-picker-cancel {
-  background: var(--color-bg-surface-hover);
-  color: var(--color-text);
-}
-
-.model-picker-cancel:hover {
-  background: var(--color-bg-surface-active);
-}
-
-.model-picker-confirm {
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  font-weight: 600;
-}
-
-.model-picker-confirm:hover {
-  background: var(--color-accent-soft);
 }
 
 .settings-path {
@@ -502,83 +432,8 @@
   word-break: break-all;
 }
 
-.settings-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--color-border);
-  flex-shrink: 0;
-}
-
-.settings-footer-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-left: auto;
-}
-
-.settings-actions {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin-top: 4px;
-}
-
-.settings-actions-main {
-  display: flex;
-  gap: 10px;
-}
-
-.settings-btn-secondary,
-.settings-btn-primary {
-  min-width: 80px;
-  height: 36px;
-  padding: 0 16px;
-  border: none;
-  border-radius: var(--radius-lg);
-  font-size: 14px;
-  cursor: pointer;
-}
-
-.settings-btn-secondary {
-  background: var(--color-bg-surface-hover);
-  color: var(--color-text);
-}
-
-.settings-btn-secondary:hover:not(:disabled) {
-  background: var(--color-bg-surface-active);
-}
-
-.settings-btn-secondary:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.settings-btn-danger {
-  background: var(--color-danger-bg);
-  color: var(--color-danger);
-}
-
-.settings-btn-danger:hover:not(:disabled) {
-  background: var(--color-danger-bg-hover);
-}
-
-.settings-btn-primary {
-  background: var(--color-accent);
-  color: var(--color-on-accent);
-  font-weight: 600;
-}
-
-.settings-btn-primary:hover:not(:disabled) {
-  background: var(--color-accent-hover);
-}
-
-.settings-btn-primary:disabled {
-  opacity: 0.7;
-  cursor: not-allowed;
-}
+/* 管理页通用零件（.settings-footer / .settings-footer-actions、
+   .settings-btn-primary / -secondary / -danger）原本写在这个文件里 ——
+   它们被 API 配置、Kiro、技能、DSH 多个页面共用，与「模型选择器」毫无关系，
+   已收口到 settings.css（与 .settings-header / .settings-form 放在一起）。 */
 

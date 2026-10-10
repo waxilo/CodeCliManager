@@ -1,43 +1,37 @@
-.settings-overlay {
-  position: fixed;
-  inset: 0;
-  background: var(--color-overlay);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 1000;
-  padding: 24px;
-}
 
 .main-content.is-api-config {
   overflow: hidden;
 }
 
+/* ── 管理页框架：API 配置 / 设置 / 技能 / Kiro 四页共用同一组令牌 ──
+   内边距与内容列上限只在 theme.css 里定义一次（--page-padding / --page-max-width），
+   各页只负责把令牌套到自己的框架元素上。原先四页各写一套
+   （20/24/16 与 28/32、内容列 640 与 720），切换页面时右缘和内边距都会跳。 */
 .api-config-view {
   flex: 1;
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 20px 24px 16px;
+  padding: var(--page-padding);
   overflow: hidden;
 }
 
+/* 内容列铺满可用宽度：不再「限宽 640px 贴左」，
+   否则页头铺满、内容只占左边一半，右缘严重错位（Kiro 页原先就是这样）。 */
 .api-config-view .settings-form {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  max-width: 640px;
+  max-width: var(--page-max-width);
   padding-right: 4px;
 }
 
+/* 页头与页脚跟内容列同一个宽度上限，三者右缘对齐。
+   页脚自身的对齐/分隔线在 settings.css 的 .settings-footer 里定义一次，
+   这里不再覆盖（原先那条 margin-left:0 会让本页按钮左对齐、与 Kiro 页相反）。 */
+.api-config-view .settings-header,
 .api-config-view .settings-footer {
-  margin-top: 16px;
-  flex-shrink: 0;
-  max-width: 640px;
-}
-
-.api-config-view .settings-footer-actions {
-  margin-left: 0;
+  max-width: var(--page-max-width);
 }
 
 /* Kiro 反代卡片已迁至 components/kiro.css */
@@ -134,23 +128,36 @@
   background: var(--color-danger);
 }
 
+/* 设置页 / 技能页的内容框架：内边距、内容列上限与另外两页共用同一组令牌。 */
 .settings-update-view {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 28px 32px;
+  padding: var(--page-padding);
 }
 
+/* 内容列与另外三页同一个宽度上限 —— 原先这里没有任何上限，
+   只有「更新说明」单独限了 720px：宽窗口下本页会一路铺到右边缘，
+   而 API 配置页 / Kiro 页在 1100px 处收住，同一排页面的右缘对不上。 */
+.settings-update-view > * {
+  max-width: var(--page-max-width);
+}
+
+/* 这一页是「标题栏弹层」的 DOM 复用到整页里的（renderAppUpdatePopoverBody 两边共用），
+   所以弹层里 13px 的小标题在这里要放大到与 .settings-title 同一档 —— 否则四个管理页的
+   页头是 18 / 16 / 13 三种字号。关闭键的页面级规格在 settings.css 里与 .settings-close-btn 同列。 */
 .settings-update-view .claude-update-popover-header {
   margin-bottom: 20px;
 }
 
-.settings-update-view .claude-update-popover-actions {
-  justify-content: flex-start;
+.settings-update-view .claude-update-popover-header strong {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text);
 }
 
-.settings-update-view .app-update-notes-body {
-  max-width: 720px;
+.settings-update-view .claude-update-popover-actions {
+  justify-content: flex-start;
 }
 
 .permission-mode-bar {

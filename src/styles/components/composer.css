@@ -829,22 +829,6 @@
   font-weight: 600;
 }
 
-.start-btn {
-  padding: 12px 24px;
-  background: var(--color-accent);
-  border: none;
-  border-radius: var(--radius-lg);
-  color: var(--color-on-accent);
-  font-size: 14px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: background 0.2s;
-}
-
-.start-btn:hover {
-  background: var(--color-accent-hover);
-}
-
 ::-webkit-scrollbar {
   width: 6px;
 }
@@ -878,15 +862,6 @@
 
 .running-subagent-item {
   border: 1px solid color-mix(in srgb, var(--color-composer-border) 70%, transparent);
-}
-
-/* ── 子代理进度行（复用：输入框上方进行中子代理） ───────────── */
-.subagent-progress-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 140px;
-  overflow-y: auto;
 }
 
 .subagent-row {

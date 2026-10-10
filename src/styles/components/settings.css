@@ -1,28 +1,3 @@
-.settings-dialog {
-  width: min(560px, 100%);
-  max-height: calc(100vh - 48px);
-  overflow-y: auto;
-  background: var(--color-bg-base);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-xl);
-  padding: 20px;
-  box-shadow: var(--shadow-lg);
-}
-
-.settings-dialog-wide {
-  width: min(860px, 100%);
-  display: flex;
-  flex-direction: column;
-}
-
-.settings-body {
-  display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
-  gap: 16px;
-  align-items: start;
-  flex: 1;
-  min-height: 0;
-}
 
 .settings-profiles {
   display: flex;
@@ -44,13 +19,6 @@
   font-size: 11px;
   font-weight: 400;
   color: var(--color-text-muted);
-}
-
-.settings-footer-left {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
 }
 
 .settings-add-profile {
@@ -102,15 +70,6 @@
   gap: 6px;
   max-height: 420px;
   overflow-y: auto;
-}
-
-.settings-profile-empty {
-  padding: 16px 12px;
-  border: 1px dashed var(--color-border);
-  border-radius: var(--radius-lg);
-  color: var(--color-text-muted);
-  font-size: 12px;
-  text-align: center;
 }
 
 .settings-profile-item {
@@ -257,7 +216,13 @@
   color: var(--color-text-muted);
 }
 
-.settings-close-btn {
+/* 页面级关闭键：管理页页头右上角只有这一种规格（40×40 / 18px 字形）。
+   .claude-update-popover-close 在「设置页整页复用标题栏弹层 DOM」那一处也是页面级
+   （同一个 render 函数被弹层和整页共用，所以只能在容器上做区分），
+   因此在这里一并列出 —— 而不是去 api-config.css 把同一组尺寸再抄一遍。
+   弹层里的那个仍然是 toolbar.css 的 24px 小尺寸。 */
+.settings-close-btn,
+.settings-update-view .claude-update-popover-close {
   width: 40px;
   height: 40px;
   border: none;
@@ -273,7 +238,8 @@
   line-height: 1;
 }
 
-.settings-close-btn:hover {
+.settings-close-btn:hover,
+.settings-update-view .claude-update-popover-close:hover {
   background: var(--color-bg-surface);
   color: var(--color-text);
 }
@@ -282,6 +248,82 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+
+/* ── 管理页页脚（唯一来源）─────────────────────────────────────
+   与 .settings-header / .settings-form 是同一套「管理页零件」，
+   所以放在这里；此前它被写在 model-picker.css（模型选择器）里，属于放错文件，
+   而 API 配置页又额外覆盖成左对齐 —— 于是同一个页脚，Kiro 右对齐、API 配置左对齐，
+   切换页面按钮位置会跳。现统一为右对齐，与对话框操作栏 .confirm-actions 的约定一致。 */
+.settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.settings-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+/* ── 管理页按钮（唯一来源）─────────────────────────────────────
+   被 API 配置 / Kiro / 技能 / DSH 四个页面共用，原先写在 model-picker.css 里。
+   主按钮 12px 圆角、次按钮 8px 圆角（见 theme-industrial.css 的收束规则），
+   两者同高 36px —— 页脚里并排出现时基线不跳。 */
+.settings-btn-secondary,
+.settings-btn-primary {
+  min-width: 80px;
+  height: 36px;
+  padding: 0 16px;
+  border: none;
+  border-radius: var(--radius-lg);
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.settings-btn-secondary {
+  background: var(--color-bg-surface-hover);
+  color: var(--color-text);
+}
+
+.settings-btn-secondary:hover:not(:disabled) {
+  background: var(--color-bg-surface-active);
+}
+
+.settings-btn-secondary:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.settings-btn-danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.settings-btn-danger:hover:not(:disabled) {
+  background: var(--color-danger-bg-hover);
+}
+
+.settings-btn-primary {
+  background: var(--color-accent);
+  color: var(--color-on-accent);
+  font-weight: 600;
+}
+
+.settings-btn-primary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.settings-btn-primary:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
 }
 
 .settings-field {
@@ -545,13 +587,6 @@
   gap: 8px;
 }
 
-.global-config-title {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 650;
-  color: var(--color-text);
-}
-
 .global-config-subtitle {
   margin: 0;
   font-size: 12px;
@@ -798,15 +833,17 @@
   gap: 4px;
 }
 
+/* DSH 分区同样嵌在 .settings-update-view 里，标题与副标题跟另外三页的
+   .settings-title(18px) / .settings-subtitle(13px) 取同一档。 */
 .dsh-title {
   margin: 0;
-  font-size: 16px;
-  font-weight: 650;
+  font-size: 18px;
+  font-weight: 600;
   color: var(--color-text);
 }
 
 .dsh-subtitle {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--color-text-muted);
 }
 
@@ -1018,14 +1055,6 @@
   width: 100%;
   border: 0;
   background: #fff;
-}
-
-/* 设置侧栏分区间的分隔线 */
-.settings-section-divider {
-  height: 1px;
-  margin: 6px 10px;
-  background: var(--color-border);
-  flex-shrink: 0;
 }
 
 /* DSH 嵌入加载状态提示（iframe 未就绪/超时时的反馈） */

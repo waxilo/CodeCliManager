@@ -281,6 +281,8 @@ fn set_sensitive_permissions(_path: &Path) -> Result<(), String> {
     Ok(())
 }
 
+// 非 Unix 下函数体不读 path（目录 fsync 只在 Unix 有意义），避免出现未使用参数警告。
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn sync_directory(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {

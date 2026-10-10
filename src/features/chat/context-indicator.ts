@@ -6,13 +6,13 @@ export function formatTokenCount(n: number): string {
   return String(n);
 }
 
-export function getContextWindowFor(tokens: number): number {
+function getContextWindowFor(tokens: number): number {
   // 用量超过 20 万即判定启用了 1M 上下文窗口，否则按标准 20 万
   return tokens > 200_000 ? 1_000_000 : 200_000;
 }
 
 /** 右下角上下文环形指示器（参考 Claude 桌面端），悬停显示剩余空间 */
-export function renderContextIndicatorInner(): string {
+function renderContextIndicatorInner(): string {
   const conv = getActiveConversation();
   const tokens = conv?.context_tokens ?? 0;
   if (!conv || tokens <= 0) return '';

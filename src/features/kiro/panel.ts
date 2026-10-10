@@ -24,10 +24,6 @@ let kiroUsageTimer: number | null = null;
 /** 模块级互斥：防止连点启动/停止与 render 重绘后按钮重新可点导致并发 invoke */
 let isTogglingKiroProxy = false;
 
-export function isKiroProxyToggling(): boolean {
-  return isTogglingKiroProxy;
-}
-
 export function setKiroUsageText(text: string) {
   const el = document.querySelector('#kiro-card [data-kiro-usage]') as HTMLElement | null;
   if (el) el.textContent = text;

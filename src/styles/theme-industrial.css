@@ -1,0 +1,292 @@
+/* ============================================================
+   工业风增强层（Industrial Skin）
+   ------------------------------------------------------------
+   token 层（theme.css）解决的是「颜色与度量」；这一层把
+   「卡片 / 圆角 / 毛玻璃 / 胶囊」四件事真正落到组件上。
+
+   位置约定：本文件是 index.css 的最后一条 @import。CSS 层叠中
+   同优先级后加载者胜，因此这里用与组件**相同的单类选择器**即可
+   覆盖，不需要 !important，也不会与组件规则打架。
+
+   边界约定（工业风的克制感来自这里）：
+   - 主 CTA（确认/发送/新建）保持 8–12px 圆角，不做胶囊、不做渐变
+   - 毛玻璃只用于浮层，且必须配 @supports 降级
+   - 卡片阴影极轻，层级主要靠 surface 阶梯 + 发丝边框表达
+   ============================================================ */
+
+/* ══════════════════════════════════════════════════════════
+   1. 浮层：毛玻璃 + 顶部高光
+   玻璃要让「背后的界面」被模糊才成立，因此底色必须半透明，
+   同时靠 inset 高光边给面板一条「被光照到」的顶边。
+   ══════════════════════════════════════════════════════════ */
+
+.confirm-dialog,
+.confirm-dialog-wide,
+.mcp-dialog,
+.mcp-import-dialog,
+.model-picker-dialog,
+.pdf-preview-dialog,
+.text-preview-dialog,
+.new-chat-dropdown,
+.conv-menu-dropdown,
+.profile-context-menu,
+.claude-update-popover,
+.chat-model-picker-panel,
+.interaction-panel,
+.todo-panel {
+  background: var(--glass-bg-strong);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  border: 1px solid var(--glass-border);
+  box-shadow:
+    var(--shadow-lg),
+    inset 0 1px 0 var(--glass-highlight);
+}
+
+/* 小尺寸浮层用更透的一档，玻璃感更强 */
+.new-chat-dropdown,
+.conv-menu-dropdown,
+.profile-context-menu,
+.chat-model-picker-panel,
+.claude-update-popover {
+  background: var(--glass-bg);
+}
+
+/* 遮罩：只做轻微模糊，避免与浮层自身的 blur 叠加成糊成一片。
+   注意必须用 --color-overlay 而不是 --color-bg-deep：后者在浅色下是纯白，
+   拿来当遮罩等于往浮层上盖一层白雾，浮层会糊进背景里。
+
+   ⚠️ 这里只放「盖在页面之上、故意让下面透出来」的模态遮罩。
+   整页视图（如 .kiro-overlay，它自带不透明底色、替代整个主区）**绝不能**进这个列表：
+   一旦被套上 --color-overlay + blur，整页会变成一层压暗模糊的模态，
+   背后的聊天页糊出来，观感与「深色下 72% 黑」的差异都会冒出来。 */
+.confirm-overlay,
+.mcp-dialog-overlay,
+.model-picker-overlay,
+.pdf-preview-overlay,
+.text-preview-overlay,
+.new-chat-overlay,
+.conv-menu-overlay,
+.profile-context-menu-overlay,
+.claude-update-popover-overlay,
+.ws-menu-overlay,
+.sidebar-loading-overlay {
+  background: var(--color-overlay);
+  -webkit-backdrop-filter: blur(5px);
+  backdrop-filter: blur(5px);
+}
+
+/* 无 backdrop-filter 时（部分 Tauri/WebView、旧 Linux）退回实心面板 */
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  .confirm-dialog,
+  .confirm-dialog-wide,
+  .mcp-dialog,
+  .mcp-import-dialog,
+  .model-picker-dialog,
+  .pdf-preview-dialog,
+  .text-preview-dialog,
+  .new-chat-dropdown,
+  .conv-menu-dropdown,
+  .profile-context-menu,
+  .claude-update-popover,
+  .chat-model-picker-panel,
+  .interaction-panel,
+  .todo-panel {
+    background: var(--color-bg-elevated);
+  }
+}
+
+/* ══════════════════════════════════════════════════════════
+   2. 卡片：发丝边框 + 极轻双层阴影 + 顶部高光
+   ══════════════════════════════════════════════════════════ */
+
+/* Kiro 页的页内卡片也并入这一组：它们是普通卡片，不是浮层。
+   原先它们各写各的背景（白 / 灰 / 毛玻璃半透明白交替），列入同一组后
+   与其它页面的卡片由**同一条规则**产出，不再有「深浅不一样」。 */
+.global-config-card,
+.imported-file-card,
+.mcp-server-card,
+.model-info-card,
+.workspace-card,
+.display-models-tile,
+.kiro-status-panel,
+.kiro-metric,
+.kiro-meta,
+.kiro-model-entry,
+.kiro-access {
+  border: 1px solid var(--card-border);
+  border-radius: var(--card-radius);
+  background: var(--card-bg);
+  box-shadow:
+    var(--card-shadow),
+    inset 0 1px 0 var(--glass-highlight);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    background 0.15s ease;
+}
+
+/* 可点击的卡片才给「抬升」反馈。
+   .kiro-model-entry 是按钮，同样并入这里 —— 不再给它单独一套强调色悬停，
+   避免同一页面里出现两种「可点卡片」的反馈语言。 */
+.global-config-card:hover,
+.imported-file-card:hover,
+.mcp-server-card:hover,
+.model-info-card:hover,
+.workspace-card:hover,
+.display-models-tile:hover,
+.kiro-model-entry:hover {
+  border-color: var(--card-border-hover);
+  box-shadow:
+    var(--card-shadow-hover),
+    inset 0 1px 0 var(--glass-highlight);
+}
+
+/* 工具卡 / 提问卡是流内信息卡：保留左侧色条，只加圆角与顶边高光 */
+.tool-card,
+.ask-card {
+  border-radius: var(--card-radius);
+  background: var(--card-bg);
+  box-shadow: inset 0 1px 0 var(--glass-highlight);
+}
+
+/* 代码块：抬到画布之上，用更规整的大圆角 */
+.code-block-wrapper {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--card-shadow);
+}
+
+/* 输入区：从「灰色实心块」改为卡片，并给聚焦态一条强调色边 */
+.input-composer {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-xl);
+  background: var(--card-bg);
+  box-shadow:
+    var(--card-shadow),
+    inset 0 1px 0 var(--glass-highlight);
+  transition:
+    border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.input-composer:focus-within {
+  border-color: color-mix(in srgb, var(--color-accent) 55%, transparent);
+  box-shadow:
+    var(--card-shadow),
+    inset 0 1px 0 var(--glass-highlight),
+    0 0 0 3px var(--color-accent-ring);
+}
+
+/* ══════════════════════════════════════════════════════════
+   3. 胶囊：只给「次级控件」——标签 / 徽章 / chip / 分段 tab / 图标按钮
+   ══════════════════════════════════════════════════════════ */
+
+.sidebar-tab,
+.tool-status,
+.mcp-badge,
+.ask-card-badge,
+.global-config-card-badge,
+.settings-profile-badge,
+.permission-mode-chip,
+.file-ref-chip,
+.sidebar-section-label-count,
+.code-lang-badge,
+.toolbar-update-btn-dot {
+  border-radius: var(--pill-radius);
+}
+
+/* 方形图标按钮胶囊化 = 圆形，是「柔和化」最直观的一处 */
+.toolbar-icon-btn,
+.ws-icon-btn,
+.msg-copy-btn,
+.msg-action-btn,
+.refresh-btn,
+.conv-more-btn,
+.settings-close-btn,
+.session-reload-btn,
+.code-copy-btn {
+  border-radius: var(--pill-radius);
+}
+
+/* 次级按钮（非 CTA）统一到 8px 圆角，与主 CTA 拉开一致的收束感 */
+.settings-btn-secondary,
+.mcp-dialog-btn,
+.display-models-custom-add-btn {
+  border-radius: var(--radius-md);
+}
+
+/* ══════════════════════════════════════════════════════════
+   4. 细节：统一焦点环 / 收敛游离圆角 / 滚动条
+   ══════════════════════════════════════════════════════════ */
+
+/* 焦点环只给可交互控件，不污染全局 */
+button:focus-visible,
+[role='button']:focus-visible,
+a:focus-visible,
+summary:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--color-accent-ring);
+  outline-offset: 1px;
+}
+
+/* 收敛组件里残留的游离圆角值 */
+.new-chat-dropdown-action {
+  border-radius: var(--radius-sm);
+}
+
+/* 滚动条：无边框轨道 + 内缩胶囊滑块，是工业风最容易露怯的地方 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-bg-surface-active) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-bg-surface-active);
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: var(--pill-radius);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-strong);
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ══════════════════════════════════════════════════════════
+   5. 消息流：气泡与内联元素
+   ══════════════════════════════════════════════════════════ */
+
+/* 用户气泡：一角收小以保留「对话」的指向性，其余规整圆角 */
+.message.user .message-content {
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-xs) var(--radius-lg);
+  box-shadow: var(--card-shadow);
+}
+
+/* 行内代码：等宽 + 胶囊感的小圆角 + 单一强调色 */
+.markdown-body code {
+  border-radius: var(--radius-sm);
+  background: var(--color-md-inline-bg);
+  color: var(--color-code);
+}
+
+/* 表格：圆角需要靠外层裁切才能显出来 */
+.markdown-body table {
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}

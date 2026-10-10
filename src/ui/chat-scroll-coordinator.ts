@@ -7,7 +7,7 @@ import {
   type UserScrollDirection,
 } from './chat-scroll-reducer';
 
-export interface ChatScrollMountIdentity {
+interface ChatScrollMountIdentity {
   readonly sessionKey: string;
   readonly mountEpoch: number;
 }

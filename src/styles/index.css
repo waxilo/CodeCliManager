@@ -19,3 +19,6 @@
 @import './components/attachments.css';
 @import './components/tool-cards.css';
 @import './utilities/animations.css';
+
+/* 工业风增强层：必须在最后 —— 同优先级下后加载者胜出（见文件头注释） */
+@import './theme-industrial.css';

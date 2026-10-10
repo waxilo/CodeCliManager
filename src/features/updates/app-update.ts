@@ -297,7 +297,7 @@ export function closeAppUpdatePopover() {
 }
 
 /** 若更新弹层/设置页开着，用当前状态重渲染内容并重绑事件。 */
-export function refreshUpdatePanel(): void {
+function refreshUpdatePanel(): void {
   const panel = document.querySelector('#app-update-popover, #settings-app-update-view');
   if (panel) {
     panel.innerHTML = renderAppUpdatePopoverBody();
@@ -306,7 +306,7 @@ export function refreshUpdatePanel(): void {
 }
 
 /** 更新过程分步状态文案；变更后立即刷新弹层，让用户看到内部正在做什么。 */
-export function setAppUpdateStatusText(text: string | null): void {
+function setAppUpdateStatusText(text: string | null): void {
   appState.appUpdateStatusText = text;
   refreshUpdatePanel();
 }
@@ -326,7 +326,7 @@ function detectPlatformTargetKeys(): string[] {
 }
 
 /** 从更新清单里提取当前平台的安装包直链（镜像或 GitHub 原链，与应用实际下载地址一致）。 */
-export function extractAppUpdateDirectUrl(update: AppUpdate): string | null {
+function extractAppUpdateDirectUrl(update: AppUpdate): string | null {
   const platforms = update.rawJson?.platforms as
     | Record<string, { url?: string } | undefined>
     | undefined;

@@ -7,35 +7,13 @@ import { invalidateFileCache, stashComposerDraft } from '../files/index';
 import { dismissSkillsViewState } from '../skills/mount';
 import { dismissSettingsViewState } from '../settings/mount';
 import { dismissKiroViewState } from '../kiro/mount';
-export function getWorkspaceDisplayName(path: string): string {
+function getWorkspaceDisplayName(path: string): string {
   const normalized = path.replace(/[\\/]+$/, '');
   const parts = normalized.split(/[\\/]/);
   return parts[parts.length - 1] || path;
 }
 
-// ── 侧边栏展示辅助（时间 / 模型标签）─────────────────────────────
-
-/** 把模型 ID 压缩成短标签：claude-sonnet-4-5-20250929 → Sonnet 4.5 */
-export function formatModelLabel(model: string | null | undefined): string {
-  const raw = model?.trim();
-  if (!raw) return '';
-
-  // 去掉日期后缀与厂商前缀
-  let id = raw.replace(/[-_]?\d{8}$/, '');
-  id = id.replace(/^(anthropic|openai|google|deepseek|qwen|moonshot)[/-]/i, '');
-
-  const family = id.match(/(opus|sonnet|haiku|gpt|o\d|gemini|deepseek|qwen|kimi|glm|grok)/i);
-  const version = id.match(/(\d+(?:[.-]\d+)?)/);
-
-  if (family) {
-    const name = family[1].toLowerCase();
-    const pretty = name.charAt(0).toUpperCase() + name.slice(1);
-    const ver = version ? ` ${version[1].replace('-', '.')}` : '';
-    return `${pretty}${ver}`.trim();
-  }
-
-  return id.length > 18 ? `${id.slice(0, 17)}…` : id;
-}
+// ── 侧边栏展示辅助─────────────────────────────
 
 /** 将工作区展开状态持久化到 localStorage */
 export function saveExpandedWorkspaces(): void {

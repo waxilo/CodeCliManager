@@ -6,13 +6,13 @@ import { renderMcpList } from './mcp-editor-dialog';
 import { upsertScopedMcpServer } from './mcp-api';
 import { getSkillsTarget, isSameSkillsTarget } from './scope';
 
-export interface ImportedMcpServer {
+interface ImportedMcpServer {
   name: string;
   config: McpServerConfig;
   exists: boolean;
 }
 
-export interface McpImportResult {
+interface McpImportResult {
   servers: ImportedMcpServer[];
   /** 硬错误：条目被跳过或整体失败（红色） */
   errors: string[];

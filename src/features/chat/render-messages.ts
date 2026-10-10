@@ -8,7 +8,7 @@ import { formatSubagentUsage } from './subagent-usage';
 import * as api from '../../api';
 import { dedupeAdjacentDuplicateMessages } from '../conversations/normalize';
 import { getFileSuggestionIcon, getImageMime, stripFileRefTags, stripFileRefsFromDisplay } from '../files/index';
-export interface ToolConfig {
+interface ToolConfig {
   displayMode: 'one-line' | 'collapsible';
   icon: string;
   label: string;
@@ -51,7 +51,7 @@ export function getDefaultToolConfig(): ToolConfig {
 }
 
 /** 解析 JSON，失败返回 null */
-export function tryParseJson(text: string): Record<string, unknown> | null {
+function tryParseJson(text: string): Record<string, unknown> | null {
   try {
     const trimmed = text.trim();
     if (!trimmed.startsWith('{')) return null;
@@ -98,11 +98,6 @@ export function extractToolUseId(content: string): string {
 /** 提取工具输入 */
 export function extractToolInput(content: string): Record<string, unknown> {
   return parseToolUseContent(content).input;
-}
-
-/** 提取子代理完成通知（history 合并进 tool_use content 的 taskNotification） */
-export function extractTaskNotification(content: string): TaskNotificationData | undefined {
-  return parseToolUseContent(content).taskNotification;
 }
 
 function stringifyToolResultContent(raw: unknown): string {
@@ -323,7 +318,7 @@ export function renderAskUserQuestionCardHtml(
 /** 合并相邻的同类型消息（连续 assistant 文本或连续 thinking）。
  *  不修改入参数组/消息对象：拼接产生新对象，避免污染会话数据
  *  （splitMessageWindow 的 slice 是浅拷贝，原地 += 会改写 conversation.messages 里的原对象）。 */
-export function mergeAdjacentSameRole(messages: Message[]): Message[] {
+function mergeAdjacentSameRole(messages: Message[]): Message[] {
   if (messages.length === 0) return [];
   const result: Message[] = [{ ...messages[0] }];
 
@@ -822,7 +817,7 @@ export function parseErrorHint(
   return { hint: raw, isKnown: false };
 }
 
-export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = false): string {
+function renderMessageHtml(msg: Message, prevRole?: string, showUndo = false): string {
   const msgIdAttr = `data-message-id="${escapeHtml(msg.id)}"`;
   if (msg.role === 'tool') {
     if (msg.toolData?.toolName === 'AskUserQuestion') {
@@ -966,7 +961,7 @@ export function renderMessageHtml(msg: Message, prevRole?: string, showUndo = fa
  * content/thinking、工具运行态与结果、思考块展开态、运行态（撤回按钮显隐）、
  * 相邻角色（grouped 视觉）与「是否最后一条用户消息」（撤回按钮归属）。
  */
-export function messageRenderKey(
+function messageRenderKey(
   msg: Message,
   showUndo: boolean,
   prevRole?: string,
@@ -1041,7 +1036,7 @@ export function renderMessageListHtml(messages: Message[]): string {
   return renderMessageHtmlChunks(messages).map((c) => c.html).join('');
 }
 
-export function renderFileRefChipsHtml(refs: FileRef[]): string {
+function renderFileRefChipsHtml(refs: FileRef[]): string {
   // 为图片文件异步预加载缩略图
   setTimeout(() => {
     const chips = document.querySelectorAll<HTMLElement>('.file-ref-chip[data-file-path] img.file-ref-chip-thumb');

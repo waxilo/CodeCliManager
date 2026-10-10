@@ -12,6 +12,7 @@ import {
 } from '../../ui';
 import { renderDshEmbedHtml, enterDshMode, bindDshEmbedEvents } from '../../features/dsh/embed';
 import { patchTitlebarActions, renderTitlebarActions } from './titlebar';
+import { renderWindowControls, bindWindowControls } from './window-controls';
 import {
   clearStashedMainDom,
   bindSettingsSectionNav,
@@ -106,6 +107,7 @@ function performRender() {
         <div class="app-titlebar-actions">
           ${renderTitlebarActions()}
         </div>
+        ${renderWindowControls()}
       </header>
       ${appState.dshModeActive ? renderDshEmbedHtml() : `
       <div class="app-container${getIsSidebarCollapsed() ? ' is-sidebar-collapsed' : ''}${appState.isApiConfigViewActive || appState.isSettingsViewActive || appState.isSkillsViewActive ? ' is-api-config' : ''}">
@@ -201,10 +203,12 @@ function bindTitlebarActionEvents(): void {
   });
 }
 
-export function attachEventListeners() {
+function attachEventListeners() {
   if (appState.dshModeActive) {
     bindDshEmbedEvents();
   }
+  // 自绘窗口控制：Windows 上原生装饰已取消，这里是唯一的最小化/最大化/关闭入口
+  bindWindowControls();
   document.querySelector('#new-chat-btn')?.addEventListener('click', newChat);
 
   document.querySelector('#refresh-btn')?.addEventListener('click', async () => {

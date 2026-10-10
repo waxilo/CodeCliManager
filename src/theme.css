@@ -1,251 +1,319 @@
 /* ============================================================
-   设计令牌（Design Tokens）— Codex / DSH 风格深色系
-   - 深底 + 冷灰蓝 accent，中性低饱和，扁平化
-   - 语义命名保持与旧版一致（--color-* / --sidebar-*），
-     组件 CSS 无需大面积改名，仅换值即完成视觉切换
+   设计令牌（Design Tokens）— 现代极简工业风
+   骨架取自 Linear（awesome-design-md / linear.md）：
+   - 近黑画布 + 四级 surface 阶梯 + 1px 发丝边框
+   - 单一蓝紫强调色 #5e6ad2，稀缺使用（CTA / focus / 链接）
+   - display 负字距、克制投影（层级靠阶梯与边框，不靠阴影）
+   在其上叠加三项扩展：毛玻璃（--glass-*）、卡片（--card-*）、
+   胶囊（--pill-*）。扩展只作用于浮层与次级控件，不动主 CTA，
+   以同时保住「工业克制」与「现代柔软」。
+
+   约定：语义名与旧版完全一致，仅换值 —— 组件 CSS 无需改名。
+   浅色主题不是「把深色调亮」，而是同一套工业语言在冷灰白下的等值表达。
    ============================================================ */
 
 :root,
 [data-theme='dark'] {
   color-scheme: dark;
 
-  /* ── 基础色板（GitHub Dark / VSCode 系）────────────────── */
-  --color-bg-base: #0d1117;          /* 页面最深底 */
-  --color-bg-elevated: #161b22;      /* 卡片/面板 */
-  --color-bg-deep: #010409;          /* 最深（标题栏/浮层底） */
-  --color-bg-surface: #1c2128;       /* 输入框/代码块底 */
-  --color-bg-surface-hover: #21262d; /* hover */
-  --color-bg-surface-active: #2d333b;/* active */
-  --color-bg-thinking: #131820;      /* 思考块底 */
-  --color-bg-active-profile: #182030;
-  --color-text: #e6edf3;
-  --color-text-primary: #e6edf3;
-  --color-text-secondary: #aeb8c5;
-  --color-text-muted: #768390;
-  --color-border: rgba(240, 246, 252, 0.12);
-  --color-bg-hover: #21262d;
-  --color-icon: #9fb0c3;
-  --color-accent: #4493f8;
-  --color-accent-hover: #58a6ff;
-  --color-accent-soft: #79c0ff;
-  --color-accent-ring: rgba(68, 147, 248, 0.35);
+  /* ── 画布与 surface 阶梯（四个台阶，层级不靠阴影）────────── */
+  --color-bg-base: #08090a;          /* 页面根画布（近黑带冷调，刻意不用纯黑） */
+  --color-bg-deep: #010102;          /* 最深：沉浸区 / 代码块 / 遮罩底 */
+  --color-bg-elevated: #0f1011;      /* 卡片 / 面板（第 1 级抬升） */
+  --color-bg-surface: #141516;       /* 输入框 / 次级面板（第 2 级） */
+  --color-bg-surface-hover: #191a1b; /* 第 3 级 */
+  --color-bg-surface-active: #1f2021;
+  --color-bg-hover: #191a1b;
+  --color-bg-active-profile: #15161d;
+
+  /* ── 文字层级 ─────────────────────────────────────────────── */
+  --color-text: #f7f8f8;
+  --color-text-primary: #f7f8f8;
+  --color-text-secondary: #d0d6e0;
+  --color-text-muted: #8a8f98;
+  --color-icon: #8a8f98;
+
+  /* ── 边框（发丝）─────────────────────────────────────────── */
+  --color-border: #23252a;
+  --color-border-strong: #34343a;
+  --color-tool-border: #2c2e33;
+
+  /* ── 强调色（唯一彩色，只用于 CTA / focus / 链接）────────── */
+  --color-accent: #5e6ad2;
+  --color-accent-hover: #828fff;
+  --color-accent-soft: #a5adff;
+  --color-accent-ring: rgba(94, 106, 210, 0.45);
   --color-on-accent: #ffffff;
-  --color-success: #3fb950;
-  --color-success-hover: #46c25a;
-  --color-danger: #f85149;
-  --color-danger-hover: #ff6b63;
-  --color-danger-bg: rgba(248, 81, 73, 0.15);
-  --color-danger-bg-hover: rgba(248, 81, 73, 0.25);
-  --color-danger-bg-soft: rgba(248, 81, 73, 0.12);
-  --color-error-bg: rgba(248, 81, 73, 0.1);
-  --color-error-border: rgba(248, 81, 73, 0.4);
-  --color-error-text: #ffb3af;
-  --color-code: #f2cc60;
-  --color-markdown-muted: #6e7681;
-  --color-markdown-text: #e6edf3;
-  --color-md-inline-bg: rgba(110, 118, 129, 0.25);
-  --color-md-subtle-bg: rgba(110, 118, 129, 0.15);
-  --color-md-border: rgba(110, 118, 129, 0.3);
-  --color-md-code-bg: rgba(110, 118, 129, 0.2);
-  --color-overlay: rgba(1, 4, 9, 0.78);
-  --color-shadow: rgba(0, 0, 0, 0.35);
-  --color-shadow-strong: rgba(0, 0, 0, 0.5);
-  --color-titlebar: #161b22;
-  --color-titlebar-border: #21262d;
 
-  /* ── 用户气泡：冷灰蓝（Codex 风格，非绿色）──────────────── */
-  --color-bubble-user-bg: rgba(56, 116, 190, 0.28);
-  --color-bubble-user-text: #e6edf3;
-  --color-bubble-user-border: rgba(88, 166, 255, 0.4);
-  --color-bubble-user-avatar-bg: rgba(68, 147, 248, 0.28);
-  --color-bubble-user-code-bg: rgba(1, 4, 9, 0.35);
-  --color-bubble-assistant-bg: transparent;
-  --color-bubble-assistant-border: transparent;
-  --color-composer-bg: #161b22;
-  --color-composer-border: #21262d;
-  --color-composer-footer: #0d1117;
-  --color-send-btn: rgba(68, 147, 248, 0.22);
-  --color-send-btn-hover: rgba(68, 147, 248, 0.35);
-  --color-send-btn-disabled: #21262d;
-  --color-send-icon: #e6edf3;
-
-  /* ── 代码块面板 ─────────────────────────────────────────── */
-  --color-code-bg: #010409;
-  --color-code-header-bg: #161b22;
-  --color-code-border: #30363d;
-  --color-code-btn-bg: #21262d;
-  --color-code-btn-hover-bg: #30363d;
-  --color-code-text: #f0f6fc;
-  --color-code-muted: #c9d1d9;
-  --color-code-json-bg: #010409;
-  --color-code-json-border: #30363d;
-  --color-code-json-badge: #79c0ff;
-
-  /* ── 状态徽章 / 运行指示 ─────────────────────────────────── */
-  --color-status-running: #58a6ff;
-  --color-status-running-bg: rgba(88, 166, 255, 0.15);
-  --color-status-success: #3fb950;
-  --color-status-success-bg: rgba(63, 185, 80, 0.15);
-  --color-status-success-border: #238636;
-  --color-status-error: #f85149;
-  --color-status-error-bg: rgba(248, 81, 73, 0.15);
-  --color-tool-border: #484f58;
-
-  /* ── 上下文用量警告 ─────────────────────────────────────── */
+  /* ── 语义色 ───────────────────────────────────────────────── */
+  --color-success: #27a644;
+  --color-success-hover: #2fb84f;
+  --color-danger: #e5484d;
+  --color-danger-hover: #ff5c60;
+  --color-danger-bg: rgba(229, 72, 77, 0.14);
+  --color-danger-bg-hover: rgba(229, 72, 77, 0.22);
+  --color-error-bg: rgba(229, 72, 77, 0.12);
+  --color-error-border: rgba(229, 72, 77, 0.40);
+  --color-error-text: #ff9ea1;
   --color-warning: #d29922;
-  --color-warning-bg: rgba(210, 153, 34, 0.15);
+  --color-warning-bg: rgba(210, 153, 34, 0.14);
   --color-warning-text: #e3b341;
 
-  /* 用户气泡内链接/代码固定深色（蓝气泡上用浅色文字） */
-  --color-bubble-user-link: #79c0ff;
-  --color-bubble-user-code-text: #e6edf3;
+  /* ── 状态徽章 / 运行指示 ──────────────────────────────────── */
+  --color-status-running: #828fff;
+  --color-status-running-bg: rgba(94, 106, 210, 0.18);
+  --color-status-success: #27a644;
+  --color-status-success-bg: rgba(39, 166, 68, 0.16);
+  --color-status-success-border: #1f8a38;
+  --color-status-error: #e5484d;
+  --color-status-error-bg: rgba(229, 72, 77, 0.16);
 
-  /* ── 侧边栏（工作区导航）─────────────────────────────────── */
-  --sidebar-bg: #0d1117;
-  --sidebar-header-bg: #0d1117;
+  /* ── 代码块 ───────────────────────────────────────────────── */
+  --color-code: #a5adff;
+  --color-code-bg: #010102;
+  --color-code-header-bg: #0f1011;
+  --color-code-border: #23252a;
+  --color-code-btn-bg: #141516;
+  --color-code-btn-hover-bg: #1f2021;
+  --color-code-text: #f7f8f8;
+  --color-code-muted: #8a8f98;
+  --color-code-json-bg: #010102;
+  --color-code-json-border: #23252a;
+  --color-code-json-badge: #a5adff;
+
+  /* ── Markdown 内联元素 ────────────────────────────────────── */
+  --color-md-inline-bg: rgba(255, 255, 255, 0.06);
+  --color-md-subtle-bg: rgba(255, 255, 255, 0.04);
+  --color-md-border: rgba(255, 255, 255, 0.10);
+  --color-md-code-bg: rgba(255, 255, 255, 0.06);
+
+  /* ── 浮层遮罩与阴影 ───────────────────────────────────────── */
+  --color-overlay: rgba(1, 1, 2, 0.72);
+  --color-shadow-strong: rgba(0, 0, 0, 0.60);
+
+  /* ── 标题栏 ───────────────────────────────────────────────── */
+  --color-titlebar: #08090a;
+  --color-titlebar-border: #1c1d1f;
+
+  /* ── 用户气泡（冷灰蓝，低饱和）────────────────────────────── */
+  --color-bubble-user-bg: rgba(94, 106, 210, 0.14);
+  --color-bubble-user-text: #eceefb;
+  --color-bubble-user-border: rgba(94, 106, 210, 0.28);
+  --color-bubble-user-code-bg: rgba(1, 1, 2, 0.45);
+  --color-bubble-user-link: #a5adff;
+  --color-bubble-user-code-text: #e6e8f5;
+
+  /* ── 输入区 ───────────────────────────────────────────────── */
+  --color-composer-bg: #0f1011;
+  --color-composer-border: #23252a;
+  --color-composer-footer: #08090a;
+  --color-composer-disabled-bg: rgba(255, 255, 255, 0.03);
+  --color-send-btn: rgba(94, 106, 210, 0.28);
+  --color-send-btn-hover: rgba(94, 106, 210, 0.45);
+  --color-send-btn-disabled: #191a1b;
+  --color-send-icon: #f7f8f8;
+
+  /* ── 侧边栏 ───────────────────────────────────────────────── */
+  --sidebar-bg: #08090a;
+  --sidebar-header-bg: #08090a;
   --sidebar-card-bg: transparent;
   --sidebar-card-bg-hover: rgba(255, 255, 255, 0.04);
   --sidebar-card-border: transparent;
   --sidebar-card-border-hover: rgba(255, 255, 255, 0.08);
   --sidebar-card-shadow: none;
   --sidebar-card-shadow-hover: none;
-  --sidebar-item-hover: #1c2128;
-  --sidebar-item-active-from: rgba(68, 147, 248, 0.2);
-  --sidebar-item-active-to: rgba(68, 147, 248, 0.05);
+  --sidebar-item-hover: #141516;
+  --sidebar-item-active-from: rgba(94, 106, 210, 0.20);
+  --sidebar-item-active-to: rgba(94, 106, 210, 0.04);
   --sidebar-item-active-shadow: none;
-  --sidebar-badge-bg: rgba(255, 255, 255, 0.08);
-  --sidebar-badge-text: #aeb8c5;
-  --sidebar-divider: rgba(255, 255, 255, 0.08);
-  --sidebar-avatar-lightness: 55%;
-  --sidebar-avatar-text-lightness: 100%;
+  --sidebar-badge-bg: rgba(255, 255, 255, 0.07);
+  --sidebar-badge-text: #8a8f98;
 
-  /* ── 设计度量（统一圆角/阴影/字体）───────────────────────── */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --radius-xl: 12px;
-  --radius-full: 999px;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.35);
-  --shadow-lg: 0 12px 32px rgba(0, 0, 0, 0.5);
-  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
-    'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, 'Cascadia Code', Menlo, Consolas,
+  /* ── 扩展：卡片 ───────────────────────────────────────────── */
+  --card-bg: var(--color-bg-elevated);
+  --card-border: var(--color-border);
+  --card-border-hover: var(--color-border-strong);
+  --card-radius: var(--radius-lg);
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.30), 0 8px 24px -12px rgba(0, 0, 0, 0.50);
+  --card-shadow-hover: 0 2px 4px rgba(0, 0, 0, 0.40), 0 16px 40px -16px rgba(0, 0, 0, 0.65);
+
+  /* ── 扩展：毛玻璃（只用于浮层；必须配 @supports 降级）─────── */
+  --glass-bg: rgba(15, 16, 17, 0.72);
+  --glass-bg-strong: rgba(10, 11, 12, 0.86);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-highlight: rgba(255, 255, 255, 0.10);
+  --glass-blur: 20px;
+  --glass-saturate: 160%;
+
+  /* ── 扩展：胶囊 ───────────────────────────────────────────── */
+  --pill-radius: 999px;
+  --pill-bg: rgba(255, 255, 255, 0.05);
+  --pill-bg-hover: rgba(255, 255, 255, 0.09);
+
+  /* ── 设计度量（圆角阶梯 / 阴影 / 字体 / 间距）─────────────── */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.40);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.50);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.66);
+  --font-ui: 'Inter', 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text',
+    'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas,
     'PingFang SC', monospace;
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-5: 24px;
-  --space-6: 32px;
+
+  /* ── 标题栏高度（唯一来源）──────────────────────────────────
+     .app-titlebar 的高度与盖在内容之上的整页视图（.kiro-overlay）的顶部偏移
+     都读这一个变量；平台差异只在 app-shell.css 里覆盖一次，
+     避免「改了一处、另一处没跟着动」的两处硬编码。 */
+  --app-titlebar-height: 38px;
+
+  /* ── 管理页统一框架（API 配置 / 设置 / 技能 / Kiro 四页共用）─────
+     四页原先各写各的：内边距 20/24/16 与 28/32 并存，内容列 640 与 720 并存，
+     且都「限宽贴左」，于是出现「页头 1152px、内容只有 720px」这种右缘错位。
+     这里收敛成一条契约：同一内边距 + 同一内容列上限，页头/内容/页脚共用，
+     右缘自然对齐，窄窗口下自动铺满。
+     上限取 1100px：默认窗口下（含侧栏可用宽度约 860px）永远不触发，即「始终铺满」；
+     只有大屏才收敛，避免单行输入框被拉成超长行。 */
+  /* 上 24 / 左右 28 / 下 16：底部留白保证固定页脚不贴窗口下边缘 */
+  --page-padding: 24px 28px 16px;
+  --page-max-width: 1100px;
+  /* 页内卡片的内边距：四页所有卡片共用同一个值（原先 16/18、14/14/12、12/14 混用） */
+  --page-card-padding: 14px 16px;
 }
 
 /* ============================================================
-   浅色主题（Codex 浅色对应：冷灰白 + 同系蓝）
+   浅色主题：冷灰白 + 同一套工业语言
+   - 强调色不变（#5e6ad2），仅加深交互态以保证对比度
+   - 毛玻璃在浅色下是「白雾」，高光边改为白色内亮
    ============================================================ */
 [data-theme='light'] {
   color-scheme: light;
 
-  --color-bg-base: #f6f8fa;
-  --color-bg-elevated: #ffffff;
+  /* 画布压灰、卡片保持纯白 —— 浅色的「层级」只能靠这一步表出来 */
+  --color-bg-base: #f1f2f3;
   --color-bg-deep: #ffffff;
-  --color-bg-surface: #eef1f4;
-  --color-bg-surface-hover: #e3e8ee;
-  --color-bg-surface-active: #d5dce4;
-  --color-bg-thinking: #f0f3f6;
-  --color-bg-active-profile: #e5effb;
-  --color-text: #1f2328;
-  --color-text-primary: #1f2328;
-  --color-text-secondary: #42526b;
-  --color-text-muted: #6e7781;
-  --color-border: rgba(27, 31, 36, 0.15);
-  --color-bg-hover: #e3e8ee;
-  --color-icon: #42526b;
-  --color-accent: #0969da;
-  --color-accent-hover: #0550ae;
-  --color-accent-soft: #218bff;
-  --color-accent-ring: rgba(9, 105, 218, 0.25);
+  --color-bg-elevated: #ffffff;
+  --color-bg-surface: #eaebec;
+  --color-bg-surface-hover: #e3e4e6;
+  --color-bg-surface-active: #d7d8db;
+  --color-bg-hover: #e3e4e6;
+  --color-bg-active-profile: #e9ecfb;
+
+  --color-text: #0d0e10;
+  --color-text-primary: #0d0e10;
+  --color-text-secondary: #3f444d;
+  --color-text-muted: #6b7078;
+  --color-icon: #5a6068;
+
+  --color-border: rgba(13, 14, 16, 0.12);
+  --color-border-strong: rgba(13, 14, 16, 0.22);
+  --color-tool-border: rgba(13, 14, 16, 0.16);
+
+  --color-accent: #5e6ad2;
+  --color-accent-hover: #4a55c2;
+  --color-accent-soft: #828fff;
+  --color-accent-ring: rgba(94, 106, 210, 0.35);
   --color-on-accent: #ffffff;
-  --color-success: #1a7f37;
-  --color-success-hover: #116329;
-  --color-danger: #cf222e;
-  --color-danger-hover: #a40e26;
-  --color-danger-bg: rgba(207, 34, 46, 0.1);
-  --color-danger-bg-hover: rgba(207, 34, 46, 0.18);
-  --color-danger-bg-soft: rgba(207, 34, 46, 0.08);
-  --color-error-bg: rgba(207, 34, 46, 0.07);
-  --color-error-border: rgba(207, 34, 46, 0.3);
-  --color-error-text: #a40e26;
-  --color-code: #9a6700;
-  --color-markdown-muted: #59636e;
-  --color-markdown-text: #1f2328;
-  --color-md-inline-bg: rgba(84, 93, 103, 0.15);
-  --color-md-subtle-bg: rgba(84, 93, 103, 0.1);
-  --color-md-border: rgba(84, 93, 103, 0.22);
-  --color-md-code-bg: rgba(84, 93, 103, 0.12);
-  --color-overlay: rgba(27, 31, 36, 0.5);
-  --color-shadow: rgba(27, 31, 36, 0.12);
-  --color-shadow-strong: rgba(27, 31, 36, 0.2);
-  --color-titlebar: #f6f8fa;
-  --color-titlebar-border: #d5dce4;
 
-  --color-bubble-user-bg: #d6e7fb;
-  --color-bubble-user-text: #0b2a4a;
-  --color-bubble-user-border: #a8c8ef;
-  --color-bubble-user-avatar-bg: #b8d4f2;
-  --color-bubble-user-code-bg: rgba(255, 255, 255, 0.6);
-  --color-bubble-assistant-bg: transparent;
-  --color-bubble-assistant-border: transparent;
-  --color-composer-bg: #ffffff;
-  --color-composer-border: #d5dce4;
-  --color-composer-footer: #f6f8fa;
-  --color-send-btn: #d5e5fa;
-  --color-send-btn-hover: #bcd8f8;
-  --color-send-btn-disabled: #eef1f4;
-  --color-send-icon: #0969da;
+  --color-success: #1f8a38;
+  --color-success-hover: #187030;
+  --color-danger: #d93b40;
+  --color-danger-hover: #bf2f34;
+  --color-danger-bg: rgba(217, 59, 64, 0.10);
+  --color-danger-bg-hover: rgba(217, 59, 64, 0.18);
+  --color-error-bg: rgba(217, 59, 64, 0.08);
+  --color-error-border: rgba(217, 59, 64, 0.30);
+  --color-error-text: #a32126;
+  --color-warning: #8a6100;
+  --color-warning-bg: rgba(138, 97, 0, 0.10);
+  --color-warning-text: #6f4e00;
 
-  --color-code-bg: #f6f8fa;
-  --color-code-header-bg: #eef1f4;
-  --color-code-border: #d5dce4;
+  --color-status-running: #5e6ad2;
+  --color-status-running-bg: rgba(94, 106, 210, 0.12);
+  --color-status-success: #1f8a38;
+  --color-status-success-bg: rgba(31, 138, 56, 0.12);
+  --color-status-success-border: #1f8a38;
+  --color-status-error: #d93b40;
+  --color-status-error-bg: rgba(217, 59, 64, 0.12);
+
+  --color-code: #4a55c2;
+  --color-code-bg: #f1f2f3;
+  --color-code-header-bg: #e9eaeb;
+  --color-code-border: rgba(13, 14, 16, 0.12);
   --color-code-btn-bg: #ffffff;
-  --color-code-btn-hover-bg: #eef1f4;
-  --color-code-text: #1f2328;
-  --color-code-muted: #59636e;
-  --color-code-json-bg: #f6f8fa;
-  --color-code-json-border: #d5dce4;
-  --color-code-json-badge: #0969da;
+  --color-code-btn-hover-bg: #f1f2f3;
+  --color-code-text: #0d0e10;
+  --color-code-muted: #6b7078;
+  --color-code-json-bg: #f1f2f3;
+  --color-code-json-border: rgba(13, 14, 16, 0.12);
+  --color-code-json-badge: #5e6ad2;
 
-  --color-status-running: #0969da;
-  --color-status-running-bg: rgba(9, 105, 218, 0.12);
-  --color-status-success: #1a7f37;
-  --color-status-success-bg: rgba(26, 127, 55, 0.12);
-  --color-status-success-border: #2da44e;
-  --color-status-error: #cf222e;
-  --color-status-error-bg: rgba(207, 34, 46, 0.12);
-  --color-tool-border: #c8d1da;
+  --color-md-inline-bg: rgba(13, 14, 16, 0.06);
+  --color-md-subtle-bg: rgba(13, 14, 16, 0.04);
+  --color-md-border: rgba(13, 14, 16, 0.10);
+  --color-md-code-bg: rgba(13, 14, 16, 0.06);
 
-  --color-warning: #9a6700;
-  --color-warning-bg: rgba(154, 103, 0, 0.1);
-  --color-warning-text: #7a5901;
+  --color-overlay: rgba(13, 14, 16, 0.42);
+  --color-shadow-strong: rgba(13, 14, 16, 0.18);
 
-  --color-bubble-user-link: #0550ae;
-  --color-bubble-user-code-text: #0b2a4a;
+  --color-titlebar: #ececed;
+  --color-titlebar-border: rgba(13, 14, 16, 0.10);
 
-  --sidebar-bg: #f6f8fa;
-  --sidebar-header-bg: #f6f8fa;
+  --color-bubble-user-bg: rgba(94, 106, 210, 0.12);
+  --color-bubble-user-text: #1a1d3a;
+  --color-bubble-user-border: rgba(94, 106, 210, 0.24);
+  --color-bubble-user-code-bg: rgba(255, 255, 255, 0.70);
+  --color-bubble-user-link: #4a55c2;
+  --color-bubble-user-code-text: #1a1d3a;
+
+  --color-composer-bg: #ffffff;
+  --color-composer-border: rgba(13, 14, 16, 0.13);
+  --color-composer-footer: #f1f2f3;
+  --color-composer-disabled-bg: rgba(13, 14, 16, 0.03);
+  --color-send-btn: rgba(94, 106, 210, 0.16);
+  --color-send-btn-hover: rgba(94, 106, 210, 0.28);
+  --color-send-btn-disabled: #e9eaeb;
+  --color-send-icon: #5e6ad2;
+
+  /* 侧边栏独立成一层：比内容区略深，让「导航 / 内容」在浅色下也分得开 */
+  --sidebar-bg: #eaebec;
+  --sidebar-header-bg: #eaebec;
   --sidebar-card-bg: transparent;
-  --sidebar-card-bg-hover: rgba(27, 31, 36, 0.03);
+  --sidebar-card-bg-hover: rgba(13, 14, 16, 0.04);
   --sidebar-card-border: transparent;
-  --sidebar-card-border-hover: rgba(27, 31, 36, 0.08);
+  --sidebar-card-border-hover: rgba(13, 14, 16, 0.10);
   --sidebar-card-shadow: none;
   --sidebar-card-shadow-hover: none;
-  --sidebar-item-hover: rgba(27, 31, 36, 0.05);
-  --sidebar-item-active-from: #d6e7fb;
-  --sidebar-item-active-to: #eef4fc;
+  --sidebar-item-hover: rgba(13, 14, 16, 0.06);
+  --sidebar-item-active-from: rgba(94, 106, 210, 0.18);
+  --sidebar-item-active-to: rgba(94, 106, 210, 0.04);
   --sidebar-item-active-shadow: none;
-  --sidebar-badge-bg: #eef1f4;
-  --sidebar-badge-text: #59636e;
-  --sidebar-divider: rgba(27, 31, 36, 0.08);
-  --sidebar-avatar-lightness: 45%;
-  --sidebar-avatar-text-lightness: 100%;
+  --sidebar-badge-bg: rgba(13, 14, 16, 0.07);
+  --sidebar-badge-text: #6b7078;
+
+  /* 扩展 token 的浅色变体（阴影/玻璃必须整套换，否则白底白字）*/
+  --card-bg: #ffffff;
+  --card-border: rgba(13, 14, 16, 0.12);
+  --card-border-hover: rgba(13, 14, 16, 0.20);
+  --card-shadow: 0 1px 2px rgba(13, 14, 16, 0.07), 0 8px 24px -12px rgba(13, 14, 16, 0.12);
+  --card-shadow-hover: 0 2px 4px rgba(13, 14, 16, 0.09), 0 16px 40px -16px rgba(13, 14, 16, 0.18);
+
+  /* 浅色下「顶边白高光」= 白叠白，等于没有；换成极淡的暗色内描边，
+     否则卡片/浮层会丢掉那条被勾勒的边。 */
+  --glass-bg: rgba(255, 255, 255, 0.72);
+  --glass-bg-strong: rgba(255, 255, 255, 0.90);
+  --glass-border: rgba(13, 14, 16, 0.10);
+  --glass-highlight: rgba(13, 14, 16, 0.05);
+
+  /* 胶囊底在白底上 4% 几乎不可见，抬一档才有「实体」 */
+  --pill-bg: rgba(13, 14, 16, 0.055);
+  --pill-bg-hover: rgba(13, 14, 16, 0.10);
 }

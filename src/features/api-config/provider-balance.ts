@@ -8,12 +8,12 @@ export function setProviderBalanceVisible(overlay: HTMLElement, visible: boolean
 }
 
 
-export function setProviderBalanceText(overlay: HTMLElement, text: string) {
+function setProviderBalanceText(overlay: HTMLElement, text: string) {
   const el = overlay.querySelector('[data-provider-balance]') as HTMLElement | null;
   if (el) el.textContent = text;
 }
 
-export async function refreshDeepSeekBalance(overlay: HTMLElement): Promise<void> {
+async function refreshDeepSeekBalance(overlay: HTMLElement): Promise<void> {
   const requestId = appState.deepSeekBalanceGuard.next();
   const baseUrl =
     (overlay.querySelector('input[name="baseUrl"]') as HTMLInputElement | null)?.value.trim() || '';

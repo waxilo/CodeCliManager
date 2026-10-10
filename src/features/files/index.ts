@@ -10,7 +10,7 @@ import { updateSendButtonState } from '../chat/session-context';
 import type { ComposerDraft, ImportedFileRef, PasteAttachment } from '../../state/app-state';
 // ── @file 引用功能 ──────────────────────────────────────────────────
 
-export function getComposerDraftKey(): string {
+function getComposerDraftKey(): string {
   const sessionKey = getActiveSessionKey();
   if (sessionKey) return sessionKey;
   return `new:${appState.pendingProjectDir?.trim() || ''}`;
@@ -273,7 +273,7 @@ export async function handlePaste(e: ClipboardEvent) {
   }
 }
 
-export function renderPasteAttachmentsBar() {
+function renderPasteAttachmentsBar() {
   const bar = document.querySelector('#paste-attachments-bar');
   if (!bar) return;
 
@@ -327,7 +327,7 @@ export function clearPasteAttachments() {
 // ── @File[] 引用格式辅助函数 ────────────────────────────────────────
 
 /** 将原始路径包装为 @File[path] 引用，去除 Windows canonicalize 产生的 \\?\ 前缀 */
-export function wrapFileRef(path: string): string {
+function wrapFileRef(path: string): string {
   const cleanPath = path.replace(/^\\\\\?\\/, '');
   return `@File[${cleanPath}]`;
 }
@@ -406,14 +406,14 @@ export function stripFileRefTags(text: string): string {
 
 // ── 导入/拖放文件预览栏 ────────────────────────────────────────────
 
-export function addImportedFileRef(entry: ImportedFileRef): void {
+function addImportedFileRef(entry: ImportedFileRef): void {
   // 避免重复
   if (appState.importedFileRefs.some((e) => e.ref === entry.ref)) return;
   appState.importedFileRefs.push(entry);
   renderImportedFileBar();
 }
 
-export function renderImportedFileBar(): void {
+function renderImportedFileBar(): void {
   const bar = document.querySelector('#imported-file-bar');
   if (!bar) return;
 
@@ -460,7 +460,7 @@ export function renderImportedFileBar(): void {
   });
 }
 
-export function removeImportedFileRef(idx: number): void {
+function removeImportedFileRef(idx: number): void {
   const entry = appState.importedFileRefs[idx];
   if (!entry) return;
   appState.importedFileRefs.splice(idx, 1);
@@ -474,7 +474,7 @@ export function clearImportedFileRefs(): void {
   updateSendButtonState();
 }
 
-export async function previewImportedFile(idx: number): Promise<void> {
+async function previewImportedFile(idx: number): Promise<void> {
   const entry = appState.importedFileRefs[idx];
   if (!entry) return;
   if (entry.isDir) return;
@@ -515,7 +515,7 @@ export async function previewImportedFile(idx: number): Promise<void> {
   }
 }
 
-export function openTextPreview(content: string, fileName: string) {
+function openTextPreview(content: string, fileName: string) {
   const existing = document.querySelector('#text-preview-overlay');
   if (existing) existing.remove();
 
@@ -550,7 +550,7 @@ export function openTextPreview(content: string, fileName: string) {
   document.body.appendChild(overlay);
 }
 
-export async function openPdfPreview(filePath: string, fileName: string): Promise<void> {
+async function openPdfPreview(filePath: string, fileName: string): Promise<void> {
   const existing = document.querySelector('#pdf-preview-overlay');
   if (existing) existing.remove();
 
@@ -594,7 +594,7 @@ export async function openPdfPreview(filePath: string, fileName: string): Promis
   document.body.appendChild(overlay);
 }
 
-export function openImageLightbox(src: string) {
+function openImageLightbox(src: string) {
   const existing = document.querySelector('#image-lightbox');
   if (existing) existing.remove();
 
@@ -615,7 +615,7 @@ export function openImageLightbox(src: string) {
   document.addEventListener('keydown', onKey);
 }
 
-export async function loadProjectFiles(projectDir = getEffectiveProjectDir()): Promise<string[]> {
+async function loadProjectFiles(projectDir = getEffectiveProjectDir()): Promise<string[]> {
   const dir = projectDir.trim();
   if (!dir) return [];
   if (appState._cachedFileList !== null && appState._cachedProjectDir === dir) {
@@ -641,7 +641,7 @@ export function getFileSuggestionsContainer(): HTMLDivElement | null {
   return document.querySelector('#file-suggestions');
 }
 
-export function showFileSuggestions(files: string[], filter: string) {
+function showFileSuggestions(files: string[], filter: string) {
   const container = getFileSuggestionsContainer();
   if (!container || files.length === 0) {
     hideFileSuggestions();
@@ -736,7 +736,7 @@ export function isImageFile(filePath: string): boolean {
   return ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'].includes(ext);
 }
 
-export function isOtherBinaryFile(filePath: string): boolean {
+function isOtherBinaryFile(filePath: string): boolean {
   const ext = filePath.split('.').pop()?.toLowerCase() || '';
   return ['pdf', 'zip', 'tar', 'gz', '7z', 'rar', 'mp4', 'mp3', 'mov', 'avi',
     'woff', 'woff2', 'ttf', 'eot', 'otf', 'exe', 'dll', 'so', 'dylib',
@@ -815,7 +815,7 @@ export function getActiveSuggestionIndex(): number {
   return -1;
 }
 
-export function selectSuggestion(index: number) {
+function selectSuggestion(index: number) {
   const container = getFileSuggestionsContainer();
   if (!container) return;
   const items = container.querySelectorAll('.file-suggestion-item');
@@ -826,7 +826,7 @@ export function selectSuggestion(index: number) {
   }
 }
 
-export function getCurrentAtFilter(): { before: string; filter: string } | null {
+function getCurrentAtFilter(): { before: string; filter: string } | null {
   const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
   if (!textarea) return null;
 
@@ -859,7 +859,7 @@ export async function handleFileSuggestionInput() {
   showFileSuggestions(files, atInfo.filter);
 }
 
-export function insertFileReference(filePath: string) {
+function insertFileReference(filePath: string) {
   const textarea = document.querySelector<HTMLTextAreaElement>('#message-input');
   if (!textarea) return;
 
@@ -972,7 +972,7 @@ export function showImportMenu(anchor: HTMLElement): void {
   }
 }
 
-export async function handleImportExternalFile(): Promise<void> {
+async function handleImportExternalFile(): Promise<void> {
   const projectDir = getEffectiveProjectDir();
   if (!projectDir) {
     showCopyToastMsg('请先选择工作目录');
@@ -1024,7 +1024,7 @@ export async function handleImportExternalFile(): Promise<void> {
   }
 }
 
-export async function handleImportExternalFolder(): Promise<void> {
+async function handleImportExternalFolder(): Promise<void> {
   const projectDir = getEffectiveProjectDir();
   if (!projectDir) {
     showCopyToastMsg('请先选择工作目录');

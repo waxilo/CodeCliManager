@@ -51,7 +51,7 @@ export function syncActiveProjectDir(): void {
   syncStatusBarSections();
 }
 
-export function setMainBalanceBarContent(profileId: string, label: string, value: string): void {
+function setMainBalanceBarContent(profileId: string, label: string, value: string): void {
   appState.mainBalanceCache = { profileId, label, value };
   const bar = getMainBalanceBarEl();
   if (!bar) return;
@@ -70,7 +70,7 @@ export function clearMainBalanceBarCache(): void {
   syncStatusBarSections();
 }
 
-export async function refreshMainBalanceBar(): Promise<void> {
+async function refreshMainBalanceBar(): Promise<void> {
   const bar = getMainBalanceBarEl();
   if (!bar) return;
 
