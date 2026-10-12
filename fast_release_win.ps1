@@ -1,4 +1,4 @@
-# ──────────────────────────────────────────────────────────
+﻿# ──────────────────────────────────────────────────────────
 # fast_release_win.ps1
 # 一键发布：递增版本 → 提交 → 同步远程 → 推送 → 打 tag → 触发远程 Release 构建
 # ──────────────────────────────────────────────────────────
@@ -36,7 +36,8 @@ function Sync-RemoteBranch {
 }
 
 function Read-Version {
-    $content = Get-Content $TAURI_CONF -Raw
+    # ReadAllText 默认按 UTF-8 解码；Windows PowerShell 5.1 的 Get-Content 会按 ANSI(GBK) 读取无 BOM 的 UTF-8 文件，导致中文注释乱码。
+    $content = [System.IO.File]::ReadAllText((Resolve-Path $TAURI_CONF))
     if ($content -match '"version"\s*:\s*"([^"]*)"') {
         return $Matches[1]
     }
@@ -54,7 +55,7 @@ function Write-Version {
     param([string]$ver)
 
     # tauri.conf.json  (first "version" field)
-    $c = Get-Content $TAURI_CONF -Raw
+    $c = [System.IO.File]::ReadAllText((Resolve-Path $TAURI_CONF))
     $c = $c -replace '("version"\s*:\s*)"[^"]*"', "`$1`"$ver`""
     [System.IO.File]::WriteAllText((Resolve-Path $TAURI_CONF), $c)
 
@@ -63,14 +64,14 @@ function Write-Version {
     Assert-GitOK 'update npm versions'
 
     # Cargo.toml  (top-level version = "...")
-    $c = Get-Content $CARGO_TOML -Raw
+    $c = [System.IO.File]::ReadAllText((Resolve-Path $CARGO_TOML))
     $c = $c -replace '(?m)^(version\s*=\s*)"[^"]*"', "`$1`"$ver`""
     [System.IO.File]::WriteAllText((Resolve-Path $CARGO_TOML), $c)
 
     # Cargo.lock  (version under name = "codecli-manager")
     $lockFile = 'src-tauri/Cargo.lock'
     if (Test-Path $lockFile) {
-        $lines = Get-Content $lockFile
+        $lines = [System.IO.File]::ReadAllLines((Resolve-Path $lockFile))
         $inTarget = $false
         for ($i = 0; $i -lt $lines.Count; $i++) {
             if ($lines[$i] -match '^name\s*=\s*"codecli-manager"') {
