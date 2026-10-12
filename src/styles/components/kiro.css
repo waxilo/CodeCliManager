@@ -25,35 +25,26 @@
   min-width: 0;
 }
 
-/* 页面框架：内边距 / 内容列上限 / 页脚固定方式与 .api-config-view、.settings-update-view
-   共用 --page-padding 与 --page-max-width 两个令牌，四页切换时不再有跳变。 */
+/* 页面框架：整页统一滚动（.kiro-view 自身 overflow-y:auto），内容不再套
+   包装容器、也不限宽 1100px —— 各区块直接铺满页面，滚动条在窗口右缘。 */
 .kiro-view {
   display: flex;
   flex-direction: column;
+  gap: 12px;
   height: 100%;
   min-height: 0;
   padding: var(--page-padding);
   box-sizing: border-box;
-  overflow: hidden;
+  overflow-y: auto;
 }
 
 .kiro-view .settings-header {
   flex-shrink: 0;
-  max-width: var(--page-max-width);
+  margin-bottom: 0;
 }
 
-/* 内容区独立滚动、页脚固定 —— 与 API 配置页同一行为。
-   原先是 .kiro-view 整体 overflow:auto，页脚被推到内容之后、要滚到底才看得见。 */
-.kiro-layout {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  width: 100%;
-  max-width: var(--page-max-width);
+.kiro-view .settings-footer {
   margin-top: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
 }
 
 /* 卡片外观（边框 / 圆角 / 背景 / 阴影）统一由 theme-industrial.css 的卡片组提供，
@@ -417,13 +408,6 @@
 .kiro-footnote code,
 .kiro-access-hint code {
   font-size: 11px;
-}
-
-/* 页脚（固定在底部、不随内容滚动）的对齐方式、分隔线与间距都来自
-   settings.css 的 .settings-footer 基类；这里只补页面特有的宽度上限，
-   使页脚与页头、内容列共用同一个右缘。 */
-.kiro-view .settings-footer {
-  max-width: var(--page-max-width);
 }
 
 @media (max-width: 720px) {

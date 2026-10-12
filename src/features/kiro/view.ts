@@ -9,113 +9,111 @@ export function renderKiroViewHtml(): string {
         <button type="button" class="settings-close-btn" aria-label="返回聊天">✕</button>
       </div>
 
-      <div class="kiro-layout" id="kiro-card">
-        <section class="kiro-status-panel" data-kiro-panel="status">
-          <div class="kiro-status-main">
-            <div class="kiro-status-indicator" data-kiro-indicator="unknown" aria-hidden="true"></div>
-            <div class="kiro-status-copy">
-              <div class="kiro-status-title-row">
-                <span class="kiro-status-name">本地代理</span>
-                <span class="kiro-card-status" data-kiro-status="unknown">检测中…</span>
-              </div>
-              <p class="kiro-status-desc" data-kiro-status-desc>正在读取代理状态…</p>
+      <section class="kiro-status-panel" data-kiro-panel="status">
+        <div class="kiro-status-main">
+          <div class="kiro-status-indicator" data-kiro-indicator="unknown" aria-hidden="true"></div>
+          <div class="kiro-status-copy">
+            <div class="kiro-status-title-row">
+              <span class="kiro-status-name">本地代理</span>
+              <span class="kiro-card-status" data-kiro-status="unknown">检测中…</span>
             </div>
+            <p class="kiro-status-desc" data-kiro-status-desc>正在读取代理状态…</p>
           </div>
-          <button type="button" class="settings-btn-primary kiro-toggle-btn" data-kiro-running="false" disabled>启动</button>
+        </div>
+        <button type="button" class="settings-btn-primary kiro-toggle-btn" data-kiro-running="false" disabled>启动</button>
 
-        </section>
+      </section>
 
-        <section class="kiro-metrics" aria-label="代理概览">
-          <div class="kiro-metric">
-            <span class="kiro-metric-label">代理地址</span>
-            <code class="kiro-metric-value" data-kiro-port>未运行</code>
+      <section class="kiro-metrics" aria-label="代理概览">
+        <div class="kiro-metric">
+          <span class="kiro-metric-label">代理地址</span>
+          <code class="kiro-metric-value" data-kiro-port>未运行</code>
+        </div>
+        <div class="kiro-metric">
+          <div class="kiro-metric-head">
+            <span class="kiro-metric-label">Token</span>
+            <button type="button" class="kiro-link-btn kiro-token-refresh" title="刷新共享 SSO 凭据">刷新</button>
           </div>
-          <div class="kiro-metric">
-            <div class="kiro-metric-head">
-              <span class="kiro-metric-label">Token</span>
-              <button type="button" class="kiro-link-btn kiro-token-refresh" title="刷新共享 SSO 凭据">刷新</button>
-            </div>
-            <span class="kiro-metric-value" data-kiro-expires>—</span>
+          <span class="kiro-metric-value" data-kiro-expires>—</span>
+        </div>
+        <div class="kiro-metric">
+          <div class="kiro-metric-head">
+            <span class="kiro-metric-label">账户额度</span>
+            <button type="button" class="kiro-link-btn kiro-usage-refresh" title="刷新额度">刷新</button>
           </div>
-          <div class="kiro-metric">
-            <div class="kiro-metric-head">
-              <span class="kiro-metric-label">账户额度</span>
-              <button type="button" class="kiro-link-btn kiro-usage-refresh" title="刷新额度">刷新</button>
-            </div>
-            <span class="kiro-metric-value kiro-metric-value-usage" data-kiro-usage>—</span>
-          </div>
-        </section>
+          <span class="kiro-metric-value kiro-metric-value-usage" data-kiro-usage>—</span>
+        </div>
+      </section>
 
-        <section class="kiro-meta" aria-label="凭据信息">
-          <div class="kiro-meta-row">
-            <span class="kiro-meta-label">凭据</span>
-            <span class="kiro-meta-value" data-kiro-auth title="">—</span>
-          </div>
-          <div class="kiro-meta-row" data-kiro-arn-row hidden>
-            <span class="kiro-meta-label">Profile</span>
-            <span class="kiro-meta-value kiro-meta-value-mono" data-kiro-arn title="">—</span>
-          </div>
-        </section>
+      <section class="kiro-meta" aria-label="凭据信息">
+        <div class="kiro-meta-row">
+          <span class="kiro-meta-label">凭据</span>
+          <span class="kiro-meta-value" data-kiro-auth title="">—</span>
+        </div>
+        <div class="kiro-meta-row" data-kiro-arn-row hidden>
+          <span class="kiro-meta-label">Profile</span>
+          <span class="kiro-meta-value kiro-meta-value-mono" data-kiro-arn title="">—</span>
+        </div>
+      </section>
 
-        <section class="kiro-models" data-kiro-models>
-          <button type="button" class="kiro-model-entry" data-kiro-model-summary-btn>
-            <div class="kiro-model-entry-copy">
-              <span class="kiro-model-entry-title">模型配置</span>
-              <span class="kiro-model-entry-summary" data-kiro-model-summary>点击配置展示与自定义模型</span>
-            </div>
-            <span class="kiro-model-entry-chevron" aria-hidden="true">›</span>
+      <section class="kiro-models" data-kiro-models>
+        <button type="button" class="kiro-model-entry" data-kiro-model-summary-btn>
+          <div class="kiro-model-entry-copy">
+            <span class="kiro-model-entry-title">模型配置</span>
+            <span class="kiro-model-entry-summary" data-kiro-model-summary>点击配置展示与自定义模型</span>
+          </div>
+          <span class="kiro-model-entry-chevron" aria-hidden="true">›</span>
+        </button>
+        <p class="kiro-models-hint" data-kiro-models-hint>同步后可在聊天输入框快捷选择模型。</p>
+      </section>
+
+      <section class="kiro-access" aria-label="外部接入">
+        <div class="kiro-access-head">
+          <div class="kiro-access-head-copy">
+            <span class="kiro-access-title">外部接入</span>
+            <span class="kiro-access-desc" data-kiro-access-desc>
+              启动代理后复制到其它 Agent，即可复用本机 Kiro 额度
+            </span>
+          </div>
+          <button type="button" class="kiro-link-btn kiro-access-refresh" title="刷新接入信息">刷新</button>
+        </div>
+
+        <div class="kiro-access-row">
+          <span class="kiro-access-label">接口地址</span>
+          <code class="kiro-access-value" data-kiro-access-base>未运行</code>
+          <button type="button" class="kiro-copy-btn" data-kiro-copy="base_url" disabled>复制</button>
+        </div>
+
+        <div class="kiro-access-row">
+          <span class="kiro-access-label">密钥</span>
+          <code class="kiro-access-value" data-kiro-access-key>启动代理后生成</code>
+          <button type="button" class="kiro-copy-btn" data-kiro-copy="api_key" disabled>复制</button>
+        </div>
+
+        <div class="kiro-access-row">
+          <span class="kiro-access-label">模型</span>
+          <code class="kiro-access-value" data-kiro-access-model>—</code>
+          <button type="button" class="kiro-copy-btn" data-kiro-copy="model" disabled>复制</button>
+        </div>
+
+        <div class="kiro-access-actions">
+          <button type="button" class="settings-btn-secondary kiro-copy-preset" data-kiro-copy="env" disabled>
+            复制环境变量
           </button>
-          <p class="kiro-models-hint" data-kiro-models-hint>同步后可在聊天输入框快捷选择模型。</p>
-        </section>
+          <button type="button" class="settings-btn-secondary kiro-copy-preset" data-kiro-copy="json" disabled>
+            复制 settings.json 片段
+          </button>
+          <button type="button" class="kiro-link-btn kiro-key-reset">重置密钥</button>
+        </div>
 
-        <section class="kiro-access" aria-label="外部接入">
-          <div class="kiro-access-head">
-            <div class="kiro-access-head-copy">
-              <span class="kiro-access-title">外部接入</span>
-              <span class="kiro-access-desc" data-kiro-access-desc>
-                启动代理后复制到其它 Agent，即可复用本机 Kiro 额度
-              </span>
-            </div>
-            <button type="button" class="kiro-link-btn kiro-access-refresh" title="刷新接入信息">刷新</button>
-          </div>
-
-          <div class="kiro-access-row">
-            <span class="kiro-access-label">接口地址</span>
-            <code class="kiro-access-value" data-kiro-access-base>未运行</code>
-            <button type="button" class="kiro-copy-btn" data-kiro-copy="base_url" disabled>复制</button>
-          </div>
-
-          <div class="kiro-access-row">
-            <span class="kiro-access-label">密钥</span>
-            <code class="kiro-access-value" data-kiro-access-key>启动代理后生成</code>
-            <button type="button" class="kiro-copy-btn" data-kiro-copy="api_key" disabled>复制</button>
-          </div>
-
-          <div class="kiro-access-row">
-            <span class="kiro-access-label">模型</span>
-            <code class="kiro-access-value" data-kiro-access-model>—</code>
-            <button type="button" class="kiro-copy-btn" data-kiro-copy="model" disabled>复制</button>
-          </div>
-
-          <div class="kiro-access-actions">
-            <button type="button" class="settings-btn-secondary kiro-copy-preset" data-kiro-copy="env" disabled>
-              复制环境变量
-            </button>
-            <button type="button" class="settings-btn-secondary kiro-copy-preset" data-kiro-copy="json" disabled>
-              复制 settings.json 片段
-            </button>
-            <button type="button" class="kiro-link-btn kiro-key-reset">重置密钥</button>
-          </div>
-
-          <p class="kiro-access-hint">
-            仅监听 <code>127.0.0.1</code>，供本机 Agent 使用；密钥保存在本机、重启后不变，重置后旧配置立即失效。
-          </p>
-        </section>
-
-        <p class="kiro-footnote">
-          开启后自动接入 Claude Code；关闭后恢复原 API 配置。凭据与 Kiro IDE / <code>kiro-cli</code> 共用，首次请先登录。
+        <p class="kiro-access-hint">
+          仅监听 <code>127.0.0.1</code>，供本机 Agent 使用；密钥保存在本机、重启后不变，重置后旧配置立即失效。
         </p>
-      </div>
+      </section>
+
+      <p class="kiro-footnote">
+        开启后自动接入 Claude Code；关闭后恢复原 API 配置。凭据与 Kiro IDE / <code>kiro-cli</code> 共用，首次请先登录。
+      </p>
 
       <div class="settings-footer">
         <div class="settings-footer-actions">

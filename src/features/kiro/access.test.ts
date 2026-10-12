@@ -26,7 +26,7 @@ function runningAccess(overrides: Partial<KiroAccessData> = {}): KiroAccessData 
 }
 
 function query(selector: string): HTMLElement {
-  return document.querySelector<HTMLElement>(`#kiro-card ${selector}`)!;
+  return document.querySelector<HTMLElement>(`#kiro-view ${selector}`)!;
 }
 
 function copyBtn(kind: string): HTMLButtonElement {

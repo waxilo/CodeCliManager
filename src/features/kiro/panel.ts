@@ -25,7 +25,7 @@ let kiroUsageTimer: number | null = null;
 let isTogglingKiroProxy = false;
 
 export function setKiroUsageText(text: string) {
-  const el = document.querySelector('#kiro-card [data-kiro-usage]') as HTMLElement | null;
+  const el = document.querySelector('#kiro-view [data-kiro-usage]') as HTMLElement | null;
   if (el) el.textContent = text;
 }
 
@@ -33,7 +33,7 @@ export async function refreshKiroUsage(): Promise<void> {
   if (kiroUsageRequest) return kiroUsageRequest;
 
   const requestId = appState.kiroUsageGuard.next();
-  const refreshBtn = document.querySelector('#kiro-card .kiro-usage-refresh') as HTMLButtonElement | null;
+  const refreshBtn = document.querySelector('#kiro-view .kiro-usage-refresh') as HTMLButtonElement | null;
   if (refreshBtn) refreshBtn.disabled = true;
   setKiroUsageText('查询中…');
 
@@ -109,8 +109,8 @@ function shortenAuthSource(raw: string): { label: string; title: string } {
 
 export function renderKiroModels(modelsState: KiroModelsStateData | null) {
   cachedKiroModels = modelsState;
-  const summary = document.querySelector('#kiro-card [data-kiro-model-summary]') as HTMLElement | null;
-  const hint = document.querySelector('#kiro-card [data-kiro-models-hint]') as HTMLElement | null;
+  const summary = document.querySelector('#kiro-view [data-kiro-model-summary]') as HTMLElement | null;
+  const hint = document.querySelector('#kiro-view [data-kiro-models-hint]') as HTMLElement | null;
   if (!summary) return;
 
   const running = Boolean(modelsState?.running ?? appState.kiroStatus?.running);
@@ -176,7 +176,7 @@ function isKiroCopyEnabled(access: KiroAccessData | null, kind: string): boolean
 }
 
 function syncKiroCopyButtons(access: KiroAccessData | null) {
-  const card = document.querySelector('#kiro-card');
+  const card = document.querySelector('#kiro-view');
   if (!card) return;
   card.querySelectorAll<HTMLButtonElement>('[data-kiro-copy]').forEach((btn) => {
     btn.disabled = !isKiroCopyEnabled(access, btn.dataset.kiroCopy || '');
@@ -186,7 +186,7 @@ function syncKiroCopyButtons(access: KiroAccessData | null) {
 /** 把后端 kiro_proxy_access 结果渲染到「外部接入」区块 */
 export function renderKiroAccess(access: KiroAccessData | null) {
   cachedKiroAccess = access;
-  const card = document.querySelector('#kiro-card');
+  const card = document.querySelector('#kiro-view');
   if (!card) return;
 
   const running = Boolean(access?.running);
@@ -383,7 +383,7 @@ export function renderKiroCard(status: KiroStatusData | null) {
     syncKiroToolbarEntry(prevAvailable, nextAvailable, prevRunning, nextRunning);
   }
 
-  const card = document.querySelector('#kiro-card');
+  const card = document.querySelector('#kiro-view');
   if (!card || !status) return;
 
   const statusEl = card.querySelector('[data-kiro-status]') as HTMLElement | null;
@@ -483,7 +483,7 @@ export async function refreshKiroStatus(): Promise<void> {
 }
 
 export async function refreshKiroToken(): Promise<void> {
-  const btn = document.querySelector('#kiro-card .kiro-token-refresh') as HTMLButtonElement | null;
+  const btn = document.querySelector('#kiro-view .kiro-token-refresh') as HTMLButtonElement | null;
   if (btn) {
     btn.disabled = true;
     btn.textContent = '刷新中…';
@@ -500,7 +500,7 @@ export async function refreshKiroToken(): Promise<void> {
     showToast('刷新 Kiro 凭据失败: ' + String(e));
     await refreshKiroStatus();
   } finally {
-    const current = document.querySelector('#kiro-card .kiro-token-refresh') as HTMLButtonElement | null;
+    const current = document.querySelector('#kiro-view .kiro-token-refresh') as HTMLButtonElement | null;
     if (current) {
       current.disabled = false;
       current.textContent = '刷新';
@@ -511,7 +511,7 @@ export async function refreshKiroToken(): Promise<void> {
 export async function toggleKiroProxy(): Promise<void> {
   if (isTogglingKiroProxy) return;
   isTogglingKiroProxy = true;
-  const btn = document.querySelector('#kiro-card .kiro-toggle-btn') as HTMLButtonElement | null;
+  const btn = document.querySelector('#kiro-view .kiro-toggle-btn') as HTMLButtonElement | null;
   if (btn) {
     btn.disabled = true;
     btn.textContent = '处理中…';
@@ -533,7 +533,7 @@ export async function toggleKiroProxy(): Promise<void> {
     await refreshKiroStatus();
   } finally {
     isTogglingKiroProxy = false;
-    const currentBtn = document.querySelector('#kiro-card .kiro-toggle-btn') as HTMLButtonElement | null;
+    const currentBtn = document.querySelector('#kiro-view .kiro-toggle-btn') as HTMLButtonElement | null;
     if (currentBtn) {
       const running = Boolean(appState.kiroStatus?.running);
       currentBtn.disabled = false;
