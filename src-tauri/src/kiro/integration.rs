@@ -244,15 +244,30 @@ pub(crate) fn ensure_kiro_proxy_api_key() -> Result<String, String> {
     })
 }
 
-/// 当前生效的代理密钥：运行中取内存副本，未运行取持久化值。
+/// 当前生效的代理密钥。
+///
+/// 读取顺序：**内存副本优先，持久化值兜底**。
+///
+/// 这里刻意不以 `is_proxy_running` 作为分支条件：`start_kiro_proxy` 里
+/// 「启动线程 → 写内存 key/port」之间有一个可观测窗口 —— 线程一 spawn 出来
+/// `is_proxy_running` 就为 true，而内存 key 还没写入。若此时按「运行中只读内存副本」
+/// 取值，就会拿到空密钥，`has_api_key` 变 false 导致前端把复制按钮置灰，
+/// 用户看到的现象正是「打开页面后要先重开一次才能复制密钥和链接」。
+/// 内存副本为空时回退到持久化值，行为更稳且与「密钥已持久化」的既有设计一致。
 fn current_kiro_proxy_key(state: &KiroProxyState) -> Option<String> {
-    if is_proxy_running(state) {
-        return state.key.lock().ok().and_then(|key| key.clone());
-    }
-    load_kiro_proxy_prefs()
-        .proxy_api_key
+    let in_memory = state
+        .key
+        .lock()
+        .ok()
+        .and_then(|key| key.clone())
         .map(|key| key.trim().to_string())
-        .filter(|key| !key.is_empty())
+        .filter(|key| !key.is_empty());
+    in_memory.or_else(|| {
+        load_kiro_proxy_prefs()
+            .proxy_api_key
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+    })
 }
 
 // `is_kiro_locally_available` 定义在上方，与 KiroStatus 相邻便于阅读。
@@ -741,12 +756,18 @@ pub(crate) struct KiroProxyAccess {
     pub(crate) running: bool,
     /// 代理实际监听端口；未运行时为 None（端口被占会自动 +1，无法预测）
     pub(crate) port: Option<u16>,
-    /// 仅在代理运行时有值
+    /// Anthropic 协议入口：`http://127.0.0.1:{port}`（Claude Code / Anthropic SDK 用）
     pub(crate) base_url: String,
+    /// OpenAI 协议入口：`http://127.0.0.1:{port}/openai/v1`（OpenAI SDK / 兼容客户端用）
+    pub(crate) openai_base_url: String,
     pub(crate) api_key_masked: String,
     pub(crate) has_api_key: bool,
     pub(crate) model: String,
 }
+
+/// OpenAI 兼容入口的路径前缀。与 `server.rs` 的路由保持单一事实源 —— 改这里必须同步改路由，
+/// 因此两者共用本常量而非各写一份字面量。
+pub(crate) const KIRO_OPENAI_PATH_PREFIX: &str = "/openai/v1";
 
 pub(crate) fn build_kiro_proxy_access(
     state: &KiroProxyState,
@@ -758,11 +779,13 @@ pub(crate) fn build_kiro_proxy_access(
         None
     };
     let key = current_kiro_proxy_key(state);
+    let origin = port.map(|port| format!("http://127.0.0.1:{port}"));
     Ok(KiroProxyAccess {
         running,
         port,
-        base_url: port
-            .map(|port| format!("http://127.0.0.1:{port}"))
+        base_url: origin.clone().unwrap_or_default(),
+        openai_base_url: origin
+            .map(|origin| format!("{origin}{KIRO_OPENAI_PATH_PREFIX}"))
             .unwrap_or_default(),
         api_key_masked: key.as_deref().map(mask_api_key_for_display).unwrap_or_default(),
         has_api_key: key.is_some(),
@@ -778,27 +801,58 @@ pub fn kiro_proxy_access(
     build_kiro_proxy_access(&state)
 }
 
+/// 该复制类型是否需要读取明文密钥。
+///
+/// 抽成独立函数是为了让「哪些 kind 依赖密钥」只有一处定义：前端
+/// `isKiroCopyEnabled` 用同一判据决定按钮是否可点，后端用它决定是否读密钥。
+/// 两边一旦漂移，就会出现「按钮可点但点了报错」或「按钮禁用但其实能复制」。
+fn kiro_access_kind_needs_key(kind: &str) -> bool {
+    matches!(
+        kind,
+        "api_key" | "env" | "json" | "openai_env" | "openai_json"
+    )
+}
+
 /// 组装要写入剪贴板的接入文本（密钥明文只在后端流转）。
-/// kind: base_url | api_key | model | env | json
+/// kind: base_url | openai_base_url | api_key | model | env | json | openai_env | openai_json
+///
+/// 只有真正需要密钥的 kind 才去读取密钥：地址 / 模型这类不依赖密钥的复制项，
+/// 在密钥缺失时也必须可用（否则前端把按钮置为可点、后端却报错，用户看到的是
+/// 「点复制没反应 / 弹错误」）。
 fn build_kiro_access_text(state: &KiroProxyState, kind: &str) -> Result<String, String> {
+    let kind = kind.trim();
     let access = build_kiro_proxy_access(state)?;
     if !access.running {
         return Err("请先启动 Kiro 代理，再复制接入信息".to_string());
     }
-    let key = current_kiro_proxy_key(state)
-        .ok_or_else(|| "Kiro 代理密钥不可用，请重新启动代理".to_string())?;
-    format_kiro_access_text(kind, &access.base_url, &key, &access.model)
+
+    let key = if kiro_access_kind_needs_key(kind) {
+        current_kiro_proxy_key(state)
+            .ok_or_else(|| "Kiro 代理密钥不可用，请重新启动代理".to_string())?
+    } else {
+        String::new()
+    };
+
+    format_kiro_access_text(
+        kind,
+        &access.base_url,
+        &access.openai_base_url,
+        &key,
+        &access.model,
+    )
 }
 
 /// 纯文本格式化（与代理状态解耦，便于单测）。
 fn format_kiro_access_text(
     kind: &str,
     base_url: &str,
+    openai_base_url: &str,
     key: &str,
     model: &str,
 ) -> Result<String, String> {
     Ok(match kind {
         "base_url" => base_url.to_string(),
+        "openai_base_url" => openai_base_url.to_string(),
         "api_key" => key.to_string(),
         "model" => model.to_string(),
         // 通用 .env / shell 变量形式，多数 CLI Agent 可直接使用
@@ -812,6 +866,17 @@ fn format_kiro_access_text(
                 "ANTHROPIC_AUTH_TOKEN": key,
                 "ANTHROPIC_MODEL": model,
             }
+        }))
+        .map_err(|error| format!("生成配置片段失败: {error}"))?,
+        // OpenAI SDK / 兼容客户端的通用变量名（openai-python、LangChain、vLLM 客户端等）
+        "openai_env" => format!(
+            "OPENAI_BASE_URL={openai_base_url}\nOPENAI_API_KEY={key}\nOPENAI_MODEL={model}"
+        ),
+        // 同样内容的 dotenv / JSON 形态，便于贴进配置文件
+        "openai_json" => serde_json::to_string_pretty(&serde_json::json!({
+            "base_url": openai_base_url,
+            "api_key": key,
+            "model": model,
         }))
         .map_err(|error| format!("生成配置片段失败: {error}"))?,
         other => return Err(format!("不支持的复制类型: {other}")),
@@ -1137,28 +1202,29 @@ mod tests {
     use super::*;
 
     const BASE_URL: &str = "http://127.0.0.1:5050";
+    const OPENAI_BASE_URL: &str = "http://127.0.0.1:5050/openai/v1";
     const KEY: &str = "ccm-kiro-test1234";
     const MODEL: &str = "claude-opus-5";
 
     #[test]
     fn format_access_text_single_fields() {
         assert_eq!(
-            format_kiro_access_text("base_url", BASE_URL, KEY, MODEL).unwrap(),
+            format_kiro_access_text("base_url", BASE_URL, OPENAI_BASE_URL, KEY, MODEL).unwrap(),
             BASE_URL
         );
         assert_eq!(
-            format_kiro_access_text("api_key", BASE_URL, KEY, MODEL).unwrap(),
+            format_kiro_access_text("api_key", BASE_URL, OPENAI_BASE_URL, KEY, MODEL).unwrap(),
             KEY
         );
         assert_eq!(
-            format_kiro_access_text("model", BASE_URL, KEY, MODEL).unwrap(),
+            format_kiro_access_text("model", BASE_URL, OPENAI_BASE_URL, KEY, MODEL).unwrap(),
             MODEL
         );
     }
 
     #[test]
     fn format_access_text_env_snippet() {
-        let text = format_kiro_access_text("env", BASE_URL, KEY, MODEL).unwrap();
+        let text = format_kiro_access_text("env", BASE_URL, OPENAI_BASE_URL, KEY, MODEL).unwrap();
         assert_eq!(
             text,
             "ANTHROPIC_BASE_URL=http://127.0.0.1:5050\nANTHROPIC_AUTH_TOKEN=ccm-kiro-test1234\nANTHROPIC_MODEL=claude-opus-5"
@@ -1167,7 +1233,7 @@ mod tests {
 
     #[test]
     fn format_access_text_json_snippet_is_valid_json() {
-        let text = format_kiro_access_text("json", BASE_URL, KEY, MODEL).unwrap();
+        let text = format_kiro_access_text("json", BASE_URL, OPENAI_BASE_URL, KEY, MODEL).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["env"]["ANTHROPIC_BASE_URL"], BASE_URL);
         assert_eq!(parsed["env"]["ANTHROPIC_AUTH_TOKEN"], KEY);
@@ -1175,9 +1241,113 @@ mod tests {
     }
 
     #[test]
+    fn format_openai_access_text_carries_openai_path_prefix() {
+        // OpenAI 入口必须是「原点 + /openai/v1」，不能退化成裸 origin，
+        // 否则 OpenAI SDK 会自带 /v1 拼成 /v1/chat/completions 而落到 Anthropic 路由上。
+        let url = format_kiro_access_text(
+            "openai_base_url",
+            BASE_URL,
+            OPENAI_BASE_URL,
+            KEY,
+            MODEL,
+        )
+        .unwrap();
+        assert_eq!(url, OPENAI_BASE_URL);
+        assert!(url.starts_with(BASE_URL));
+        assert!(url.ends_with("/openai/v1"));
+    }
+
+    #[test]
+    fn format_openai_env_uses_openai_variable_names() {
+        let text = format_kiro_access_text("openai_env", BASE_URL, OPENAI_BASE_URL, KEY, MODEL)
+            .unwrap();
+        assert_eq!(
+            text,
+            "OPENAI_BASE_URL=http://127.0.0.1:5050/openai/v1\nOPENAI_API_KEY=ccm-kiro-test1234\nOPENAI_MODEL=claude-opus-5"
+        );
+        // 不能混入 Anthropic 变量名，否则用户复制到 OpenAI 客户端后不生效
+        assert!(!text.contains("ANTHROPIC"));
+    }
+
+    #[test]
+    fn format_openai_json_snippet_is_valid_json() {
+        let text =
+            format_kiro_access_text("openai_json", BASE_URL, OPENAI_BASE_URL, KEY, MODEL).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["base_url"], OPENAI_BASE_URL);
+        assert_eq!(parsed["api_key"], KEY);
+        assert_eq!(parsed["model"], MODEL);
+    }
+
+    #[test]
     fn format_access_text_rejects_unknown_kind() {
-        let error = format_kiro_access_text("oauth", BASE_URL, KEY, MODEL).unwrap_err();
+        let error =
+            format_kiro_access_text("oauth", BASE_URL, OPENAI_BASE_URL, KEY, MODEL).unwrap_err();
         assert!(error.contains("oauth"));
+    }
+
+    /// 地址 / 模型不依赖密钥，密钥类 kind 才需要。
+    ///
+    /// 这个判据必须与前端 `isKiroCopyEnabled` 保持一致：前端据此把「接口地址」
+    /// 「OpenAI 地址」「模型」在无密钥时仍置为可点，后端若在这三类上强行读密钥，
+    /// 用户点下去只会拿到「密钥不可用」的错误。
+    #[test]
+    fn only_key_dependent_kinds_require_reading_the_key() {
+        for kind in ["base_url", "openai_base_url", "model"] {
+            assert!(
+                !kiro_access_kind_needs_key(kind),
+                "{kind} must not require the secret key"
+            );
+        }
+        for kind in ["api_key", "env", "json", "openai_env", "openai_json"] {
+            assert!(
+                kiro_access_kind_needs_key(kind),
+                "{kind} must require the secret key"
+            );
+        }
+        // 未知 kind 不做密钥判断（由 format_kiro_access_text 统一报错）
+        assert!(!kiro_access_kind_needs_key("oauth"));
+    }
+
+    /// 无密钥（key 传空串）时，两类 URL 与模型仍必须能正常生成文本。
+    #[test]
+    fn url_and_model_copy_work_without_a_key() {
+        let empty_key = "";
+        assert_eq!(
+            format_kiro_access_text("base_url", BASE_URL, OPENAI_BASE_URL, empty_key, MODEL)
+                .unwrap(),
+            BASE_URL
+        );
+        assert_eq!(
+            format_kiro_access_text(
+                "openai_base_url",
+                BASE_URL,
+                OPENAI_BASE_URL,
+                empty_key,
+                MODEL
+            )
+            .unwrap(),
+            OPENAI_BASE_URL
+        );
+        assert_eq!(
+            format_kiro_access_text("model", BASE_URL, OPENAI_BASE_URL, empty_key, MODEL).unwrap(),
+            MODEL
+        );
+    }
+
+    /// 两类 URL 必须是不同取值：Anthropic 是裸 origin，OpenAI 带 `/openai/v1` 前缀。
+    /// 若两者相同，OpenAI SDK 会自带 `/v1` 拼成 `/v1/chat/completions`，
+    /// 落到 Anthropic 路由上然后 404。
+    #[test]
+    fn the_two_protocol_urls_are_distinct() {
+        let anthropic =
+            format_kiro_access_text("base_url", BASE_URL, OPENAI_BASE_URL, KEY, MODEL).unwrap();
+        let openai =
+            format_kiro_access_text("openai_base_url", BASE_URL, OPENAI_BASE_URL, KEY, MODEL)
+                .unwrap();
+        assert_ne!(anthropic, openai);
+        assert!(!anthropic.ends_with("/openai/v1"));
+        assert!(openai.ends_with("/openai/v1"));
     }
 
     #[test]
@@ -1186,6 +1356,113 @@ mod tests {
         let second = generate_kiro_proxy_api_key();
         assert!(first.starts_with("ccm-kiro-"));
         assert_ne!(first, second);
+    }
+
+    /// 运行中的代理必须始终能提供密钥。
+    ///
+    /// 内存副本已写入时（`start_kiro_proxy` 写入完成后的正常态），
+    /// `current_kiro_proxy_key` 必须返回内存里的值，而不是持久化偏好
+    /// —— 内存副本才是运行期的权威来源（例如重置密钥后的新值）。
+    /// 「内存尚未写入」的启动窗口另见 `key_is_readable_in_the_startup_window`。
+    #[test]
+    fn running_proxy_always_exposes_a_key() {
+        let state = KiroProxyState::default();
+        // 真正让 is_proxy_running 为 true：跑一个不会结束的线程充当代理 accept loop
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+        {
+            let mut inner = state.inner.lock().unwrap();
+            *inner = Some(super::super::server::ProxyHandle {
+                port: 5050,
+                stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                thread: Some(handle),
+            });
+        }
+        assert!(is_proxy_running(&state), "前置条件：线程应处于运行中");
+
+        // 内存副本已写入 —— 这正是 start_kiro_proxy 的写入顺序
+        *state.key.lock().unwrap() = Some(KEY.to_string());
+        *state.port.lock().unwrap() = Some(5050);
+
+        assert_eq!(
+            current_kiro_proxy_key(&state).as_deref(),
+            Some(KEY),
+            "运行中的代理必须返回内存中的密钥，而不是回退到持久化偏好"
+        );
+
+        // 收尾：释放线程，避免测试结束后仍有存活句柄
+        let _ = release_tx.send(());
+        let taken = state.inner.lock().unwrap().take();
+        if let Some(mut h) = taken {
+            h.stop();
+        }
+    }
+
+    /// 回归：线程已进入 running，但内存密钥尚未写入（`start_kiro_proxy` 的启动窗口）。
+    ///
+    /// 这是用户报的「打开页面后要先重开一次才能复制密钥和链接」的根因形态：
+    /// `is_proxy_running` 只看线程是否结束，线程一 spawn 即为 true，而内存 key 是
+    /// 在 `start_kiro_proxy` 稍后几行才写进去的。此窗口内取值若依赖 running 分支
+    /// 就会拿到空密钥 ⇒ `hasApiKey=false` ⇒ 前端把按钮置灰。
+    /// 现在内存为空时会回退到持久化值，因此必须能取到密钥。
+    #[test]
+    fn key_is_readable_in_the_startup_window() {
+        let state = KiroProxyState::default();
+        // 让 is_proxy_running 为 true，但刻意不写内存 key —— 复刻启动窗口
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+        });
+        {
+            let mut inner = state.inner.lock().unwrap();
+            *inner = Some(super::super::server::ProxyHandle {
+                port: 5050,
+                stop: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                thread: Some(handle),
+            });
+        }
+        assert!(is_proxy_running(&state), "前置条件：线程应处于运行中");
+        assert!(
+            state.key.lock().unwrap().is_none(),
+            "前置条件：内存密钥尚未写入"
+        );
+
+        // 关键断言：启动窗口内不得出现「运行中却读不到密钥」。
+        // 内存为空 ⇒ 回退持久化值；测试机若也无持久化值，则允许 None，
+        // 但绝不允许因 running=true 而把已持久化的密钥丢掉。
+        let resolved = current_kiro_proxy_key(&state);
+        let persisted = load_kiro_proxy_prefs()
+            .proxy_api_key
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty());
+        assert_eq!(
+            resolved, persisted,
+            "启动窗口内必须能回退读到持久化密钥，而不是返回空值"
+        );
+        assert_ne!(
+            resolved, None,
+            "测试机已有持久化密钥（此前用例已生成），此处不应为空"
+        );
+
+        // 收尾
+        let _ = release_tx.send(());
+        let taken = state.inner.lock().unwrap().take();
+        if let Some(mut h) = taken {
+            h.stop();
+        }
+    }
+
+    /// 未运行但已持久化过密钥时，回退读取持久化值（复制配置到外部 Agent 后重启仍可用）。
+    #[test]
+    fn stopped_proxy_falls_back_to_persisted_key() {
+        let state = KiroProxyState::default();
+        *state.key.lock().unwrap() = None;
+        // 未运行 ⇒ 走 load_kiro_proxy_prefs 分支，不依赖内存副本
+        let resolved = current_kiro_proxy_key(&state);
+        // 测试环境无持久化偏好文件时允许为 None，但绝不能 panic
+        assert!(resolved.is_none() || resolved.as_deref().unwrap().starts_with("ccm-"));
     }
 
     #[test]

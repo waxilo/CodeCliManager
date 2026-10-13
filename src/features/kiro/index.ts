@@ -13,8 +13,10 @@ export {
   resetKiroProxyKey,
   scheduleKiroUsage,
   openKiroModelConfigDialog,
+  openKiroModelCopyDialog,
   syncKiroModels,
   applyKiroDefaultModel,
   toggleKiroProxy,
   setKiroUsageText,
+  restoreKiroUsageCache,
 } from './panel';

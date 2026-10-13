@@ -4,7 +4,7 @@ export function renderKiroViewHtml(): string {
       <div class="settings-header">
         <div>
           <h3 class="settings-title">Kiro 代理</h3>
-          <p class="settings-subtitle">将本地 Kiro 额度暴露为 Anthropic API，供 Claude Code 及其它 Agent 使用</p>
+          <p class="settings-subtitle">将本地 Kiro 额度暴露为 Anthropic / OpenAI 兼容 API，供 Claude Code 及其它 Agent 使用</p>
         </div>
         <button type="button" class="settings-close-btn" aria-label="返回聊天">✕</button>
       </div>
@@ -72,7 +72,7 @@ export function renderKiroViewHtml(): string {
           <div class="kiro-access-head-copy">
             <span class="kiro-access-title">外部接入</span>
             <span class="kiro-access-desc" data-kiro-access-desc>
-              启动代理后复制到其它 Agent，即可复用本机 Kiro 额度
+              启动代理后复制到其它 Agent，即可复用本机 Kiro 额度（支持 Anthropic 与 OpenAI 两种协议）
             </span>
           </div>
           <button type="button" class="kiro-link-btn kiro-access-refresh" title="刷新接入信息">刷新</button>
@@ -85,6 +85,12 @@ export function renderKiroViewHtml(): string {
         </div>
 
         <div class="kiro-access-row">
+          <span class="kiro-access-label">OpenAI 地址</span>
+          <code class="kiro-access-value" data-kiro-access-openai>未运行</code>
+          <button type="button" class="kiro-copy-btn" data-kiro-copy="openai_base_url" disabled>复制</button>
+        </div>
+
+        <div class="kiro-access-row">
           <span class="kiro-access-label">密钥</span>
           <code class="kiro-access-value" data-kiro-access-key>启动代理后生成</code>
           <button type="button" class="kiro-copy-btn" data-kiro-copy="api_key" disabled>复制</button>
@@ -93,7 +99,7 @@ export function renderKiroViewHtml(): string {
         <div class="kiro-access-row">
           <span class="kiro-access-label">模型</span>
           <code class="kiro-access-value" data-kiro-access-model>—</code>
-          <button type="button" class="kiro-copy-btn" data-kiro-copy="model" disabled>复制</button>
+          <button type="button" class="kiro-copy-btn" data-kiro-model-picker disabled>选择模型</button>
         </div>
 
         <div class="kiro-access-actions">
@@ -103,23 +109,24 @@ export function renderKiroViewHtml(): string {
           <button type="button" class="settings-btn-secondary kiro-copy-preset" data-kiro-copy="json" disabled>
             复制 settings.json 片段
           </button>
+          <button type="button" class="settings-btn-secondary kiro-copy-preset" data-kiro-copy="openai_env" disabled>
+            复制 OpenAI 环境变量
+          </button>
+          <button type="button" class="settings-btn-secondary kiro-copy-preset" data-kiro-copy="openai_json" disabled>
+            复制 OpenAI 配置
+          </button>
           <button type="button" class="kiro-link-btn kiro-key-reset">重置密钥</button>
         </div>
 
         <p class="kiro-access-hint">
           仅监听 <code>127.0.0.1</code>，供本机 Agent 使用；密钥保存在本机、重启后不变，重置后旧配置立即失效。
+          同一端口同时提供 Anthropic（<code>/v1/messages</code>）与 OpenAI（<code>/openai/v1</code>）两套协议。
         </p>
       </section>
 
       <p class="kiro-footnote">
         开启后自动接入 Claude Code；关闭后恢复原 API 配置。凭据与 Kiro IDE / <code>kiro-cli</code> 共用，首次请先登录。
       </p>
-
-      <div class="settings-footer">
-        <div class="settings-footer-actions">
-          <button type="button" class="settings-btn-secondary settings-close-footer">返回</button>
-        </div>
-      </div>
     </div>
   `;
 }

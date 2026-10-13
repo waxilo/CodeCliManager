@@ -6,11 +6,13 @@ import { renderKiroViewHtml } from './view';
 import {
   copyKiroAccess,
   openKiroModelConfigDialog,
+  openKiroModelCopyDialog,
   refreshKiroAccess,
   refreshKiroStatus,
   refreshKiroModels,
   refreshKiroToken,
   resetKiroProxyKey,
+  restoreKiroUsageCache,
   scheduleKiroUsage,
   toggleKiroProxy,
 } from './panel';
@@ -113,13 +115,17 @@ export async function mountKiroView() {
   appState.kiroEscapeHandler = onEscapeKey;
   document.addEventListener('keydown', onEscapeKey);
 
+  // 先回填上次已知的额度：overlay 重建后 DOM 会回到初始的 `—`，
+  // 这一步让旧值立刻出现，随后的网络刷新只做原地替换（用户无感）。
+  // 必须放在 kiroMounted 早退之前 —— 复用节点时它是幂等的，重建节点时它是必需的。
+  restoreKiroUsageCache();
+
   // 管理壳节点缓存复用：按钮监听已在首次挂载绑定，二次挂载只重绑 Escape。
   // 与 api-config/mcp 的 dataset 守卫一致，避免同一节点重复 addEventListener。
   if (view.dataset.kiroMounted === '1') return;
   view.dataset.kiroMounted = '1';
 
   view.querySelector('.settings-close-btn')?.addEventListener('click', close);
-  view.querySelector('.settings-close-footer')?.addEventListener('click', close);
   view.querySelector('.kiro-toggle-btn')?.addEventListener('click', () => {
     void toggleKiroProxy();
   });
@@ -137,6 +143,9 @@ export async function mountKiroView() {
       const kind = btn.dataset.kiroCopy as KiroAccessCopyKind | undefined;
       if (kind) void copyKiroAccess(kind);
     });
+  });
+  view.querySelector('[data-kiro-model-picker]')?.addEventListener('click', () => {
+    openKiroModelCopyDialog();
   });
   view.querySelector('.kiro-key-reset')?.addEventListener('click', () => {
     void resetKiroProxyKey();

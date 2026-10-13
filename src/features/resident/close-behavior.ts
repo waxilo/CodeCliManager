@@ -18,19 +18,10 @@ export function getCloseBehavior(): CloseBehavior {
 }
 
 /**
- * 用户在关闭弹窗里勾了「记住我的选择」。
- * 本地与后端一起写：后端持有权威副本，命中「最小化到托盘 / 直接退出」时无需 IPC 往返。
- */
-export function persistCloseBehavior(behavior: CloseBehavior): void {
-  localStorage.setItem(STORAGE_KEY, behavior);
-  void api.setCloseBehavior(behavior).catch((error) => {
-    console.error('[resident] 同步关闭行为到后端失败:', error);
-  });
-}
-
-/**
  * 后端在托盘右键菜单里改了关闭行为。
- * 只回写本地 —— 后端是改动发起方，再推回去只会来回抖动。
+ *
+ * 这是**唯一**的偏好写入路径：关闭弹窗不再提供「记住我的选择」，
+ * 用户想改偏好一律走托盘菜单，避免两个入口各写一份、互不感知。
  */
 export function syncCloseBehaviorFromBackend(value: unknown): void {
   if (!isCloseBehavior(value)) {

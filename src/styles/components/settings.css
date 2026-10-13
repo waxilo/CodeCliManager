@@ -311,6 +311,21 @@
   background: var(--color-danger-bg-hover);
 }
 
+/* 「危险」是修饰符：与 .settings-btn-primary 同时出现（Kiro 的「停止」按钮就是
+   `settings-btn-primary settings-btn-danger`）时必须盖过主色。
+   两者特异性同为 (0,1,0)，而 .settings-btn-primary 的规则排在后面，
+   原先会把 background/color 全部夺回主色 ⇒ 停止按钮和启动按钮长得一模一样
+   （真实浏览器实测：停止 bg rgb(94,106,210)、文字纯白，只在 hover 才短暂露出红色）。
+   这里用复合选择器把特异性提到 (0,2,0)，让「两个类同时挂」的组合稳定变红。 */
+.settings-btn-primary.settings-btn-danger {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+}
+
+.settings-btn-primary.settings-btn-danger:hover:not(:disabled) {
+  background: var(--color-danger-bg-hover);
+}
+
 .settings-btn-primary {
   background: var(--color-accent);
   color: var(--color-on-accent);

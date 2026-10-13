@@ -43,10 +43,6 @@
   margin-bottom: 0;
 }
 
-.kiro-view .settings-footer {
-  margin-top: 0;
-}
-
 /* 卡片外观（边框 / 圆角 / 背景 / 阴影）统一由 theme-industrial.css 的卡片组提供，
    这里只保留各自的内部布局，避免同一条属性在两处各写一份、值还不一样。 */
 .kiro-status-panel {
@@ -408,6 +404,41 @@
 .kiro-footnote code,
 .kiro-access-hint code {
   font-size: 11px;
+}
+
+/* 模型名复制弹窗：复用 model-picker 的外壳与 tile 网格，只补少量专属排版 */
+.kiro-model-copy-dialog {
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(640px, calc(100vh - 32px));
+}
+
+.kiro-model-copy-hint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  line-height: 1.4;
+}
+
+/* 过滤结果播报：视觉上淡，但必须在 DOM 里（供 aria-live 播报） */
+.kiro-model-copy-status {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-text-faint, var(--color-text-muted));
+}
+
+.kiro-model-copy-list {
+  min-height: 120px;
+  max-height: min(360px, 42vh);
+}
+
+.kiro-model-copy-tile {
+  cursor: pointer;
+}
+
+/* 复制中的短暂禁用态：避免连点导致重复写入剪贴板 */
+.kiro-model-copy-tile:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 @media (max-width: 720px) {

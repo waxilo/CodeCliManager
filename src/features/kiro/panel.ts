@@ -2,6 +2,9 @@ import { appState } from '../../state';
 import * as api from '../../api';
 import { shellApi } from '../../app/shell/api';
 import { showConfirmDialog, showToast } from '../../ui';
+import { copyTextToClipboard } from '../../utils/clipboard';
+import { KIRO_COPY_KINDS_NEEDING_KEY } from '../../types';
+import { openKiroModelCopyPicker } from './model-copy';
 import type {
   FetchedModel,
   KiroAccessCopyKind,
@@ -15,12 +18,26 @@ import { openDisplayModelsPicker } from '../models/display-models-picker';
 import { scheduleMainBalanceBar } from '../status-bar';
 
 let cachedKiroModels: KiroModelsStateData | null = null;
+/**
+ * 模型 ID → 归属方。仅用于「复制模型名称」弹窗展示与筛选。
+ * 后端 `kiro_models_state` 不带该字段，只有 `fetchApiModels` 的详情结果里有，
+ * 因此单独缓存，拉取失败时保持为空（弹窗照常可用，只是不显示归属方）。
+ */
+const fetchedOwnedBy = new Map<string, string | null>();
 let cachedKiroAccess: KiroAccessData | null = null;
 let kiroStatusRequest: Promise<KiroStatusData> | null = null;
 let kiroModelsRequest: Promise<void> | null = null;
 let kiroUsageRequest: Promise<void> | null = null;
 let kiroAccessRequest: Promise<void> | null = null;
 let kiroUsageTimer: number | null = null;
+/**
+ * 最近一次已知的账户额度文案（null = 从未查到过）。
+ *
+ * 退出 Kiro 页再进来时 DOM 会随 overlay 重建而回到初始的 `—`。有了这份缓存
+ * 就能在重新挂载时**立刻回填旧值**，再异步查新的替换 —— 用户不会再看到额度先消失。
+ * 只在拿到「真实额度」后更新；失败文案不写入，避免污染缓存。
+ */
+let cachedKiroUsageText: string | null = null;
 /** 模块级互斥：防止连点启动/停止与 render 重绘后按钮重新可点导致并发 invoke */
 let isTogglingKiroProxy = false;
 
@@ -29,22 +46,63 @@ export function setKiroUsageText(text: string) {
   if (el) el.textContent = text;
 }
 
+/**
+ * 把上次已知的额度回填到刚重建的 DOM（overlay 重建后节点回到初始的 `—`）。
+ * 无缓存时不动，交给 `refreshKiroUsage` 的冷启动占位逻辑。
+ */
+export function restoreKiroUsageCache(): void {
+  if (cachedKiroUsageText === null) return;
+  const el = document.querySelector('#kiro-view [data-kiro-usage]') as HTMLElement | null;
+  if (el) el.textContent = cachedKiroUsageText;
+}
+
+/**
+ * 丢弃额度缓存（重新挂载时不再回填旧值）。
+ *
+ * 代理重启后可能换了账号/套餐，旧额度就不再可信 —— 此时应当回到冷启动路径，
+ * 老老实实显示「查询中…」。与底栏在 profile 切换时 `clearMainBalanceBarCache`
+ * 是同一个道理：**只在「数据归属可能变了」时清，而不是每次离开页面都清**。
+ */
+export function clearKiroUsageCache(): void {
+  cachedKiroUsageText = null;
+}
+
+/**
+ * 账户额度：**先展示旧值，异步查到新值再替换**（stale-while-revalidate）。
+ *
+ * 进入 Kiro 页时 `refreshKiroStatus` 会自动触发一次额度查询。查询要走 Kiro 管理面
+ * 网络，耗时不确定；如果此时把已知额度抹成「查询中…」，用户每次进页面都会看到
+ * 额度先消失再出现 —— 而额度是低频变化的数据，旧值几乎总是可用的。
+ *
+ * 因此这里只在**从没有过任何值时**（冷启动）才显示「查询中…」占位；
+ * 已有缓存则原样保留，静默等新值到达后原地替换。刷新按钮同样在有旧值时不禁用，
+ * 避免「点一下刷新，额度先闪没了」。
+ *
+ * 失败时也遵循同一原则：有旧值就保留旧值，不把可用数据换成错误文案
+ * （与底栏 `refreshMainBalanceBar` 的失败处理一致）。
+ */
 export async function refreshKiroUsage(): Promise<void> {
   if (kiroUsageRequest) return kiroUsageRequest;
 
   const requestId = appState.kiroUsageGuard.next();
+  const hasCachedValue = cachedKiroUsageText !== null;
   const refreshBtn = document.querySelector('#kiro-view .kiro-usage-refresh') as HTMLButtonElement | null;
-  if (refreshBtn) refreshBtn.disabled = true;
-  setKiroUsageText('查询中…');
+  if (refreshBtn && !hasCachedValue) refreshBtn.disabled = true;
+  // 只有冷启动（没有任何已知额度）才需要占位提示；有旧值就让旧值留在屏幕上
+  if (!hasCachedValue) setKiroUsageText('查询中…');
 
   kiroUsageRequest = (async () => {
     try {
       const usage = await api.kiroUsage();
       if (!(appState.kiroUsageGuard.isCurrent(requestId)) || !appState.isKiroViewActive) return;
-      setKiroUsageText(formatKiroUsageText(usage));
+      const text = formatKiroUsageText(usage);
+      // 只有真实额度才写缓存 —— 占位/错误文案绝不能进缓存，否则会被当成已知旧值
+      cachedKiroUsageText = text;
+      setKiroUsageText(text);
     } catch (e) {
       if (!(appState.kiroUsageGuard.isCurrent(requestId)) || !appState.isKiroViewActive) return;
-      setKiroUsageText(`查询失败：${String(e)}`);
+      // 有旧值时保留旧值 —— 偶发失败不该把用户已知的额度抹成错误提示
+      if (!hasCachedValue) setKiroUsageText(`查询失败：${String(e)}`);
     } finally {
       if (appState.kiroUsageGuard.isCurrent(requestId) && refreshBtn) {
         refreshBtn.disabled = false;
@@ -162,17 +220,28 @@ export async function refreshKiroModels(): Promise<void> {
 /** 复制按钮对应的文案（用于 toast 说明复制了什么） */
 const KIRO_COPY_TITLES: Record<KiroAccessCopyKind, string> = {
   base_url: '接口地址',
+  openai_base_url: 'OpenAI 地址',
   api_key: '代理密钥',
   model: '模型名称',
   env: '环境变量配置',
   json: 'settings.json 片段',
+  openai_env: 'OpenAI 环境变量',
+  openai_json: 'OpenAI 配置',
 };
 
 /** 只有运行中才有可复制内容；密钥缺失时禁用依赖密钥的复制项 */
 function isKiroCopyEnabled(access: KiroAccessData | null, kind: string): boolean {
   if (!access?.running) return false;
-  if (kind === 'api_key' || kind === 'env' || kind === 'json') return access.hasApiKey;
+  const needsKey = (KIRO_COPY_KINDS_NEEDING_KEY as readonly string[]).includes(kind);
+  if (needsKey) {
+    return access.hasApiKey;
+  }
   return true;
+}
+
+/** 模型选择按钮：运行中且模型列表非空才可点（没有候选项就没有可选内容） */
+function hasSelectableKiroModels(access: KiroAccessData | null): boolean {
+  return Boolean(access?.running) && (cachedKiroModels?.models.length ?? 0) > 0;
 }
 
 function syncKiroCopyButtons(access: KiroAccessData | null) {
@@ -181,6 +250,10 @@ function syncKiroCopyButtons(access: KiroAccessData | null) {
   card.querySelectorAll<HTMLButtonElement>('[data-kiro-copy]').forEach((btn) => {
     btn.disabled = !isKiroCopyEnabled(access, btn.dataset.kiroCopy || '');
   });
+  const pickerBtn = card.querySelector<HTMLButtonElement>('[data-kiro-model-picker]');
+  if (pickerBtn) {
+    pickerBtn.disabled = !hasSelectableKiroModels(access);
+  }
 }
 
 /** 把后端 kiro_proxy_access 结果渲染到「外部接入」区块 */
@@ -191,6 +264,7 @@ export function renderKiroAccess(access: KiroAccessData | null) {
 
   const running = Boolean(access?.running);
   const baseEl = card.querySelector('[data-kiro-access-base]') as HTMLElement | null;
+  const openaiEl = card.querySelector('[data-kiro-access-openai]') as HTMLElement | null;
   const keyEl = card.querySelector('[data-kiro-access-key]') as HTMLElement | null;
   const modelEl = card.querySelector('[data-kiro-access-model]') as HTMLElement | null;
   const descEl = card.querySelector('[data-kiro-access-desc]') as HTMLElement | null;
@@ -198,6 +272,11 @@ export function renderKiroAccess(access: KiroAccessData | null) {
   if (baseEl) {
     baseEl.textContent = running && access?.baseUrl ? access.baseUrl : '未运行';
     baseEl.title = running && access?.baseUrl ? access.baseUrl : '';
+  }
+  if (openaiEl) {
+    openaiEl.textContent =
+      running && access?.openaiBaseUrl ? access.openaiBaseUrl : '未运行';
+    openaiEl.title = running && access?.openaiBaseUrl ? access.openaiBaseUrl : '';
   }
   if (keyEl) {
     keyEl.textContent = access?.apiKeyMasked || (running ? '获取中…' : '启动代理后生成');
@@ -209,7 +288,7 @@ export function renderKiroAccess(access: KiroAccessData | null) {
   }
   if (descEl) {
     descEl.textContent = running
-      ? '复制下面字段到其它 Agent，即可复用本机 Kiro 额度'
+      ? '复制下面字段到其它 Agent，即可复用本机 Kiro 额度（Anthropic 与 OpenAI 协议共用同一密钥）'
       : '启动代理后即可复制到其它 Agent 复用本机额度';
   }
 
@@ -290,7 +369,40 @@ async function fetchKiroProxyModels(): Promise<FetchedModel[]> {
     apiKey: null,
     profileId: null,
   });
+  // 记录归属方供复制弹窗展示/筛选；详情拉取不改变可用模型集合本身
+  fetchedOwnedBy.clear();
+  for (const model of fetched) {
+    fetchedOwnedBy.set(model.id, model.ownedBy ?? null);
+  }
   return fetched;
+}
+
+/**
+ * 打开模型名复制弹窗：搜索过滤 + 单击卡片复制。
+ *
+ * 候选项取「展示 + 自定义」合并列表；若还没同步过，退回到已同步到本地的详情列表，
+ * 避免用户第一次打开时看到空弹窗。
+ */
+export function openKiroModelCopyDialog(): void {
+  if (!cachedKiroAccess?.running) {
+    showToast('请先启动 Kiro 代理');
+    return;
+  }
+
+  const models = cachedKiroModels?.models ?? [];
+  if (models.length === 0) {
+    showToast('暂无可复制的模型，请先点击「同步模型」');
+    return;
+  }
+
+  openKiroModelCopyPicker({
+    items: models.map((id) => ({ id, ownedBy: fetchedOwnedBy.get(id) ?? null })),
+    onCopy: async (modelId) => {
+      const ok = await copyTextToClipboard(modelId);
+      if (ok) showToast(`已复制模型名称：${modelId}`, 'success');
+      return ok;
+    },
+  });
 }
 
 export function openKiroModelConfigDialog(): void {
@@ -520,6 +632,9 @@ export async function toggleKiroProxy(): Promise<void> {
     if (appState.kiroStatus?.running) {
       await api.kiroStop();
     } else {
+      // 启动前丢弃旧额度：重启后可能换了账号/套餐，旧值不再可信，
+      // 让本次刷新走冷启动占位而不是回填上一轮的额度。
+      clearKiroUsageCache();
       await api.kiroStart(null);
     }
     await refreshKiroStatus();

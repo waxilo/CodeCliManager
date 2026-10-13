@@ -50,6 +50,8 @@ export type {
   KiroAccessCopyKind,
 } from './kiro';
 
+export { KIRO_COPY_KINDS_NEEDING_KEY } from './kiro';
+
 export type {
   McpServerConfig,
   McpServerEntry,

@@ -86,32 +86,37 @@ describe('后台常驻前端接线', () => {
     expect(hideToTrayMock).not.toHaveBeenCalled();
   });
 
-  it('勾选记住后落盘并同步后端', async () => {
+  it('弹窗不做偏好落盘：选什么都不改「每次询问」', async () => {
     await initWithStorage('ask');
     emitCloseRequested();
-    const checkbox = document.querySelector<HTMLInputElement>('.resident-remember-checkbox');
-    if (!checkbox) throw new Error('复选框缺失');
-    checkbox.checked = true;
+    const before = setCloseBehaviorMock.mock.calls.length;
     clickDialogButton('.confirm-btn.danger');
-    await vi.waitFor(() => expect(localStorage.getItem(STORAGE_KEY)).toBe('exit'));
-    expect(setCloseBehaviorMock).toHaveBeenLastCalledWith('exit');
-  });
-
-  it('未勾选记住则不落盘（下次仍询问）', async () => {
-    await initWithStorage('ask');
-    emitCloseRequested();
-    clickDialogButton('.confirm-btn.primary');
-    await vi.waitFor(() => expect(hideToTrayMock).toHaveBeenCalled());
+    await vi.waitFor(() => expect(quitAppMock).toHaveBeenCalledTimes(1));
+    // 偏好只由托盘菜单写；弹窗裁决不应产生任何 setCloseBehavior 调用
+    expect(setCloseBehaviorMock.mock.calls.length).toBe(before);
     expect(localStorage.getItem(STORAGE_KEY)).toBe('ask');
   });
 
-  it('取消关闭时既不隐藏也不退出', async () => {
+  it('Escape 等同「最小化到托盘」，不会误触退出', async () => {
     await initWithStorage('ask');
     emitCloseRequested();
-    clickDialogButton('.confirm-btn.cancel');
-    await vi.waitFor(() => expect(document.querySelector('.confirm-overlay')).toBeNull());
-    expect(hideToTrayMock).not.toHaveBeenCalled();
+    const target =
+      document.activeElement instanceof HTMLElement ? document.activeElement : document.body;
+    target.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    );
+    await vi.waitFor(() => expect(hideToTrayMock).toHaveBeenCalledTimes(1));
     expect(quitAppMock).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(document.querySelector('.confirm-overlay')).toBeNull());
+  });
+
+  it('没有「取消」按钮，弹窗必然给出一个裁决', async () => {
+    await initWithStorage('ask');
+    emitCloseRequested();
+    expect(document.querySelector('.confirm-btn.cancel')).toBeNull();
+    // 只剩两个出口，且都会真正执行动作
+    clickDialogButton('.confirm-btn.primary');
+    await vi.waitFor(() => expect(hideToTrayMock).toHaveBeenCalledTimes(1));
   });
 
   it('连点关闭只弹一个弹窗', async () => {

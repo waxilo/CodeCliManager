@@ -19,49 +19,53 @@ describe('关闭询问弹窗', () => {
     document.body.innerHTML = '';
   });
 
-  it('默认落在「最小化到托盘」上，且未勾选记住', async () => {
+  it('只有两个按钮：直接退出 + 最小化到托盘，默认聚焦较安全的一项', () => {
     const { overlay } = mountDialog();
-    const primary = overlay.querySelector('.confirm-btn.primary');
-    expect(primary?.textContent).toBe('最小化到托盘');
-    expect(document.activeElement).toBe(primary);
-    expect(overlay.querySelector<HTMLInputElement>('.resident-remember-checkbox')?.checked).toBe(false);
+    const buttons = [...overlay.querySelectorAll('.confirm-btn')];
+    expect(buttons.map((b) => b.textContent)).toEqual(['直接退出', '最小化到托盘']);
+    expect(overlay.querySelector('.confirm-btn.cancel')).toBeNull();
+    expect(document.activeElement).toBe(overlay.querySelector('.confirm-btn.primary'));
   });
 
-  it('点「最小化到托盘」返回 tray 选择', async () => {
+  it('不提供「记住我的选择」复选框，也不再有第二行进程说明', () => {
+    const { overlay } = mountDialog();
+    expect(overlay.querySelector('.resident-remember-checkbox')).toBeNull();
+    expect(overlay.querySelector('.confirm-sub')).toBeNull();
+  });
+
+  it('点「最小化到托盘」返回 tray', async () => {
     const { promise, overlay } = mountDialog();
     overlay.querySelector<HTMLButtonElement>('.confirm-btn.primary')?.click();
-    await expect(promise).resolves.toEqual({ choice: 'tray', remember: false });
+    await expect(promise).resolves.toBe('tray');
     expect(document.querySelector('.confirm-overlay')).toBeNull();
   });
 
-  it('点「直接退出」返回 exit 选择', async () => {
+  it('点「直接退出」返回 exit', async () => {
     const { promise, overlay } = mountDialog();
     overlay.querySelector<HTMLButtonElement>('.confirm-btn.danger')?.click();
-    await expect(promise).resolves.toEqual({ choice: 'exit', remember: false });
+    await expect(promise).resolves.toBe('exit');
+    expect(document.querySelector('.confirm-overlay')).toBeNull();
   });
 
-  it('勾选「记住我的选择」后一并带出 remember=true', async () => {
-    const { promise, overlay } = mountDialog();
-    const checkbox = overlay.querySelector<HTMLInputElement>('.resident-remember-checkbox');
-    if (!checkbox) throw new Error('复选框缺失');
-    checkbox.checked = true;
-    overlay.querySelector<HTMLButtonElement>('.confirm-btn.danger')?.click();
-    await expect(promise).resolves.toEqual({ choice: 'exit', remember: true });
-  });
-
-  it('点「取消」/ 按 Escape / 点遮罩都返回 null（窗口保持打开）', async () => {
-    const cancelActions = [
-      (overlay: HTMLElement) => overlay.querySelector<HTMLButtonElement>('.confirm-btn.cancel')?.click(),
+  it('Escape 与点遮罩都归为「最小化到托盘」，不会误触退出', async () => {
+    const dismissals = [
       () => pressEscape(),
       (overlay: HTMLElement) => overlay.click(),
     ];
-    for (const cancel of cancelActions) {
+    for (const dismiss of dismissals) {
       document.body.innerHTML = '';
       const { promise, overlay } = mountDialog();
-      cancel(overlay);
-      await expect(promise).resolves.toBeNull();
+      dismiss(overlay);
+      await expect(promise).resolves.toBe('tray');
       expect(document.querySelector('.confirm-overlay')).toBeNull();
     }
+  });
+
+  it('弹窗永不 resolve 为 null —— 没有「什么都不做」的逃逸路径', async () => {
+    const { promise, overlay } = mountDialog();
+    overlay.querySelector<HTMLButtonElement>('.confirm-btn.primary')?.click();
+    const result = await promise;
+    expect(result).not.toBeNull();
   });
 
   it('Escape 在捕获阶段被拦下，不再冒泡给外层视图', async () => {

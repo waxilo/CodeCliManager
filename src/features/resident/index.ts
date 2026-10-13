@@ -3,7 +3,6 @@ import * as api from '../../api';
 import { showCloseDialog } from './close-dialog';
 import {
   getCloseBehavior,
-  persistCloseBehavior,
   syncCloseBehaviorFromBackend,
 } from './close-behavior';
 
@@ -19,14 +18,8 @@ async function handleCloseRequested(): Promise<void> {
   if (closeDialogOpen) return;
   closeDialogOpen = true;
   try {
-    const result = await showCloseDialog();
-    // 用户取消：窗口保持打开，什么都不做
-    if (!result) return;
-
-    if (result.remember) {
-      persistCloseBehavior(result.choice);
-    }
-    if (result.choice === 'tray') {
+    const choice = await showCloseDialog();
+    if (choice === 'tray') {
       await api.hideToTray();
     } else {
       await api.quitApp();

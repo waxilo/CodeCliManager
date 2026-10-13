@@ -42,13 +42,38 @@ export interface KiroAccessData {
   running: boolean;
   /** 代理实际监听端口；未运行时为 null */
   port: number | null;
-  /** 仅在代理运行时有值 */
+  /** Anthropic 协议入口；仅在代理运行时有值 */
   baseUrl: string;
+  /** OpenAI 协议入口（origin + /openai/v1）；仅在代理运行时有值 */
+  openaiBaseUrl: string;
   /** 脱敏密钥（明文只在后端写入剪贴板） */
   apiKeyMasked: string;
   hasApiKey: boolean;
   model: string;
 }
 
-/** 可复制的接入内容：单字段 + 整段配置 */
-export type KiroAccessCopyKind = 'base_url' | 'api_key' | 'model' | 'env' | 'json';
+/** 可复制的接入内容：单字段 + 整段配置（Anthropic / OpenAI 两套协议各有一份） */
+export type KiroAccessCopyKind =
+  | 'base_url'
+  | 'openai_base_url'
+  | 'api_key'
+  | 'model'
+  | 'env'
+  | 'json'
+  | 'openai_env'
+  | 'openai_json';
+
+/**
+ * 需要明文密钥才能复制的内容类型。
+ *
+ * 必须与后端 `kiro_access_kind_needs_key` 保持一致：地址（`base_url` /
+ * `openai_base_url`）与模型不依赖密钥，在未生成密钥时也应可复制。
+ * 两侧一旦漂移，用户会看到「按钮可点但点了报错」。
+ */
+export const KIRO_COPY_KINDS_NEEDING_KEY: readonly KiroAccessCopyKind[] = [
+  'api_key',
+  'env',
+  'json',
+  'openai_env',
+  'openai_json',
+];
