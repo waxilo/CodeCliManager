@@ -1407,8 +1407,25 @@ mod tests {
     /// 在 `start_kiro_proxy` 稍后几行才写进去的。此窗口内取值若依赖 running 分支
     /// 就会拿到空密钥 ⇒ `hasApiKey=false` ⇒ 前端把按钮置灰。
     /// 现在内存为空时会回退到持久化值，因此必须能取到密钥。
+    ///
+    /// ⚠️ 持久化值由**本用例自己写入**（并在结尾还原），不依赖机器上恰好存在偏好文件。
+    /// 初版曾断言「测试机已有持久化密钥（此前用例已生成）」—— 那是**跨用例的隐式依赖**：
+    /// 本机因真实安装留下过 `kiro-proxy.json` 而通过，CI 干净 runner 上该文件不存在
+    /// ⇒ `resolved=Some(..)` vs `None` 不相等 ⇒ 整个 Release 构建在 Test Rust 步骤红。
+    /// 测试必须自带前置数据，否则就是「假绿」。
     #[test]
     fn key_is_readable_in_the_startup_window() {
+        const PERSISTED: &str = "ccm-kiro-persisted-window-test";
+
+        // 备份并写入持久化密钥（本用例自给自足的前提）
+        let original = load_kiro_proxy_prefs().proxy_api_key;
+        let persisted = PERSISTED.to_string();
+        update_kiro_proxy_prefs(|prefs| {
+            prefs.proxy_api_key = Some(persisted.clone());
+            Ok(())
+        })
+        .expect("写入持久化密钥失败");
+
         let state = KiroProxyState::default();
         // 让 is_proxy_running 为 true，但刻意不写内存 key —— 复刻启动窗口
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
@@ -1430,39 +1447,61 @@ mod tests {
         );
 
         // 关键断言：启动窗口内不得出现「运行中却读不到密钥」。
-        // 内存为空 ⇒ 回退持久化值；测试机若也无持久化值，则允许 None，
-        // 但绝不允许因 running=true 而把已持久化的密钥丢掉。
+        // 内存为空 ⇒ 必须回退读到刚写入的持久化值。
         let resolved = current_kiro_proxy_key(&state);
-        let persisted = load_kiro_proxy_prefs()
-            .proxy_api_key
-            .map(|k| k.trim().to_string())
-            .filter(|k| !k.is_empty());
         assert_eq!(
-            resolved, persisted,
+            resolved.as_deref(),
+            Some(PERSISTED),
             "启动窗口内必须能回退读到持久化密钥，而不是返回空值"
         );
-        assert_ne!(
-            resolved, None,
-            "测试机已有持久化密钥（此前用例已生成），此处不应为空"
-        );
 
-        // 收尾
+        // 收尾：释放线程
         let _ = release_tx.send(());
         let taken = state.inner.lock().unwrap().take();
         if let Some(mut h) = taken {
             h.stop();
         }
+
+        // 还原持久化值，避免污染其它用例/真实环境
+        update_kiro_proxy_prefs(|prefs| {
+            prefs.proxy_api_key = original;
+            Ok(())
+        })
+        .expect("还原持久化密钥失败");
     }
 
     /// 未运行但已持久化过密钥时，回退读取持久化值（复制配置到外部 Agent 后重启仍可用）。
+    ///
+    /// 同样**自写持久化值**：初版写成 `resolved.is_none() || starts_with("ccm-")`，
+    /// 两个分支都能过 ⇒ 无论回退逻辑是否还在，用例都绿 —— 等于没测。这里把前置数据
+    /// 显式写进去，断言才能真的盯住「未运行时回退到持久化值」这条路径。
     #[test]
     fn stopped_proxy_falls_back_to_persisted_key() {
+        const PERSISTED: &str = "ccm-kiro-persisted-stopped-test";
+
+        let original = load_kiro_proxy_prefs().proxy_api_key;
+        update_kiro_proxy_prefs(|prefs| {
+            prefs.proxy_api_key = Some(PERSISTED.to_string());
+            Ok(())
+        })
+        .expect("写入持久化密钥失败");
+
         let state = KiroProxyState::default();
         *state.key.lock().unwrap() = None;
         // 未运行 ⇒ 走 load_kiro_proxy_prefs 分支，不依赖内存副本
+        assert!(!is_proxy_running(&state), "前置条件：代理未运行");
         let resolved = current_kiro_proxy_key(&state);
-        // 测试环境无持久化偏好文件时允许为 None，但绝不能 panic
-        assert!(resolved.is_none() || resolved.as_deref().unwrap().starts_with("ccm-"));
+        assert_eq!(
+            resolved.as_deref(),
+            Some(PERSISTED),
+            "未运行时应回退读到持久化密钥"
+        );
+
+        update_kiro_proxy_prefs(|prefs| {
+            prefs.proxy_api_key = original;
+            Ok(())
+        })
+        .expect("还原持久化密钥失败");
     }
 
     #[test]
